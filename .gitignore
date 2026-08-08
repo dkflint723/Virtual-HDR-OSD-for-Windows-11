@@ -1,0 +1,5 @@
+.venv
+.uv
+.python
+__pycache__
+src/sdr_hdr_profile_creator/__pycache__
