@@ -10,7 +10,8 @@ Most HDR monitors lock or substantially reduce access to their physical OSD cont
 
 The application is intended for visual fine-tuning: correcting a slight warm/cool cast, reducing a green or magenta bias, matching HDR white balance more closely to a preferred SDR appearance, or making small tonal changes that the monitor's HDR OSD does not expose.
 
-> **Important:** Virtual HDR OSD is not a replacement for a colorimeter, spectrophotometer, reference display, or professional calibration software. Adjustments made by eye are inherently subjective. For an objective calibration workflow, use appropriate measurement hardware and color-management software.
+> [!NOTE]
+> Virtual HDR OSD is not a replacement for a colorimeter, spectrophotometer, reference display, or professional calibration software. Adjustments made by eye are inherently subjective. For an objective calibration workflow, use appropriate measurement hardware and color-management software.
 
 ---
 
@@ -36,6 +37,12 @@ Windows HDR Calibration is the preferred base because it is specifically designe
 # Installation
 
 The project uses a self-contained Python/uv environment. Python, uv, and the virtual environment remain inside the project directory rather than requiring a system-wide Python installation.
+
+Clone the repository or download as a .zip file.
+
+```text
+git clone https://github.com/Mixomo/Virtual-HDR-OSD-for-Windows-11.git
+```
 
 Run:
 
