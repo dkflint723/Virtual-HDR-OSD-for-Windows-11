@@ -67,6 +67,7 @@ $ErrorActionPreference = 'Stop'
 $AppDir = Join-Path $env:LOCALAPPDATA 'ColorProfileModeWatchdog'
 $StatePath = Join-Path $AppDir 'State.json'
 $LogPath = Join-Path $AppDir 'Watchdog.log'
+$GammaStatePath = Join-Path $env:LOCALAPPDATA 'Virtual_HDR_OSD_for_Windows\gamma_hotkeys.json'
 $LauncherPath = Join-Path $AppDir 'Launcher.vbs'
 $RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
 $RunName = 'ColorProfileModeWatchdog'
@@ -123,6 +124,16 @@ namespace ColorProfileWatchdog
 
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9;
+        public const int DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11;
+
+        public const int HOTKEY_OFF = 0x564801;
+        public const int HOTKEY_ON = 0x564802;
+        public const uint MOD_ALT = 0x0001;
+        public const uint MOD_NOREPEAT = 0x4000;
+        public const uint VK_1 = 0x31;
+        public const uint VK_2 = 0x32;
+        public const uint WM_HOTKEY = 0x0312;
+        public const uint PM_REMOVE = 0x0001;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct LUID
@@ -205,6 +216,31 @@ namespace ColorProfileWatchdog
             public UInt32 bitsPerColorChannel;
         }
 
+        [StructLayout(LayoutKind.Sequential)]
+        public struct DISPLAYCONFIG_SDR_WHITE_LEVEL
+        {
+            public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+            public UInt32 SDRWhiteLevel;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT
+        {
+            public Int32 X;
+            public Int32 Y;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct MSG
+        {
+            public IntPtr hwnd;
+            public UInt32 message;
+            public IntPtr wParam;
+            public IntPtr lParam;
+            public UInt32 time;
+            public POINT pt;
+        }
+
         public sealed class DisplayInfo
         {
             public string GdiName { get; set; }
@@ -248,6 +284,128 @@ namespace ColorProfileWatchdog
         [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
         private static extern int DisplayConfigGetAdvancedColorInfo(
             ref DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO requestPacket);
+
+        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
+        private static extern int DisplayConfigGetSdrWhiteLevel(
+            ref DISPLAYCONFIG_SDR_WHITE_LEVEL requestPacket);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        private static extern int GetMessage(out MSG lpMsg, IntPtr hWnd, uint wMsgFilterMin, uint wMsgFilterMax);
+
+        [DllImport("user32.dll")]
+        private static extern bool PostThreadMessage(uint idThread, uint Msg, UIntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll")]
+        private static extern uint GetCurrentThreadId();
+
+        private const uint WM_QUIT = 0x0012;
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<int> gammaHotkeyQueue =
+            new System.Collections.Concurrent.ConcurrentQueue<int>();
+        private static System.Threading.Thread gammaHotkeyThread;
+        private static System.Threading.ManualResetEvent gammaHotkeyReady =
+            new System.Threading.ManualResetEvent(false);
+        private static volatile bool gammaHotkeysRegistered = false;
+        private static uint gammaHotkeyThreadId = 0;
+
+        private static void GammaHotkeyMessageLoop()
+        {
+            gammaHotkeyThreadId = GetCurrentThreadId();
+            uint modifiers = MOD_ALT | MOD_NOREPEAT;
+            bool off = RegisterHotKey(IntPtr.Zero, HOTKEY_OFF, modifiers, VK_1);
+            bool on = RegisterHotKey(IntPtr.Zero, HOTKEY_ON, modifiers, VK_2);
+
+            gammaHotkeysRegistered = off && on;
+            if (!gammaHotkeysRegistered)
+            {
+                if (off) UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
+                if (on) UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
+                gammaHotkeyReady.Set();
+                return;
+            }
+
+            gammaHotkeyReady.Set();
+            MSG msg;
+            try
+            {
+                while (GetMessage(out msg, IntPtr.Zero, 0, 0) > 0)
+                {
+                    if (msg.message == WM_HOTKEY)
+                    {
+                        int id = msg.wParam.ToInt32();
+                        if (id == HOTKEY_OFF || id == HOTKEY_ON)
+                            gammaHotkeyQueue.Enqueue(id);
+                    }
+                }
+            }
+            finally
+            {
+                UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
+                UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
+                gammaHotkeysRegistered = false;
+                gammaHotkeyThreadId = 0;
+            }
+        }
+
+        public static bool TryRegisterGammaHotkeys()
+        {
+            if (gammaHotkeysRegistered)
+                return true;
+            if (gammaHotkeyThread != null && gammaHotkeyThread.IsAlive)
+                return false;
+
+            gammaHotkeyReady.Reset();
+            gammaHotkeyThread = new System.Threading.Thread(GammaHotkeyMessageLoop);
+            gammaHotkeyThread.IsBackground = true;
+            gammaHotkeyThread.Name = "ColorProfileWatchdog-Hotkeys";
+            gammaHotkeyThread.Start();
+            gammaHotkeyReady.WaitOne(1500);
+            return gammaHotkeysRegistered;
+        }
+
+        public static int PollGammaHotkey()
+        {
+            int id;
+            return gammaHotkeyQueue.TryDequeue(out id) ? id : 0;
+        }
+
+        public static void UnregisterGammaHotkeys()
+        {
+            uint threadId = gammaHotkeyThreadId;
+            if (threadId != 0)
+                PostThreadMessage(threadId, WM_QUIT, UIntPtr.Zero, IntPtr.Zero);
+            if (gammaHotkeyThread != null && gammaHotkeyThread.IsAlive)
+                gammaHotkeyThread.Join(1000);
+            gammaHotkeysRegistered = false;
+        }
+
+        [DllImport("mscms.dll", CharSet = CharSet.Unicode)]
+        private static extern bool GetColorDirectory(
+            string pMachineName,
+            System.Text.StringBuilder pBuffer,
+            ref UInt32 pdwSize);
+
+        public static string GetWindowsColorDirectory()
+        {
+            UInt32 size = 0;
+            GetColorDirectory(null, null, ref size);
+            if (size == 0)
+                return System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    "System32", "spool", "drivers", "color");
+
+            System.Text.StringBuilder sb = new System.Text.StringBuilder((int)size);
+            if (!GetColorDirectory(null, sb, ref size))
+                return System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                    "System32", "spool", "drivers", "color");
+            return sb.ToString();
+        }
 
         [DllImport("mscms.dll", CharSet = CharSet.Unicode)]
         private static extern int ColorProfileGetDisplayDefault(
@@ -381,6 +539,19 @@ namespace ColorProfileWatchdog
             return luid;
         }
 
+        public static double GetSdrWhiteLevelNits(DisplayInfo display)
+        {
+            DISPLAYCONFIG_SDR_WHITE_LEVEL packet = new DISPLAYCONFIG_SDR_WHITE_LEVEL();
+            packet.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
+            packet.header.size = (UInt32)Marshal.SizeOf(typeof(DISPLAYCONFIG_SDR_WHITE_LEVEL));
+            packet.header.adapterId = display.AdapterLuid;
+            packet.header.id = display.TargetId;
+            int rc = DisplayConfigGetSdrWhiteLevel(ref packet);
+            if (rc != ERROR_SUCCESS)
+                return 200.0;
+            return ((double)packet.SDRWhiteLevel / 1000.0) * 80.0;
+        }
+
         public static int GetSelectedScope(DisplayInfo display)
         {
             int scope;
@@ -453,6 +624,89 @@ function Get-ActiveDisplays {
     return [ColorProfileWatchdog.Native]::GetActiveDisplays()
 }
 
+function Format-HResult {
+    param([int]$Value)
+    try {
+        $bytes = [BitConverter]::GetBytes([int]$Value)
+        $unsigned = [BitConverter]::ToUInt32($bytes, 0)
+        return ('0x{0:X8}' -f $unsigned)
+    } catch {
+        return [string]$Value
+    }
+}
+
+function Test-InstalledColorProfile {
+    param([string]$ProfileName)
+    if ([string]::IsNullOrWhiteSpace($ProfileName)) { return $false }
+    try {
+        $colorDir = [ColorProfileWatchdog.Native]::GetWindowsColorDirectory()
+        return Test-Path -LiteralPath (Join-Path $colorDir $ProfileName)
+    } catch {
+        return $false
+    }
+}
+
+function Resolve-StableWorkingPair {
+    param(
+        $Display,
+        [string]$CurrentExtended,
+        $GammaEntry
+    )
+
+    $off = $null
+    $on = $null
+    $enabled = $false
+
+    # Highest-authority source: the profile that Windows is actually using now.
+    # Stable Virtual HDR OSD working slots always use:
+    #   Virtual_HDR_OSD_<display-token>_Off.icm
+    #   Virtual_HDR_OSD_<display-token>_On.icm
+    if ($CurrentExtended -match '^(Virtual_HDR_OSD_[A-Fa-f0-9]+)_(On|Off)\.icm$') {
+        $prefix = $Matches[1]
+        $slot = $Matches[2]
+        $candidateOff = "${prefix}_Off.icm"
+        $candidateOn = "${prefix}_On.icm"
+
+        if (Test-InstalledColorProfile $candidateOff) { $off = $candidateOff }
+        if (Test-InstalledColorProfile $candidateOn) { $on = $candidateOn }
+        $enabled = ($slot -eq 'On')
+    }
+
+    # Runtime JSON is secondary only. Accept stable current-generation names and
+    # verify that the files are actually installed before trusting them.
+    if ($GammaEntry) {
+        try {
+            $candidate = [string]$GammaEntry.profiles.Off
+            if (-not $off -and
+                $candidate -match '^Virtual_HDR_OSD_[A-Fa-f0-9]+_Off\.icm$' -and
+                (Test-InstalledColorProfile $candidate)) {
+                $off = $candidate
+            }
+        } catch {}
+
+        try {
+            $candidate = [string]$GammaEntry.profiles.On
+            if (-not $on -and
+                $candidate -match '^Virtual_HDR_OSD_[A-Fa-f0-9]+_On\.icm$' -and
+                (Test-InstalledColorProfile $candidate)) {
+                $on = $candidate
+            }
+        } catch {}
+
+        # Only use the JSON enable flag if the active Windows profile did not
+        # already tell us which stable slot is selected.
+        if ($CurrentExtended -notmatch '^Virtual_HDR_OSD_[A-Fa-f0-9]+_(On|Off)\.icm$') {
+            try { $enabled = [bool]$GammaEntry.enabled } catch {}
+        }
+    }
+
+    return [PSCustomObject]@{
+        Off = $off
+        On = $on
+        Enabled = $enabled
+    }
+}
+
 function Get-SavedProfileState {
     param($Display)
 
@@ -466,6 +720,9 @@ function Get-SavedProfileState {
         [ColorProfileWatchdog.Native]::CPST_EXTENDED_DISPLAY_COLOR_MODE
     )
 
+    $gammaEntry = Get-GammaEntryForDisplay -CurrentDisplay $Display
+    $pair = Resolve-StableWorkingPair -Display $Display -CurrentExtended $extended -GammaEntry $gammaEntry
+
     [PSCustomObject]@{
         GdiName         = $Display.GdiName
         AdapterLow      = $Display.AdapterLow
@@ -474,7 +731,47 @@ function Get-SavedProfileState {
         OriginalScope   = $scope
         StandardProfile = $standard
         ExtendedProfile = $extended
+        WorkingOff      = $pair.Off
+        WorkingOn       = $pair.On
+        GammaEnabled    = [bool]$pair.Enabled
     }
+}
+
+function Get-GammaEntryForDisplay {
+    param($CurrentDisplay)
+
+    if (-not (Test-Path -LiteralPath $GammaStatePath)) { return $null }
+    try {
+        $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+        if (-not $gamma.displays) { return $null }
+        foreach ($property in $gamma.displays.PSObject.Properties) {
+            if ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
+                return $property.Value
+            }
+        }
+    } catch {}
+    return $null
+}
+
+function Get-DesiredExtendedProfile {
+    param($CurrentDisplay, $SavedDisplay)
+
+    # The standalone watchdog owns a persistent copy of the prepared Off/On names.
+    # This works even when Virtual HDR OSD is closed and its runtime JSON is stale.
+    if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaEnabled') {
+        if ([bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOn) {
+            return [string]$SavedDisplay.WorkingOn
+        }
+        if (-not [bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOff) {
+            return [string]$SavedDisplay.WorkingOff
+        }
+    }
+
+    $entry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
+    if ($entry -and $entry.active_profile) {
+        return [string]$entry.active_profile
+    }
+    return [string]$SavedDisplay.ExtendedProfile
 }
 
 function Restore-SavedProfiles {
@@ -498,32 +795,95 @@ function Restore-SavedProfiles {
                 [string]$SavedDisplay.StandardProfile
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT 0x{1:X8}' -f $CurrentDisplay.GdiName, [uint32]$hr)
+                Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } else {
                 Write-Log ('Restored STANDARD profile on {0}: {1}' -f $CurrentDisplay.GdiName, $SavedDisplay.StandardProfile)
             }
         }
     }
 
-    if ($SavedDisplay.ExtendedProfile) {
+    $desiredExtended = Get-DesiredExtendedProfile -CurrentDisplay $CurrentDisplay -SavedDisplay $SavedDisplay
+    if ($desiredExtended) {
         $current = [ColorProfileWatchdog.Native]::GetDefaultProfile(
             $CurrentDisplay,
             [ColorProfileWatchdog.Native]::WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
             [ColorProfileWatchdog.Native]::CPST_EXTENDED_DISPLAY_COLOR_MODE
         )
 
-        if ($Force -or $current -ne $SavedDisplay.ExtendedProfile) {
+        if ($Force -or $current -ne $desiredExtended) {
             $hr = [ColorProfileWatchdog.Native]::SetCurrentUserDefault(
                 $CurrentDisplay,
                 [ColorProfileWatchdog.Native]::CPST_EXTENDED_DISPLAY_COLOR_MODE,
-                [string]$SavedDisplay.ExtendedProfile
+                [string]$desiredExtended
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore EXTENDED profile on {0}: HRESULT 0x{1:X8}' -f $CurrentDisplay.GdiName, [uint32]$hr)
+                Write-Log ('Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } else {
-                Write-Log ('Restored EXTENDED profile on {0}: {1}' -f $CurrentDisplay.GdiName, $SavedDisplay.ExtendedProfile)
+                Write-Log ('Restored EXTENDED profile on {0}: {1}' -f $CurrentDisplay.GdiName, $desiredExtended)
             }
         }
+    }
+}
+
+function Invoke-GammaHotkey {
+    param([bool]$Enable)
+
+    try {
+        $currentDisplays = @(Get-ActiveDisplays)
+        foreach ($current in $currentDisplays) {
+            $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+            if (-not $saved) { continue }
+
+            $profile = $(if ($Enable) { $saved.WorkingOn } else { $saved.WorkingOff })
+            if (-not $profile) {
+                # Backward-compatible fallback if this watchdog was installed before the
+                # self-contained state fields existed.
+                $entry = Get-GammaEntryForDisplay -CurrentDisplay $current
+                if ($entry) {
+                    $profile = $(if ($Enable) { $entry.profiles.On } else { $entry.profiles.Off })
+                }
+            }
+            if (-not $profile) {
+                Write-Log ('Gamma hotkey ignored on {0}: stable {1} profile was not captured. Re-run the installer after Virtual HDR OSD has prepared both working profiles.' -f $current.GdiName, $(if($Enable){'ON'}else{'OFF'}))
+                continue
+            }
+
+            $hr = [ColorProfileWatchdog.Native]::SetCurrentUserDefault(
+                $current,
+                [ColorProfileWatchdog.Native]::CPST_EXTENDED_DISPLAY_COLOR_MODE,
+                [string]$profile
+            )
+            if ($hr -lt 0) {
+                Write-Log ('Gamma hotkey profile switch failed on {0}: HRESULT {1}' -f $current.GdiName, (Format-HResult $hr))
+                continue
+            }
+
+            $saved.GammaEnabled = [bool]$Enable
+            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+
+            # Keep the GUI runtime file synchronized when it exists, but do not depend on it.
+            try {
+                if (Test-Path -LiteralPath $GammaStatePath) {
+                    $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+                    foreach ($property in $gamma.displays.PSObject.Properties) {
+                        if ($property.Value.gdi_name -eq $current.GdiName) {
+                            $property.Value.enabled = [bool]$Enable
+                            $property.Value.active_profile = [string]$profile
+                            $property.Value.updated_at = (Get-Date).ToString('o')
+                        }
+                    }
+                    $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $GammaStatePath -Encoding UTF8
+                }
+            } catch {}
+
+            $verify = [ColorProfileWatchdog.Native]::GetDefaultProfileWithFallback(
+                $current,
+                [ColorProfileWatchdog.Native]::CPST_EXTENDED_DISPLAY_COLOR_MODE
+            )
+            Write-Log ('Gamma correction {0} on {1}: requested={2}; readback={3}' -f $(if($Enable){'ON'}else{'OFF'}), $current.GdiName, $profile, $verify)
+        }
+    } catch {
+        Write-Log ('Gamma hotkey error: ' + $_.Exception.Message)
     }
 }
 
@@ -543,11 +903,30 @@ if ($Install) {
 
     $saved = @()
     foreach ($display in $displays) {
-        $saved += Get-SavedProfileState -Display $display
+        $item = Get-SavedProfileState -Display $display
+        # If the GUI has recorded the real HDR base profile, preserve that as the
+        # watchdog fallback instead of capturing an app-managed working profile.
+        $gammaEntry = Get-GammaEntryForDisplay -CurrentDisplay $display
+        if ($gammaEntry -and $gammaEntry.base_profile) {
+            $baseCandidate = [string]$gammaEntry.base_profile
+            if ($baseCandidate -and
+                $baseCandidate -notmatch '^Virtual_HDR_OSD_' -and
+                (Test-InstalledColorProfile $baseCandidate)) {
+                $item.ExtendedProfile = $baseCandidate
+            }
+        }
+        $saved += $item
+    }
+
+    foreach ($item in $saved) {
+        $hasAnyWorking = [bool]$item.WorkingOff -or [bool]$item.WorkingOn
+        if ($hasAnyWorking -and (-not $item.WorkingOff -or -not $item.WorkingOn)) {
+            throw ('Virtual HDR OSD working pair is incomplete on {0}. Open Virtual HDR OSD, apply the current HDR state once so both Correction Off and Correction On exist, close the GUI, then run this installer again.' -f $item.GdiName)
+        }
     }
 
     $state = [PSCustomObject]@{
-        Version     = 1
+        Version     = 2
         CapturedAt  = (Get-Date).ToString('o')
         Displays    = $saved
     }
@@ -571,6 +950,8 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
         Write-Host ('  {0}' -f $item.GdiName)
         Write-Host ('    SDR / STANDARD : {0}' -f $(if ($item.StandardProfile) { $item.StandardProfile } else { '<none - left untouched>' }))
         Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<none - left untouched>' }))
+        Write-Host ('    Gamma OFF      : {0}' -f $(if ($item.WorkingOff) { $item.WorkingOff } else { '<not prepared by Virtual HDR OSD>' }))
+        Write-Host ('    Gamma ON       : {0}' -f $(if ($item.WorkingOn) { $item.WorkingOn } else { '<not prepared by Virtual HDR OSD>' }))
     }
 
     Write-Host ''
@@ -607,8 +988,31 @@ try {
 
     $lastModes = @{}
     $lastForced = [DateTime]::MinValue
+    $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
+    $lastHotkeyRetry = Get-Date
+    Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
 
+    $pollCounter = 0
     while ($true) {
+        if (-not $hotkeysRegistered -and ((Get-Date) - $lastHotkeyRetry).TotalSeconds -ge 2.0) {
+            $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
+            $lastHotkeyRetry = Get-Date
+            if ($hotkeysRegistered) { Write-Log 'Global hotkey thread started after retry: Alt+1 OFF, Alt+2 ON.' }
+        }
+        if ($hotkeysRegistered) {
+            while ($true) {
+                $hotkey = [ColorProfileWatchdog.Native]::PollGammaHotkey()
+                if ($hotkey -eq 0) { break }
+                if ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_OFF) { Invoke-GammaHotkey -Enable $false }
+                elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
+            }
+        }
+        $pollCounter++
+        if (($pollCounter % 8) -ne 0) {
+            Start-Sleep -Milliseconds 100
+            continue
+        }
+
         try {
             $currentDisplays = @(Get-ActiveDisplays)
 
@@ -651,10 +1055,11 @@ try {
             Write-Log ('Loop error: ' + $_.Exception.Message)
         }
 
-        Start-Sleep -Milliseconds 900
+        Start-Sleep -Milliseconds 100
     }
 }
 finally {
+    try { [ColorProfileWatchdog.Native]::UnregisterGammaHotkeys() } catch {}
     if ($mutex) {
         try { $mutex.ReleaseMutex() } catch {}
         $mutex.Dispose()

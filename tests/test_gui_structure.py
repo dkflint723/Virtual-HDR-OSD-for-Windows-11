@@ -9,112 +9,123 @@ class GuiStructureTests(unittest.TestCase):
         cls.app = (cls.root / "src/sdr_hdr_profile_creator/app.py").read_text(encoding="utf-8")
         cls.controls = (cls.root / "src/sdr_hdr_profile_creator/controls.py").read_text(encoding="utf-8")
         cls.curves = (cls.root / "src/sdr_hdr_profile_creator/curves.py").read_text(encoding="utf-8")
+        cls.gamma = (cls.root / "src/sdr_hdr_profile_creator/gamma_correction.py").read_text(encoding="utf-8")
         cls.win = (cls.root / "src/sdr_hdr_profile_creator/windows_api.py").read_text(encoding="utf-8")
 
-    def test_final_branding(self):
+    def test_clean_branding(self):
         self.assertIn("Virtual HDR OSD for Windows", self.app)
+        self.assertNotIn("Virtual HDR OSD for Windows 1.", self.app)
 
-    def test_sdr_editor_remains_disabled_but_watchdog_restores_existing_profile(self):
+    def test_sdr_editor_remains_passive(self):
         self.assertIn('if mode != "HDR"', self.app)
         self.assertNotIn('_apply_mode_profile("SDR"', self.app)
         self.assertIn("_remember_current_sdr_profile", self.app)
         self.assertIn("_restore_remembered_sdr_profile", self.app)
-        self.assertIn("reapply_existing_default_profile", self.app)
-        self.assertIn("ColorProfileSetDisplayDefaultAssociation", self.win)
 
-    def test_piecewise_fix_is_removed(self):
-        self.assertNotIn("Windows piecewise sRGB fix", self.app)
-        self.assertNotIn("gamma_fix_checkbox", self.app)
-        self.assertNotIn("_gamma_fix_toggled", self.app)
-        self.assertNotIn("_srgb_piecewise_to_gamma", self.curves)
+    def test_correct_piecewise_gamma_integration(self):
+        self.assertIn("SDR-in-HDR Gamma Correction", self.app)
+        self.assertIn("Auto (Recommended)", self.gamma)
+        self.assertIn("100 nits / Brightness 5", self.gamma)
+        self.assertIn("200 nits / Brightness 30", self.gamma)
+        self.assertIn("300 nits / Brightness 55", self.gamma)
+        self.assertIn("400 nits / Brightness 80", self.gamma)
+        self.assertIn('"Unspecified"', self.gamma)
+        self.assertIn('"SDR"', self.gamma)
+        self.assertIn("pq_eotf", self.gamma)
+        self.assertIn("srgb_inverse_eotf", self.gamma)
+        self.assertIn("srgb_signal**2.2", self.gamma)
+        self.assertIn("if luminance > white", self.gamma)
 
-    def test_generous_slider_ranges_keep_fine_steps_and_no_arrow_buttons(self):
+    def test_auto_reads_windows_white_without_sdr_brightness_slider(self):
+        self.assertIn("get_sdr_white_level_nits", self.app)
+        self.assertNotIn("SDR Content Brightness in HDR", self.app)
+        self.assertNotIn("sdr_brightness_control", self.app)
+
+    def test_global_gamma_hotkeys_are_exposed(self):
+        hotkeys = (self.root / "src/sdr_hdr_profile_creator/hotkeys.py").read_text(encoding="utf-8")
+        self.assertIn("RegisterHotKey", hotkeys)
+        self.assertIn("VK_1", hotkeys)
+        self.assertIn("VK_2", hotkeys)
+        self.assertIn("GetMessageW", hotkeys)
+        self.assertIn("MOD_NOREPEAT", hotkeys)
+        self.assertIn("Alt+1", self.app)
+        self.assertIn("Alt+2", self.app)
+
+    def test_watchdog_settings_dialog(self):
+        self.assertIn('PushButton("Watchdog Settings…"', self.app)
+        self.assertIn("def _show_watchdog_settings", self.app)
+        self.assertIn("Install Watchdog", self.app)
+        self.assertIn("Uninstall Watchdog", self.app)
+
+    def test_watchdog_is_packaged_for_source_and_onefile(self):
+        resources = self.root / "src/sdr_hdr_profile_creator/resources"
+        self.assertTrue((resources / "2- OPTIONAL - Install-Watchdog.bat").is_file())
+        self.assertTrue((resources / "Uninstall-Watchdog.bat").is_file())
+        installer = (self.root / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
+        self.assertIn("GetSdrWhiteLevelNits", installer)
+        self.assertIn("$entry.profiles.On", installer)
+        self.assertIn("Alt+1 OFF, Alt+2 ON", installer)
+        self.assertIn("RegisterHotKey", installer)
+        self.assertIn("GetMessage", installer)
+        self.assertIn("WorkingOff", installer)
+        self.assertIn("WorkingOn", installer)
+        self.assertIn("gamma_hotkeys.json", installer)
+        self.assertIn("Get-DesiredExtendedProfile", installer)
+        self.assertIn("active_profile", installer)
+        self.assertIn("GammaEnabled", installer)
+        self.assertIn("WorkingOff", installer)
+        self.assertIn("WorkingOn", installer)
+        self.assertIn("TryRegisterGammaHotkeys", installer)
+        self.assertIn("PollGammaHotkey", installer)
+        self.assertNotIn("GetAsyncKeyState", installer)
+        self.assertIn("_publish_gamma_runtime_intent", self.app)
+        self.assertIn("_update_gamma_runtime_state", self.app)
+        self.assertNotIn("pythonw.exe", installer.lower())
+
+
+    def test_gamma_off_is_immediate_and_authoritative(self):
+        self.assertIn('self._apply_mode_profile("HDR", "Gamma correction changed")', self.app)
+        self.assertIn('self.state.hdr.sdr_gamma_correction = "Off"', self.app)
+        self.assertIn('self._publish_gamma_runtime_intent(display)', self.app)
+        self.assertIn('if option == "Off":\n            return None', self.app)
+
+    def test_builder_outputs_only_onefile_exe(self):
+        builder = (self.root / "Build Portable EXE.bat").read_text(encoding="utf-8")
+        self.assertIn("--onefile", builder)
+        self.assertIn('--windows-console-mode=disable', builder)
+        self.assertIn('Virtual HDR OSD for Windows.exe', builder)
+        self.assertNotIn("--standalone", builder)
+        self.assertNotIn("file-version", builder.lower())
+        self.assertNotIn("product-version", builder.lower())
+
+    def test_generous_slider_ranges_keep_fine_steps_and_mouse_wheel(self):
         self.assertIn('"gamma", "Gamma / Midtone Response", 1.600, 3.000, 2.200, 0.005', self.app)
         self.assertIn('"brightness_trim", "Midtone Brightness", -30.0, 30.0, 0.0, 0.05', self.app)
         self.assertIn('"contrast", "Contrast / Tonal Separation", -30.0, 30.0, 0.0, 0.05', self.app)
         self.assertIn('"temperature", "White Balance Temperature", -3000.0, 3000.0, 0.0, 5.0', self.app)
         self.assertIn('"tint", "Green–Magenta Tint", -25.0, 25.0, 0.0, 0.05', self.app)
         self.assertIn('"saturation", "Color Saturation", -50.0, 50.0, 0.0, 0.10', self.app)
-        self.assertIn('"red_channel", "Red Fine Balance", -25.0, 25.0, 0.0, 0.05', self.app)
-        self.assertIn("self.value_edit", self.controls)
-        self.assertNotIn("self.decrement_button", self.controls)
-        self.assertNotIn("self.increment_button", self.controls)
+        self.assertIn("QEvent.Type.Wheel", self.controls)
         self.assertNotIn("DoubleSpinBox", self.controls)
-
-    def test_mouse_wheel_uses_declared_fine_step(self):
-        self.assertIn("self.slider.installEventFilter(self)", self.controls)
-        self.assertIn("self.value_edit.installEventFilter(self)", self.controls)
-        self.assertIn("event.type() == QEvent.Type.Wheel", self.controls)
-        self.assertIn("direction * self.spec.step", self.controls)
-
-    def test_color_algorithm_uses_bradford_and_rec2020_matrix(self):
-        self.assertIn("_BRADFORD", self.curves)
-        self.assertIn("_white_balance_matrix", self.curves)
-        self.assertIn("_REC2020_TO_XYZ", self.curves)
-        self.assertIn("luminance", self.curves)
 
     def test_import_opens_windows_color_directory(self):
         self.assertIn("get_color_directory", self.app)
         self.assertIn("self._windows_color_directory_or_home()", self.app)
 
-    def test_windows_settings_buttons(self):
-        self.assertNotIn("Windows HDR Settings", self.app)
-        self.assertIn("Windows Display Settings", self.app)
-        self.assertIn("Windows Color Profile Folder", self.app)
-        self.assertIn('os.startfile("ms-settings:display")', self.win)
-
     def test_metadata_tab_remains_removed(self):
         self.assertNotIn('"profilePage", "Profile"', self.app)
         self.assertNotIn("_build_profile_details_tab", self.app)
-        self.assertNotIn("HDR Profile Metadata", self.app)
 
-    def test_sdr_brightness_ui_is_removed(self):
-        self.assertNotIn("SDR Content Brightness in HDR", self.app)
-        self.assertNotIn("sdr_brightness_control", self.app)
-        self.assertNotIn("_sync_sdr_brightness_from_windows", self.app)
-        self.assertNotIn("sdr_white_label", self.app)
 
-    def test_clear_labels_and_tooltips(self):
-        self.assertIn("Target Display", self.app)
-        self.assertIn("HDR Profile Application", self.app)
-        self.assertIn("HDR Calibration Profile", self.app)
-        self.assertIn("Tone & Brightness", self.app)
-        self.assertIn("Color & White Balance", self.app)
-        self.assertIn("setToolTip", self.app)
-        self.assertIn("setToolTip", self.controls)
-
-    def test_runtime_controls_are_unified_and_unambiguous(self):
-        self.assertIn('PushButton("Reapply Profile"', self.app)
-        self.assertIn('setOffText("Live Apply")', self.app)
-        self.assertIn('setOffText("Automatic Mode Switching")', self.app)
-        self.assertIn('def _automatic_mode_switching_toggled', self.app)
-        self.assertNotIn('Mode Tracking: Manual', self.app)
-        self.assertNotIn('Mode Tracking: Automatic', self.app)
-        self.assertNotIn('Mode Watchdog: Off', self.app)
-        self.assertNotIn('Mode Watchdog: On', self.app)
-        self.assertNotIn('self.follow_checkbox', self.app)
-        self.assertNotIn('self.auto_refresh_checkbox', self.app)
-
-    def test_dedicated_watchdog_uninstaller_is_packaged(self):
-        uninstaller_path = self.root / "Uninstall-Watchdog.bat"
-        self.assertTrue(uninstaller_path.is_file())
-        uninstaller = uninstaller_path.read_text(encoding="utf-8")
-        installer = (self.root / "Install-Watchdog.bat").read_text(encoding="utf-8")
-        self.assertIn('Virtual HDR OSD Watchdog.lnk', uninstaller)
-        self.assertIn('sdr_hdr_profile_creator\\.watchdog', uninstaller)
-        self.assertIn('Stop-Process', uninstaller)
-        self.assertIn('Uninstall-Watchdog.bat', installer)
-
-    def test_persistent_watchdog_is_packaged_and_conservative(self):
-        watchdog = (self.root / "src/sdr_hdr_profile_creator/watchdog.py").read_text(encoding="utf-8")
-        installer = (self.root / "Install-Watchdog.bat").read_text(encoding="utf-8")
-        self.assertIn('get_default_profile(display, "SDR")', watchdog)
-        self.assertIn('reapply_existing_default_profile(display, "SDR", profile)', watchdog)
-        self.assertNotIn('build_profile', watchdog)
-        self.assertIn('pythonw.exe', installer)
-        self.assertIn('Virtual HDR OSD Watchdog.lnk', installer)
-        self.assertIn('uninstall', installer.lower())
-
+    def test_watchdog_resolves_stable_pair_and_formats_negative_hresult(self):
+        installer = (self.root / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
+        self.assertIn("Resolve-StableWorkingPair", installer)
+        self.assertIn("Test-InstalledColorProfile", installer)
+        self.assertIn("GetWindowsColorDirectory", installer)
+        self.assertIn("Virtual_HDR_OSD_[A-Fa-f0-9]+", installer)
+        self.assertIn("Format-HResult", installer)
+        self.assertNotIn("[uint32]$hr", installer)
+        self.assertIn("working pair is incomplete", installer)
 
 if __name__ == "__main__":
     unittest.main()

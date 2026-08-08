@@ -510,7 +510,7 @@ def reapply_existing_default_profile(display: DisplayInfo, mode: str, profile_na
     return active
 
 
-def install_and_associate_profile(profile_path: Path, display: DisplayInfo, mode: str) -> str:
+def install_and_associate_profile(profile_path: Path, display: DisplayInfo, mode: str, make_default: bool = True) -> str:
     if not IS_WINDOWS:
         raise WindowsColorError("Windows profile APIs are only available on Windows")
     if not profile_path.is_file():
@@ -542,22 +542,23 @@ def install_and_associate_profile(profile_path: Path, display: DisplayInfo, mode
         if result < 0:
             raise _hresult_error("ColorProfileAddDisplayAssociation failed", result)
 
-        result = mscms.ColorProfileSetDisplayDefaultAssociation(
-            WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
-            profile_name,
-            CPT_ICC,
-            subtype,
-            _luid(display),
-            display.source_id,
-        )
-        if result < 0:
-            raise _hresult_error("ColorProfileSetDisplayDefaultAssociation failed", result)
-
-        active = get_default_profile(display, mode)
-        if Path(active).name.casefold() != profile_name.casefold():
-            raise WindowsColorError(
-                f"Windows read-back mismatch: expected {profile_name}, received {active or '<empty>'}"
+        if make_default:
+            result = mscms.ColorProfileSetDisplayDefaultAssociation(
+                WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
+                profile_name,
+                CPT_ICC,
+                subtype,
+                _luid(display),
+                display.source_id,
             )
+            if result < 0:
+                raise _hresult_error("ColorProfileSetDisplayDefaultAssociation failed", result)
+
+            active = get_default_profile(display, mode)
+            if Path(active).name.casefold() != profile_name.casefold():
+                raise WindowsColorError(
+                    f"Windows read-back mismatch: expected {profile_name}, received {active or '<empty>'}"
+                )
         return profile_name
     except Exception:
         if hasattr(mscms, "ColorProfileRemoveDisplayAssociation"):

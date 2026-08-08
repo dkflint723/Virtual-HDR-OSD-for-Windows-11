@@ -3,3 +3,5 @@
 .python
 __pycache__
 src/sdr_hdr_profile_creator/__pycache__
+.build-venv
+build-portable

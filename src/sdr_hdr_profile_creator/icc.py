@@ -71,11 +71,11 @@ def _text_type(text: str) -> bytes:
     return _pad4(b"text" + b"\0" * 4 + text.encode("utf-8"))
 
 
-def _msca_text_type(app_version: str = "1.2.0") -> bytes:
+def _msca_text_type() -> bytes:
     # Windows HDR Calibration profiles store this private companion tag as
     # textType containing a compact Python-style dictionary. It is metadata;
     # MHC2 is the calibration payload consumed by the Windows loader.
-    return _text_type(f"{{'Appversion':'{app_version}','D65Adapted':True}}")
+    return _text_type("{'D65Adapted':True}")
 
 
 def _chromaticities_to_xyz(

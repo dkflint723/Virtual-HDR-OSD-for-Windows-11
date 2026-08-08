@@ -2428,7 +2428,7 @@ wheels = [
 
 [[package]]
 name = "virtual-hdr-osd-for-windows"
-version = "1.0.9"
+version = "0"
 source = { editable = "." }
 dependencies = [
     { name = "pyside6" },

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QFileDialog,
+    QDialog,
     QGridLayout,
     QHBoxLayout,
     QMessageBox,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QVBoxLayout,
     QWidget,
+    QApplication,
 )
 from qfluentwidgets import (
     BodyLabel,
@@ -40,6 +43,8 @@ from qfluentwidgets import (
 
 from .controls import Card, ControlSpec, PathField, SliderControl
 from .curves import build_transform
+from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
+from .hotkeys import GammaHotkeyListener
 from .icc import build_profile, import_profile
 from .model import ApplicationState, DisplayMode, ModeState
 from .windows_api import (
@@ -51,6 +56,7 @@ from .windows_api import (
     open_windows_display_settings,
     open_windows_color_profile_directory,
     get_default_profile,
+    get_sdr_white_level_nits,
     reapply_existing_default_profile,
     remove_profile,
     send_hdr_toggle_shortcut,
@@ -61,6 +67,9 @@ STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
 LIVE_ROOT = LOCAL_ROOT / "live_profiles"
 LIVE_REGISTRY_PATH = LOCAL_ROOT / "live_registry.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
+RESOURCE_ROOT = PACKAGE_ROOT / "resources"
+GAMMA_HOTKEY_STATE_PATH = LOCAL_ROOT / "gamma_hotkeys.json"
+GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
 
 
 class MainWindow(FluentWidget):
@@ -72,6 +81,7 @@ class MainWindow(FluentWidget):
         for directory in (
             LOCAL_ROOT,
             LIVE_ROOT,
+            GAMMA_PROFILE_ROOT,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
@@ -85,7 +95,10 @@ class MainWindow(FluentWidget):
         self._live_profiles: dict[tuple[str, DisplayMode], tuple[str, Path, DisplayInfo]] = {}
         self._persisted_live_registry = self._load_live_registry()
         self._remembered_sdr_profiles: dict[str, str | None] = {}
+        self._base_hdr_profiles: dict[str, dict[str, str]] = {}
         self.control_widgets: dict[str, SliderControl] = {}
+        self._last_enabled_gamma_correction = self.state.hdr.sdr_gamma_correction if self.state.hdr.sdr_gamma_correction != "Off" else "Auto (Recommended)"
+        self._hotkey_listener: GammaHotkeyListener | None = None
 
         self.setWindowTitle("Virtual HDR OSD for Windows")
         self.setMinimumSize(1080, 720)
@@ -101,12 +114,26 @@ class MainWindow(FluentWidget):
         self.live_timer.setInterval(420)
         self.live_timer.timeout.connect(self._apply_live_edit)
 
+        self.gamma_companion_timer = QTimer(self)
+        self.gamma_companion_timer.setSingleShot(True)
+        self.gamma_companion_timer.setInterval(1400)
+
         self.mode_timer = QTimer(self)
         self.mode_timer.setInterval(900)
         self.mode_timer.timeout.connect(self._poll_windows_mode)
 
         self._build_ui()
         self._load_mode_into_controls(self.state.current_mode)
+        self._hotkey_listener = GammaHotkeyListener(self._gamma_hotkey_disable, self._gamma_hotkey_enable)
+
+        # If the standalone watchdog already owns Alt+1 / Alt+2, RegisterHotKey
+        # intentionally fails here. In that case the GUI follows the shared runtime
+        # state written by the watchdog, avoiding two processes fighting for one hotkey.
+        self.gamma_runtime_timer = QTimer(self)
+        self.gamma_runtime_timer.setInterval(450)
+        self.gamma_runtime_timer.timeout.connect(self._sync_external_gamma_hotkey_state)
+        self.gamma_runtime_timer.start()
+
         self._refresh_displays(initial=True)
         self.mode_timer.start()
 
@@ -134,7 +161,12 @@ class MainWindow(FluentWidget):
                     profile_name = str(value.get("profile_name", ""))
                     profile_path = str(value.get("profile_path", ""))
                     if profile_name:
-                        result[key] = {"profile_name": profile_name, "profile_path": profile_path}
+                        result[key] = {
+                            "profile_name": profile_name,
+                            "profile_path": profile_path,
+                            "base_profile_name": str(value.get("base_profile_name", "")),
+                            "base_profile_path": str(value.get("base_profile_path", "")),
+                        }
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
@@ -162,6 +194,10 @@ class MainWindow(FluentWidget):
         title_box.addWidget(CaptionLabel("A lightweight HDR pseudo-calibration OSD for Windows 11", self))
         heading.addLayout(title_box)
         heading.addStretch(1)
+        watchdog_button = PushButton("Watchdog Settings…", self)
+        watchdog_button.setToolTip("Install or remove the independent profile-association watchdog and persistent Alt+1 / Alt+2 gamma-correction hotkeys.")
+        watchdog_button.clicked.connect(self._show_watchdog_settings)
+        heading.addWidget(watchdog_button)
         help_button = PushButton("Help & Usage Guide", self)
         help_button.setToolTip("Open the complete usage guide, recommended calibration workflow, and safety notes.")
         help_button.clicked.connect(self._show_help)
@@ -339,8 +375,25 @@ class MainWindow(FluentWidget):
 
         gamma_card = Card(
             "HDR Tone & Luminance",
-            "Traditional HDR tone trims. Gamma 2.200, Midtone Brightness 0% and Contrast 0% are neutral.",
+            "Traditional HDR tone trims plus an optional SDR-in-HDR piecewise-sRGB → gamma 2.2 correction based on dylanraga's documented MHC2 method.",
         )
+        correction_row = QHBoxLayout()
+        correction_label = StrongBodyLabel("SDR-in-HDR Gamma Correction", self)
+        correction_label.setToolTip("Optional display-wide correction for Windows 11 SDR content composed inside HDR. Alt+1 disables it; Alt+2 restores the selected mode.")
+        correction_row.addWidget(correction_label)
+        self.gamma_correction_combo = ComboBox(self)
+        self.gamma_correction_combo.addItems(list(CORRECTION_OPTIONS))
+        index = self.gamma_correction_combo.findText(self.state.hdr.sdr_gamma_correction)
+        self.gamma_correction_combo.setCurrentIndex(max(0, index))
+        self.gamma_correction_combo.setMinimumWidth(270)
+        self.gamma_correction_combo.setToolTip("Off; Auto reads Windows' current SDR reference white internally; the remaining choices mirror dylanraga's published profile options. The correction is display-wide, so disable it for native HDR content.")
+        self.gamma_correction_combo.currentTextChanged.connect(self._gamma_correction_changed)
+        correction_row.addWidget(self.gamma_correction_combo)
+        correction_hint = CaptionLabel("Alt+1 Off  ·  Alt+2 On", self)
+        correction_hint.setToolTip("Global hotkeys while the app runs. Installing the watchdog keeps the hotkeys available after the GUI closes.")
+        correction_row.addWidget(correction_hint)
+        correction_row.addStretch(1)
+        gamma_card.add_layout(correction_row)
         gamma_card.add_widget(self._make_control(ControlSpec(
             "gamma", "Gamma / Midtone Response", 1.600, 3.000, 2.200, 0.005, "", 3, "2.200",
             "Adjust the traditional power-law tone response around the midtones. 2.200 is neutral; lower values brighten midtones and higher values darken them."
@@ -406,6 +459,124 @@ class MainWindow(FluentWidget):
         self.control_widgets[spec.key] = control
         return control
 
+    def _save_state_now(self) -> None:
+        try:
+            STATE_PATH.write_text(json.dumps(self.state.to_dict(), indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _gamma_correction_changed(self, text: str) -> None:
+        if self._loading_controls:
+            return
+        option = text if text in CORRECTION_OPTIONS else "Off"
+        self.state.hdr.sdr_gamma_correction = option
+        if option != "Off":
+            self._last_enabled_gamma_correction = option
+        self._save_state_now()
+
+        white = self._effective_sdr_white_nits()
+        detail = f" · {white:.0f} nits" if white is not None else ""
+        self._set_status(
+            f"SDR-in-HDR gamma correction: {option}{detail}. Alt+1 disables; Alt+2 restores.",
+            "warning" if option != "Off" else "ok",
+        )
+
+        # This dropdown is an explicit correction switch, not an editor trim. Apply it
+        # immediately even when Live Apply is disabled so selecting Off can never leave
+        # a previously corrected profile active.
+        display = self._selected_display()
+        if display is not None and display.current_mode == "HDR":
+            self._publish_gamma_runtime_intent(display)
+            self.live_timer.stop()
+            self._apply_mode_profile("HDR", "Gamma correction changed")
+
+    def _effective_sdr_white_nits(self) -> float | None:
+        option = self.state.hdr.sdr_gamma_correction
+        if option == "Off":
+            return None
+        detected: float | None = None
+        if option == "Auto (Recommended)":
+            display = self._selected_display()
+            if display is not None:
+                try:
+                    detected = get_sdr_white_level_nits(display)
+                except Exception:
+                    detected = None
+        return resolve_white_level(option, detected)
+
+    def _gamma_hotkey_disable(self) -> None:
+        if self.state.hdr.sdr_gamma_correction != "Off":
+            self._last_enabled_gamma_correction = self.state.hdr.sdr_gamma_correction
+        with QSignalBlocker(self.gamma_correction_combo):
+            self.gamma_correction_combo.setCurrentText("Off")
+        self.state.hdr.sdr_gamma_correction = "Off"
+        self._save_state_now()
+        self.live_timer.stop()
+        self._set_status(
+            "Alt+1: SDR-in-HDR gamma correction disabled. The uncorrected HDR profile is now authoritative.",
+            "ok",
+        )
+        display = self._selected_display()
+        if display is not None:
+            self._publish_gamma_runtime_intent(display)
+        self._apply_mode_profile("HDR", "Gamma hotkey OFF")
+
+    def _gamma_hotkey_enable(self) -> None:
+        target = self._last_enabled_gamma_correction if self._last_enabled_gamma_correction != "Off" else "Auto (Recommended)"
+        with QSignalBlocker(self.gamma_correction_combo):
+            self.gamma_correction_combo.setCurrentText(target)
+        self.state.hdr.sdr_gamma_correction = target
+        self._save_state_now()
+        self.live_timer.stop()
+        self._set_status(f"Alt+2: SDR-in-HDR gamma correction enabled ({target}).", "warning")
+        display = self._selected_display()
+        if display is not None:
+            self._publish_gamma_runtime_intent(display)
+        self._apply_mode_profile("HDR", "Gamma hotkey ON")
+
+    def _sync_external_gamma_hotkey_state(self) -> None:
+        """Follow hotkeys handled by the standalone watchdog while this GUI is open.
+
+        RegisterHotKey is exclusive. If the watchdog already owns Alt+1/Alt+2, the
+        GUI cannot register the same chords; the shared JSON state is therefore the
+        single synchronization channel and no profile is reapplied here.
+        """
+        display = self._selected_display()
+        if display is None or not GAMMA_HOTKEY_STATE_PATH.is_file():
+            return
+        try:
+            payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+            displays = payload.get("displays", {}) if isinstance(payload, dict) else {}
+            if not isinstance(displays, dict):
+                return
+            entry = displays.get(display.key)
+            if not isinstance(entry, dict):
+                entry = next(
+                    (item for item in displays.values() if isinstance(item, dict) and item.get("gdi_name") == display.gdi_name),
+                    None,
+                )
+            if not isinstance(entry, dict):
+                return
+            enabled = bool(entry.get("enabled", False))
+            selected = str(entry.get("selected") or self._last_enabled_gamma_correction or "Auto (Recommended)")
+            if selected not in CORRECTION_OPTIONS or selected == "Off":
+                selected = "Auto (Recommended)"
+            desired = selected if enabled else "Off"
+            if desired == self.state.hdr.sdr_gamma_correction:
+                return
+            if enabled:
+                self._last_enabled_gamma_correction = selected
+            self.state.hdr.sdr_gamma_correction = desired
+            with QSignalBlocker(self.gamma_correction_combo):
+                self.gamma_correction_combo.setCurrentText(desired)
+            self._save_state_now()
+            self._set_status(
+                f"External watchdog hotkey synchronized: gamma correction {'ON (' + selected + ')' if enabled else 'OFF'}.",
+                "warning" if enabled else "ok",
+            )
+        except Exception:
+            pass
+
     def _control_changed(self, field: str, value: float) -> None:
         if self._loading_controls:
             return
@@ -443,6 +614,8 @@ class MainWindow(FluentWidget):
         try:
             for key, control in self.control_widgets.items():
                 control.set_value(float(getattr(state, key)), emit=False)
+            if hasattr(self, "gamma_correction_combo"):
+                self.gamma_correction_combo.setCurrentText(state.sdr_gamma_correction)
         finally:
             self._loading_controls = False
 
@@ -484,17 +657,69 @@ class MainWindow(FluentWidget):
         QMessageBox.information(
             self,
             "Virtual HDR OSD for Windows — Help",
-            "Most monitors lock many OSD controls when HDR is enabled. Virtual HDR OSD provides a software pseudo-calibration layer so you can make small subjective color and tone corrections while staying in HDR.\n\n"
+            "Most monitors lock many OSD controls when HDR is enabled. Virtual HDR OSD provides a software pseudo-calibration layer for small subjective corrections while HDR remains active.\n\n"
             "RECOMMENDED WORKFLOW\n"
-            "1. First run the Windows HDR Calibration app from the Microsoft Store and create an HDR profile for your display.\n"
-            "2. Import that HDR .ICM profile here. Import opens directly in Windows' system color-profile directory.\n"
-            "3. Enable Live Mode and make SMALL corrections. White Balance Temperature / Green–Magenta Tint use a smooth white-point adaptation, RGB Fine Balance uses luminance-normalized channel balance, and Color Saturation uses a luminance-preserving Rec.2020 chroma matrix.\n"
-            "4. Gamma / Midtone Response is a traditional control only: 2.200 is neutral. Midtone Brightness and Contrast / Tonal Separation are profile corrections with anchored black/white endpoints.\n"
-            "5. Use Toggle SDR / HDR to compare subjective white balance and color against SDR. Virtual HDR OSD never installs, replaces or associates an SDR profile.\n"
-            "6. Export the resulting HDR ICM when satisfied.\n\n"
+            "1. Create the base HDR profile with Windows HDR Calibration.\n"
+            "2. Import that HDR .ICM profile here.\n"
+            "3. Use Live Apply and make small Temperature, Tint, RGB, Saturation, traditional Gamma, Midtone Brightness and Contrast corrections.\n"
+            "4. Optional SDR-in-HDR Gamma Correction converts Windows' piecewise-sRGB SDR response toward pure gamma 2.2 using dylanraga's documented PQ-domain mapping. Auto reads Windows' SDR reference white internally; no SDR-brightness slider is duplicated here.\n"
+            "5. This gamma correction is display-wide and can also affect native HDR10 / RTX HDR content. Use Alt+1 to disable it before native HDR content and Alt+2 to restore the selected correction for the SDR desktop.\n"
+            "6. Install the independent watchdog from Watchdog Settings if you want profile-association recovery and Alt+1 / Alt+2 to remain available after closing this GUI.\n"
+            "7. Export the resulting HDR ICM when satisfied.\n\n"
             "IMPORTANT\n"
-            "This app does not replace a colorimeter, spectrophotometer or professional calibration software. It intentionally relies on visual judgement and is designed for small personal corrections, including matching HDR white balance and perceived color to the display's SDR appearance."
+            "This app does not replace a colorimeter, spectrophotometer or professional calibration workflow. It intentionally relies on visual judgement for small personal corrections."
         )
+
+    def _show_watchdog_settings(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Watchdog Settings")
+        dialog.setMinimumWidth(620)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        title = StrongBodyLabel("Standalone Color Profile Mode Watchdog", dialog)
+        layout.addWidget(title)
+        description = BodyLabel(
+            "The watchdog is independent of Virtual HDR OSD. It keeps the Windows STANDARD (SDR) and EXTENDED (HDR) profile associations stable across Win + Alt + B transitions. "
+            "When this app has prepared gamma-correction profiles, the watchdog also keeps Alt+1 (correction OFF) and Alt+2 (correction ON) available after the GUI closes. It never creates a generic SDR fallback.",
+            dialog,
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        hint = CaptionLabel("Install captures the current SDR/HDR associations. Re-run Install after intentionally changing either default profile.", dialog)
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QHBoxLayout()
+        install = PrimaryPushButton("Install Watchdog", dialog)
+        uninstall = PushButton("Uninstall Watchdog", dialog)
+        close = PushButton("Close", dialog)
+        install.clicked.connect(lambda: self._run_watchdog_script("2- OPTIONAL - Install-Watchdog.bat"))
+        uninstall.clicked.connect(lambda: self._run_watchdog_script("Uninstall-Watchdog.bat"))
+        close.clicked.connect(dialog.accept)
+        buttons.addWidget(install)
+        buttons.addWidget(uninstall)
+        buttons.addStretch(1)
+        buttons.addWidget(close)
+        layout.addLayout(buttons)
+        dialog.exec()
+
+    def _run_watchdog_script(self, name: str) -> None:
+        if name.startswith("2-"):
+            display = self._selected_display()
+            if display is not None:
+                self._prepare_gamma_hotkey_profiles(display)
+        path = RESOURCE_ROOT / name
+        if not path.is_file():
+            # Source-tree fallback.
+            candidate = PACKAGE_ROOT.parents[1] / name
+            path = candidate if candidate.is_file() else path
+        if not path.is_file():
+            QMessageBox.critical(self, "Watchdog Settings", f"Watchdog script not found:\n{path}")
+            return
+        try:
+            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)], cwd=str(path.parent))
+        except Exception as exc:
+            QMessageBox.critical(self, "Watchdog Settings", f"Could not launch watchdog setup:\n\n{exc}")
 
     # ----------------------------------------------------------------------------------
     # Display detection and application
@@ -584,6 +809,7 @@ class MainWindow(FluentWidget):
         # While HDR is active the STANDARD association can be queried safely and remembered
         # without changing it. This keeps the watchdog aligned with the user's actual SDR profile.
         self._remember_current_sdr_profile(selected)
+        self._capture_current_hdr_base(selected, load_controls=True)
         if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
             QTimer.singleShot(650, lambda: self._apply_mode_profile("HDR", "Automatic Mode Switching"))
 
@@ -627,6 +853,83 @@ class MainWindow(FluentWidget):
         )
 
 
+    def _capture_current_hdr_base(self, display: DisplayInfo, *, load_controls: bool = False) -> None:
+        """Remember the real Windows HDR default as the immutable source profile.
+
+        App-managed working profiles are never promoted to base profiles. This prevents
+        repeated HDR transitions from recursively editing an already edited profile.
+        """
+        try:
+            profile_name = get_default_profile(display, "HDR")
+        except Exception:
+            return
+        if not profile_name or profile_name.startswith("Virtual_HDR_OSD_"):
+            return
+        profile_path = get_color_directory() / Path(profile_name).name
+        if not profile_path.is_file():
+            return
+        self._base_hdr_profiles[display.key] = {"profile_name": profile_name, "profile_path": str(profile_path)}
+        self.state.hdr.base_profile = str(profile_path)
+        self.state.hdr.base_profile_name = profile_name
+        self.state.hdr.imported_profile = str(profile_path)
+        if load_controls:
+            try:
+                imported = import_profile(profile_path, "HDR")
+                correction = self.state.hdr.sdr_gamma_correction
+                self.state.hdr = imported.state
+                self.state.hdr.sdr_gamma_correction = correction
+                self.state.hdr.base_profile = str(profile_path)
+                self.state.hdr.base_profile_name = profile_name
+                self.state.hdr.imported_profile = str(profile_path)
+                self._load_mode_into_controls("HDR")
+                self.profile_path_edit.setText(str(profile_path))
+            except Exception:
+                pass
+        self._save_state_now()
+
+    def _cleanup_legacy_managed_profiles(self, display: DisplayInfo) -> None:
+        """Remove only old Virtual HDR OSD timestamped/companion profiles.
+
+        Profiles are removed by their installed filename, never by ICC description, so a
+        user's original Windows HDR Calibration profile is not touched even when older
+        app-generated copies inherited the same visible description.
+        """
+        names: set[str] = set()
+        for entry in self._persisted_live_registry.values():
+            if isinstance(entry, dict):
+                name = str(entry.get("profile_name", ""))
+                if name.startswith("VirtualHDR_OSD_") or name.startswith("Virtual_HDR_OSD_"):
+                    names.add(name)
+        if GAMMA_HOTKEY_STATE_PATH.is_file():
+            try:
+                payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                displays = payload.get("displays", {}) if isinstance(payload, dict) else {}
+                for entry in displays.values() if isinstance(displays, dict) else ():
+                    if not isinstance(entry, dict):
+                        continue
+                    profiles = entry.get("profiles", {})
+                    if isinstance(profiles, dict):
+                        for name in profiles.values():
+                            if isinstance(name, str) and (name.startswith("VirtualHDR_OSD_") or name.startswith("Virtual_HDR_OSD_")):
+                                names.add(name)
+                    active = entry.get("active_profile")
+                    if isinstance(active, str) and (active.startswith("VirtualHDR_OSD_") or active.startswith("Virtual_HDR_OSD_")):
+                        names.add(active)
+            except Exception:
+                pass
+        for name in names:
+            try:
+                remove_profile(name, display, "HDR")
+            except Exception:
+                pass
+
+    def _working_profile_paths(self, display: DisplayInfo) -> tuple[Path, Path]:
+        token = hashlib.sha256(display.key.encode("utf-8")).hexdigest()[:10]
+        return (
+            LIVE_ROOT / f"Virtual_HDR_OSD_{token}_Off.icm",
+            LIVE_ROOT / f"Virtual_HDR_OSD_{token}_On.icm",
+        )
+
     def _toggle_windows_mode(self) -> None:
         try:
             display = self._selected_display()
@@ -659,45 +962,210 @@ class MainWindow(FluentWidget):
         if display is None:
             self._set_status("Select a detected display before applying a profile.", "error")
             return
-        state = self.state.hdr if mode == "HDR" else self.state.sdr
-        profile_path: Path | None = None
+
+        # Capture the real Windows HDR profile only when it is not one of our two
+        # stable working slots. All edits are always derived from this base.
+        self._capture_current_hdr_base(display)
+        state = self.state.hdr
         try:
-            transform = build_transform(state, hdr=mode == "HDR")
-            profile_data = build_profile(mode, state, transform)
-            digest = hashlib.sha256(profile_data).hexdigest()[:12]
-            stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"VirtualHDR_OSD_Live_{mode}_{stamp}_{digest}.icm"
-            profile_path = LIVE_ROOT / filename
-            profile_path.write_bytes(profile_data)
-            installed_name = install_and_associate_profile(profile_path, display, mode)
+            current_name = get_default_profile(display, "HDR")
+        except Exception:
+            current_name = ""
+        if (current_name.startswith("VirtualHDR_OSD_") or current_name.startswith("Virtual_HDR_OSD_")) and state.base_profile_name:
+            try:
+                reapply_existing_default_profile(display, "HDR", state.base_profile_name)
+            except Exception:
+                pass
+        self._cleanup_legacy_managed_profiles(display)
+        off_path, on_path = self._working_profile_paths(display)
+        selected_option = state.sdr_gamma_correction
+        enabled = selected_option != "Off"
+
+        try:
+            variants: list[tuple[str, Path, ModeState, float | None]] = []
+
+            off_state = ModeState.from_dict(state.to_dict(), "HDR")
+            off_state.sdr_gamma_correction = "Off"
+            off_state.profile_name = "Virtual HDR OSD - Working Profile (Correction Off)"
+            variants.append(("Off", off_path, off_state, None))
+
+            on_option = self._last_enabled_gamma_correction if self._last_enabled_gamma_correction != "Off" else "Auto (Recommended)"
+            on_state = ModeState.from_dict(state.to_dict(), "HDR")
+            on_state.sdr_gamma_correction = on_option
+            on_state.profile_name = "Virtual HDR OSD - Working Profile (Correction On)"
+            detected_white = None
+            if on_option == "Auto (Recommended)":
+                try:
+                    detected_white = get_sdr_white_level_nits(display)
+                except Exception:
+                    detected_white = None
+            on_white = resolve_white_level(on_option, detected_white)
+            variants.append((on_option, on_path, on_state, on_white))
+
+            installed: dict[str, tuple[str, Path]] = {}
+            for label, path, variant, white in variants:
+                # Stable filenames are intentionally reused. Remove the previous
+                # app-owned copy before reinstalling it so Windows never accumulates
+                # timestamped/numbered HDR profiles.
+                try:
+                    remove_profile(path.name, display, "HDR")
+                except Exception:
+                    pass
+                transform = build_transform(variant, hdr=True, sdr_white_nits=white)
+                path.write_bytes(build_profile("HDR", variant, transform))
+                name = install_and_associate_profile(path, display, "HDR", make_default=False)
+                installed[label] = (name, path)
+
+            active_key = on_option if enabled else "Off"
+            active_name, active_path = installed[active_key]
+            reapply_existing_default_profile(display, "HDR", active_name)
         except Exception as exc:
-            if profile_path is not None:
-                try: profile_path.unlink(missing_ok=True)
-                except OSError: pass
             if reason == "Live update":
                 self.state.live_mode = False
                 self.live_timer.stop()
                 with QSignalBlocker(self.live_checkbox):
                     self.live_checkbox.setChecked(False)
-            self._set_status(f"{reason} failed for {mode}: {exc}", "error")
+            self._set_status(f"{reason} failed for HDR: {exc}", "error")
             return
 
-        key = f"{display.key}|{mode}"
-        old = self._live_profiles.get((display.key, mode))
-        if old is None:
-            persisted = self._persisted_live_registry.get(key, {})
-            if persisted.get("profile_name"):
-                old = (persisted["profile_name"], Path(persisted.get("profile_path", "")), display)
-        cleanup = ""
-        if old and old[0] != installed_name:
-            removed, detail = remove_profile(old[0], old[2], mode)
-            cleanup = f" Previous live profile: {'removed' if removed else 'retained'} ({detail})."
-            try: old[1].unlink(missing_ok=True)
-            except OSError: pass
-        self._live_profiles[(display.key, mode)] = (installed_name, profile_path, display)
-        self._persisted_live_registry[key] = {"profile_name": installed_name, "profile_path": str(profile_path)}
+        key = f"{display.key}|HDR"
+        self._live_profiles[(display.key, "HDR")] = (active_name, active_path, display)
+        self._persisted_live_registry[key] = {
+            "profile_name": active_name,
+            "profile_path": str(active_path),
+            "base_profile_name": self._base_hdr_profiles.get(display.key, {}).get("profile_name", state.base_profile_name),
+            "base_profile_path": self._base_hdr_profiles.get(display.key, {}).get("profile_path", state.base_profile),
+        }
         self._save_live_registry()
-        self._set_status(f"{reason}: activated {installed_name} for {display.friendly_name} in {mode} mode.{cleanup}", "ok")
+        self._write_gamma_runtime_state(display, installed, on_option, enabled, active_name, active_path)
+        self._set_status(
+            f"{reason}: updated the stable Virtual HDR OSD working profile for {display.friendly_name}. "
+            f"Gamma correction is {'ON' if enabled else 'OFF'}; no timestamped profile was created.",
+            "ok",
+        )
+
+    def _write_gamma_runtime_state(
+        self,
+        display: DisplayInfo,
+        installed: dict[str, tuple[str, Path]],
+        on_option: str,
+        enabled: bool,
+        active_name: str,
+        active_path: Path,
+    ) -> None:
+        try:
+            payload: dict[str, object] = {}
+            if GAMMA_HOTKEY_STATE_PATH.is_file():
+                try:
+                    candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                except Exception:
+                    payload = {}
+            displays_state = payload.get("displays")
+            if not isinstance(displays_state, dict):
+                displays_state = {}
+                payload["displays"] = displays_state
+            base = self._base_hdr_profiles.get(display.key, {})
+            off_name, off_path = installed["Off"]
+            on_name, on_path = installed[on_option]
+            displays_state[display.key] = {
+                "display_name": display.friendly_name,
+                "gdi_name": display.gdi_name,
+                "selected": on_option,
+                "enabled": enabled,
+                "active_profile": active_name,
+                "active_profile_path": str(active_path),
+                "base_profile": base.get("profile_name", self.state.hdr.base_profile_name),
+                "base_profile_path": base.get("profile_path", self.state.hdr.base_profile),
+                "profiles": {"Off": off_name, "On": on_name},
+                "paths": {"Off": str(off_path), "On": str(on_path)},
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            payload["schema"] = "virtual-hdr-osd-gamma-hotkeys-v2"
+            GAMMA_HOTKEY_STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _publish_gamma_runtime_intent(self, display: DisplayInfo) -> None:
+        """Publish ON/OFF intent before profile generation to prevent watchdog races."""
+        try:
+            payload: dict[str, object] = {}
+            if GAMMA_HOTKEY_STATE_PATH.is_file():
+                try:
+                    candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                except Exception:
+                    payload = {}
+            displays_state = payload.get("displays")
+            if not isinstance(displays_state, dict):
+                displays_state = {}
+                payload["displays"] = displays_state
+            entry = displays_state.get(display.key)
+            if not isinstance(entry, dict):
+                entry = {
+                    "display_name": display.friendly_name,
+                    "gdi_name": display.gdi_name,
+                    "profiles": {},
+                    "paths": {},
+                }
+                displays_state[display.key] = entry
+            entry["selected"] = self._last_enabled_gamma_correction
+            entry["enabled"] = self.state.hdr.sdr_gamma_correction != "Off"
+            entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            payload["schema"] = "virtual-hdr-osd-gamma-hotkeys"
+            GAMMA_HOTKEY_STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _update_gamma_runtime_state(self, display: DisplayInfo, profile_name: str, profile_path: Path) -> None:
+        """Publish the exact profile currently active so the persistent watchdog never overrides the GUI.
+
+        The standalone watchdog may be running while this application is open. Its periodic
+        association recovery must follow the profile most recently applied by the GUI rather
+        than restoring an older profile captured when the watchdog was installed.
+        """
+        try:
+            payload: dict[str, object] = {}
+            if GAMMA_HOTKEY_STATE_PATH.is_file():
+                try:
+                    candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                    if isinstance(candidate, dict):
+                        payload = candidate
+                except Exception:
+                    payload = {}
+            displays_state = payload.get("displays")
+            if not isinstance(displays_state, dict):
+                displays_state = {}
+                payload["displays"] = displays_state
+            entry = displays_state.get(display.key)
+            if not isinstance(entry, dict):
+                entry = {
+                    "display_name": display.friendly_name,
+                    "gdi_name": display.gdi_name,
+                    "profiles": {},
+                    "paths": {},
+                }
+                displays_state[display.key] = entry
+            entry["selected"] = self._last_enabled_gamma_correction
+            entry["enabled"] = self.state.hdr.sdr_gamma_correction != "Off"
+            entry["active_profile"] = profile_name
+            entry["active_profile_path"] = str(profile_path)
+            entry["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            payload["schema"] = "virtual-hdr-osd-gamma-hotkeys"
+            GAMMA_HOTKEY_STATE_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception:
+            # Runtime coordination is best-effort and must never prevent profile application.
+            pass
+
+    def _prepare_gamma_hotkey_profiles_for_current(self) -> None:
+        # Legacy compatibility hook. Working OFF/ON profiles are now generated in
+        # _apply_mode_profile using two stable filenames only.
+        return
+
+    def _prepare_gamma_hotkey_profiles(self, display: DisplayInfo) -> None:
+        return
 
     def _load_profile_from_path(self, source: Path) -> None:
         try:
@@ -756,7 +1224,7 @@ class MainWindow(FluentWidget):
         if path.suffix.lower() not in (".icc", ".icm"):
             path = path.with_suffix(".icm")
         try:
-            transform = build_transform(state, hdr=True)
+            transform = build_transform(state, hdr=True, sdr_white_nits=self._effective_sdr_white_nits())
             path.write_bytes(build_profile("HDR", state, transform))
             self.profile_path_edit.setText(str(path))
             self._set_status(f"Exported HDR profile to {path}", "ok")
@@ -777,7 +1245,11 @@ class MainWindow(FluentWidget):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         self.live_timer.stop()
+        self.gamma_companion_timer.stop()
         self.mode_timer.stop()
+        self.gamma_runtime_timer.stop()
+        if self._hotkey_listener is not None:
+            self._hotkey_listener.close()
         try:
             STATE_PATH.write_text(json.dumps(self.state.to_dict(), indent=2), encoding="utf-8")
         except OSError:

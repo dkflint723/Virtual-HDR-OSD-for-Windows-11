@@ -28,6 +28,7 @@ class ModeState:
     # Retained only so older embedded states deserialize harmlessly. These controls
     # are not exposed and are always neutralized on import.
     gamma_conversion: str = "None"
+    sdr_gamma_correction: str = "Off"
     exposure: float = 0.0
     low_lights: float = 0.0
     mid_lights: float = 0.0
@@ -67,8 +68,8 @@ class ModeState:
         allowed = {f.name for f in fields(cls)}
         merged.update({k: v for k, v in data.items() if k in allowed})
 
-        # v1.0.0-v1.0.2 stored Gamma as a log2 trim around 0. Convert only that
-        # legacy representation; v1.0.3+ already stores an explicit gamma value.
+        # Older development profiles stored Gamma as a log2 trim around 0. Convert only
+        # that legacy representation; current profiles store an explicit gamma value.
         if "gamma" in data and "gamma_fix_enabled" not in data:
             try:
                 legacy_gamma = float(data["gamma"])
@@ -105,6 +106,10 @@ class ModeState:
         merged["mid_lights"] = 0.0
         merged["high_lights"] = 0.0
         merged["gamma_conversion"] = "None"
+        allowed_corrections = {"Off", "Auto (Recommended)", "100 nits / Brightness 5", "200 nits / Brightness 30", "300 nits / Brightness 55", "400 nits / Brightness 80", "Unspecified", "SDR"}
+        merged["sdr_gamma_correction"] = str(merged.get("sdr_gamma_correction", "Off"))
+        if merged["sdr_gamma_correction"] not in allowed_corrections:
+            merged["sdr_gamma_correction"] = "Off"
 
         merged["minimum_luminance_nits"] = min(
             merged["minimum_luminance_nits"], merged["peak_luminance_nits"]

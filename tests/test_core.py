@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from sdr_hdr_profile_creator.curves import build_transform
+from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma22
 from sdr_hdr_profile_creator.icc import _read_tags, build_profile, import_profile
 from sdr_hdr_profile_creator.model import ApplicationState, ModeState
 
@@ -145,6 +146,32 @@ class CoreTests(unittest.TestCase):
         self.assertIn(b"MHC2", tags)
         self.assertNotIn(b"vcgt", tags)
         self.assertIn(b"sdhs", tags)
+
+    def test_dylan_direction_darkens_sdr_midtones_and_leaves_hdr_above_white_untouched(self):
+        white = 200.0
+        mid_input = pq_inverse_eotf(10.0)
+        corrected = transform_piecewise_srgb_to_gamma22(mid_input, white)
+        self.assertLess(corrected, mid_input)
+        hdr_input = pq_inverse_eotf(500.0)
+        self.assertAlmostEqual(transform_piecewise_srgb_to_gamma22(hdr_input, white), hdr_input, places=12)
+
+    def test_auto_white_resolution_uses_windows_readback(self):
+        self.assertEqual(resolve_white_level("Auto (Recommended)", 312.5), 312.5)
+        self.assertEqual(resolve_white_level("Auto (Recommended)", None), 200.0)
+        self.assertEqual(resolve_white_level("100 nits / Brightness 5", 300.0), 100.0)
+
+    def test_gamma_correction_is_independent_from_traditional_gamma(self):
+        off = ModeState.neutral("HDR")
+        on = ModeState.neutral("HDR")
+        on.sdr_gamma_correction = "200 nits / Brightness 30"
+        t_off = build_transform(off, True)
+        t_on = build_transform(on, True)
+        self.assertAlmostEqual(t_off.red[len(t_off.red)//4], (len(t_off.red)//4)/(len(t_off.red)-1), places=6)
+        self.assertNotEqual(t_off.red, t_on.red)
+        darker = ModeState.neutral("HDR")
+        darker.sdr_gamma_correction = "200 nits / Brightness 30"
+        darker.gamma = 2.35
+        self.assertNotEqual(build_transform(darker, True).red, t_on.red)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 [project]
 name = "virtual-hdr-osd-for-windows"
-version = "1.0.9"
+version = "0"
 description = "HDR pseudo-calibration OSD and MHC2 profile editor for Windows 11"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

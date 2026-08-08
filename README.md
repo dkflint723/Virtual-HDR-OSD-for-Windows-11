@@ -1,6 +1,6 @@
-# Virtual HDR OSD for Windows 11
+# Virtual HDR OSD for Windows
 
-**Virtual HDR OSD for Windows 11** is a lightweight Windows 11 HDR profile editor designed as a software counterpart to the controls that many monitors disable when HDR mode is enabled.
+**Virtual HDR OSD for Windows** is a lightweight Windows 11 HDR profile editor designed as a software counterpart to the controls that many monitors disable when HDR mode is enabled.
 
 <img src="assets/tab1.png">
 
@@ -9,6 +9,8 @@
 Most HDR monitors lock or substantially reduce access to their physical OSD controls after switching to HDR. White balance, gamma, per-channel RGB balance, saturation, brightness, contrast, and related adjustments may become unavailable or much more limited. Virtual HDR OSD provides a practical **software pseudo-calibration layer** for making small subjective corrections to an existing Windows HDR ICC/ICM profile.
 
 The application is intended for visual fine-tuning: correcting a slight warm/cool cast, reducing a green or magenta bias, matching HDR white balance more closely to a preferred SDR appearance, or making small tonal changes that the monitor's HDR OSD does not expose.
+
+**In addition to the app, a watchdog has been integrated that fixes the bug causing incorrect switching between SDR and HDR profiles in Windows 11. This watchdog is standalone and can be distributed without the app. Feel free to use it. Below is a detailed explanation of how it works.**
 
 > [!NOTE]
 > Virtual HDR OSD is not a replacement for a colorimeter, spectrophotometer, reference display, or professional calibration software. Adjustments made by eye are inherently subjective. For an objective calibration workflow, use appropriate measurement hardware and color-management software.
@@ -36,23 +38,41 @@ Windows HDR Calibration is the preferred base because it is specifically designe
 
 # Installation
 
-The project uses a self-contained Python/uv environment. Python, uv, and the virtual environment remain inside the project directory rather than requiring a system-wide Python installation.
+## Install the compiled portable .exe from Releases page
 
-Clone the repository or download as a .zip file.
+The easiest way to install it is to go to the “Releases” section of this repository and download the attached .exe file. It's portable and contains the entire app. 
 
-```text
-git clone https://github.com/Mixomo/Virtual-HDR-OSD-for-Windows-11.git
-```
+## Run from source
 
-Run:
+The source edition uses a self-contained Python/uv environment. Python, uv, and the virtual environment remain inside the project directory and do not require a system-wide Python installation.
+
+Clone the repository or download it as a ZIP, then run:
 
 ```text
 1- Install & Run.bat
 ```
 
-On the first run, the launcher prepares the local runtime and dependencies. Subsequent launches reuse the local environment.
+On first launch the script prepares the project-local runtime. Subsequent launches reuse it.
 
-The `.python`, `.uv`, and `.venv` directories are application-local runtime components and should normally be left untouched.
+## Build the single portable EXE (advanced usera & developers)
+
+Run:
+
+```text
+Build Portable EXE.bat
+```
+
+The builder creates only the portable one-file release:
+
+```text
+release\
+├─ Virtual HDR OSD for Windows.exe
+└─ Virtual HDR OSD for Windows.sha256.txt
+```
+
+The resulting EXE contains the Python/Qt application runtime and does not require Python, uv, the source tree, or the development virtual environment on the destination PC.
+
+The builder intentionally does **not** create a second standalone-folder distribution. It first runs the project's tests, then builds the GUI with Nuitka in one-file mode and disables the console window.
 
 ---
 
@@ -62,9 +82,11 @@ The interface is deliberately divided into a small number of functional areas:
 
 - **Target Display** — selects and monitors the physical display.
 - **HDR Profile Application** — controls profile application and automatic SDR/HDR transitions.
+- **SDR-in-HDR Gamma Correction** — optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys.
 - **HDR Calibration Profile** — imports, exports, and applies ICC/ICM profiles.
 - **Tone & Brightness** — fine tonal controls.
 - **Color & White Balance** — white-point, chroma, and RGB fine adjustments.
+- **Watchdog Settings…** — installs/removes the independent association watchdog and persistent gamma hotkeys.
 - **Status** — reports profile operations, mode changes, and errors.
 
 Almost every interactive control has a tooltip. Hover over a button, switch, slider, numeric field, or status element for a concise explanation.
@@ -136,6 +158,17 @@ C:\Windows\System32\spool\drivers\color
 This is where installed ICC/ICM profiles are normally stored.
 
 ---
+
+### Stable working-profile model
+
+Virtual HDR OSD never edits or overwrites the user's original Windows HDR Calibration profile. When HDR becomes active, the application reads the **currently selected Windows HDR profile** and treats it as the immutable base for the editing session. It then maintains at most two app-owned working profiles for that display:
+
+```text
+Virtual_HDR_OSD_<display>_Off.icm
+Virtual_HDR_OSD_<display>_On.icm
+```
+
+The names are stable and reused. Slider changes, Live Apply, gamma-correction changes, and SDR/HDR transitions replace these working copies instead of creating timestamped profiles. The original HDR profile remains the source and safe fallback.
 
 # HDR Profile Application
 
@@ -214,6 +247,70 @@ Use this once the desired appearance has been reached.
 Generates the current HDR profile, installs/associates it for the selected display, and applies it immediately.
 
 Use this when **Live Apply** is disabled or whenever an explicit final application is desired.
+
+---
+
+# SDR-in-HDR Gamma Correction
+
+Virtual HDR OSD optionally integrates the method documented by Dylan Raga in:
+
+```text
+https://github.com/dylanraga/win11hdr-srgb-to-gamma2.2-icm
+```
+
+Windows 11 normally represents ordinary SDR content inside the HDR desktop using the **piecewise sRGB transfer function**. A great deal of PC content was authored or visually tuned on displays behaving closer to a pure gamma 2.2 response, which can make SDR-in-HDR shadows appear more raised or washed out than expected.
+
+The optional correction follows the upstream transform direction:
+
+```text
+PQ input
+   ↓
+ST 2084 EOTF → absolute luminance
+   ↓
+normalize against Windows SDR reference white
+   ↓
+piecewise-sRGB signal value
+   ↓
+interpret through pure gamma 2.2
+   ↓
+absolute luminance
+   ↓
+ST 2084 inverse EOTF
+```
+
+Values above diffuse SDR white are left untouched by the correction layer. The application's normal **Gamma / Midtone Response** slider remains a separate traditional tone trim and is not reversed or repurposed by this feature.
+
+## Correction dropdown
+
+The dropdown contains:
+
+- **Off** — no SDR-in-HDR curve correction.
+- **Auto (Recommended)** — reads the selected HDR display's current Windows SDR reference white internally using DisplayConfig and generates the correction from that value.
+- **100 nits / Brightness 5** — upstream published mapping for Windows SDR Content Brightness 5.
+- **200 nits / Brightness 30** — upstream published mapping for Windows SDR Content Brightness 30.
+- **300 nits / Brightness 55** — upstream published mapping for Windows SDR Content Brightness 55.
+- **400 nits / Brightness 80** — upstream published mapping for Windows SDR Content Brightness 80.
+- **Unspecified** — compatibility entry matching the upstream download list; when an explicit Windows white level is unavailable, Virtual HDR OSD uses the upstream generator's 200-nit default basis.
+- **SDR** — compatibility entry matching the upstream download list, using the traditional 80-nit SDR reference basis.
+
+`Auto` is the recommended choice because it avoids manually duplicating the Windows setting and can use the actual current reference-white value while the GUI is running.
+
+## Important limitation: native HDR content
+
+This is a **display-wide MHC2 correction**. Windows does not provide a clean public mechanism for an ICC/MHC2 display calibration to affect only SDR windows while automatically bypassing native HDR10, YouTube HDR, RTX HDR, or another HDR swap chain on the same desktop.
+
+Consequently, the upstream method can also darken shadows in genuine HDR content. Use the hotkeys when moving between desktop/SDR-in-HDR content and native HDR content:
+
+```text
+Alt + 1    Disable SDR-in-HDR gamma correction
+Alt + 2    Re-enable the selected correction
+```
+
+While Virtual HDR OSD is open, the GUI registers these hotkeys when they are free. If the standalone watchdog is already running, it owns the same global hotkeys and the GUI synchronizes its dropdown/state through the shared runtime state instead of competing for duplicate registrations. The watchdog keeps the hotkeys available after the GUI closes.
+
+**Off is authoritative:** choosing `Off` (or pressing `Alt + 1`) immediately applies an uncorrected companion profile. The internal mode watchdog and the standalone watchdog are forbidden from restoring a previously corrected profile while the shared correction state is Off. `Alt + 2` is the only hotkey that re-enables the selected correction.
+
+While the GUI is open, **Auto** reads the current Windows SDR white level and regenerates the correction from that value. The app maintains only two fixed per-display working profiles: **Correction Off** and **Correction On**. Their filenames are reused rather than timestamped, so repeated Live Apply operations or SDR/HDR transitions do not accumulate new profiles in Windows. After the GUI closes, the standalone watchdog switches between those last prepared Off/On working profiles with Alt+1 and Alt+2.
 
 ---
 
@@ -491,6 +588,10 @@ Win + Alt + B
 
 The watchdog exists specifically to make those mode transitions more deterministic.
 
+## Watchdog Settings in the GUI
+
+The main window exposes a dedicated **Watchdog Settings…** button. It opens a small explanatory dialog with **Install Watchdog** and **Uninstall Watchdog** actions. The same underlying BAT files remain independently shareable; the GUI is only a convenient front end for them.
+
 ## The watchdog is independent of Virtual HDR OSD
 
 **The standalone watchdog does not require Virtual HDR OSD for Windows.**
@@ -510,6 +611,9 @@ This means the watchdog can be shared separately with another Windows 11 user wh
 
 The standalone installer contains the required watchdog logic itself and installs it under the current user's local application-data directory.
 
+> [!NOTE]
+> The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app. 
+
 ---
 
 ## What the standalone watchdog remembers
@@ -526,6 +630,8 @@ If a display has no profile for one of those associations, that missing associat
 ## What happens when the display mode changes
 
 The watchdog runs silently in the background.
+
+In addition to SDR/HDR association recovery, it watches **Alt+1** and **Alt+2**. Virtual HDR OSD prepares exactly two stable working profiles per display: Alt+1 selects the current edited profile with SDR-in-HDR gamma correction disabled, while Alt+2 selects the same edited state with the chosen correction enabled. The watchdog never creates timestamped profiles or a bank of per-luminance companions. Auto is recalculated from the exact Windows SDR white level whenever the GUI regenerates the working pair.
 
 When Windows changes display mode, it gives the operating system a short period to complete the transition and then reasserts the previously captured profile associations.
 
@@ -596,12 +702,6 @@ Run:
 
 ```text
 Uninstall-Watchdog.bat
-```
-
-or the separately distributed:
-
-```text
-Uninstall-Color-Profile-Watchdog.bat
 ```
 
 The uninstaller:
@@ -774,8 +874,34 @@ It calibrates important HDR display characteristics before Virtual HDR OSD's sub
 
 ---
 
+# SDR-in-HDR gamma-correction reference
+
+The optional SDR-in-HDR correction is an independent Python implementation of the transfer-function method documented by **dylanraga / win11hdr-srgb-to-gamma2.2-icm**. It follows the current NVIDIA-path generator logic: interpret the MHC2 LUT input as PQ/ST 2084, convert to absolute luminance, derive the piecewise-sRGB signal relative to SDR white, reinterpret that signal through a pure gamma-2.2 power law, then convert the result back to PQ. Values above diffuse SDR white are left unchanged.
+
+Reference project:
+
+```text
+https://github.com/dylanraga/win11hdr-srgb-to-gamma2.2-icm
+```
+
+No upstream ICC/ICM binaries, ArgyllCMS executables, or AutoHotkey scripts are bundled by Virtual HDR OSD.
+
+---
+
 # License and third-party components
 
 See the project's third-party notices and dependency metadata for the licenses of bundled or installed dependencies.
 
 Virtual HDR OSD uses PySide6 and PySide6-Fluent-Widgets for its graphical interface. Review the applicable dependency licenses before redistribution.
+
+
+### Standalone hotkey persistence
+
+When installed after Virtual HDR OSD has prepared the stable `Correction Off` and `Correction On` working profiles, the standalone watchdog copies both exact installed profile names into its own `%LOCALAPPDATA%\ColorProfileModeWatchdog\State.json`. **Alt+1 / Alt+2 therefore do not depend on the GUI remaining open or on its runtime JSON remaining available.** A dedicated Win32 background thread owns `RegisterHotKey` and a blocking `GetMessage` loop, while the PowerShell watchdog continues handling display-mode/profile recovery separately.
+
+
+### Watchdog stable-pair capture
+
+The standalone watchdog does not trust legacy gamma companion filenames. At installation it examines the HDR profile Windows is actually using. If the active profile is a current Virtual HDR OSD stable slot such as `Virtual_HDR_OSD_<display-token>_On.icm`, the watchdog derives the matching `_Off.icm` sibling and verifies both files in the Windows color-profile directory before storing them in its own state. Stale `VirtualHDR_OSD_Gamma_*` references are ignored.
+
+If only one side of the stable pair exists, installation stops with an explicit message instead of installing a watchdog that cannot service Alt+1 / Alt+2.

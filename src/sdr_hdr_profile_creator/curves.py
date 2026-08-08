@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 
 from .model import ModeState
+from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma22
 
 
 @dataclass(slots=True)
@@ -268,13 +269,18 @@ def _contrast_curve(value: float, amount_percent: float) -> float:
     return 1.0 - 0.5 * (2.0 * (1.0 - x)) ** exponent
 
 
-def _shape_curve(value: float, state: ModeState, hdr: bool) -> float:
+def _shape_curve(value: float, state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> float:
     x = clamp(value)
     if not hdr:
         # SDR is comparison-only; Virtual HDR OSD never modifies its profile path.
         return x
 
-    # Traditional gamma only. 2.20 is mathematically neutral.
+    # Optional SDR-in-HDR correction follows dylanraga's documented direction.
+    white_level = resolve_white_level(state.sdr_gamma_correction, sdr_white_nits)
+    if white_level is not None:
+        x = transform_piecewise_srgb_to_gamma22(x, white_level)
+
+    # Traditional gamma remains an independent control. 2.20 is mathematically neutral.
     gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
     y = x**gamma_ratio
 
@@ -288,12 +294,12 @@ def _shape_curve(value: float, state: ModeState, hdr: bool) -> float:
     return clamp(y)
 
 
-def build_transform(state: ModeState, hdr: bool) -> CalibrationTransform:
+def build_transform(state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> CalibrationTransform:
     entries = max(256, min(4096, int(state.lut_entries)))
     curve: list[float] = []
     for index in range(entries):
         x = index / (entries - 1)
-        curve.append(_shape_curve(x, state, hdr))
+        curve.append(_shape_curve(x, state, hdr, sdr_white_nits))
 
     curve[0] = 0.0
     curve[-1] = 1.0
