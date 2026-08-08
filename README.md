@@ -779,12 +779,3 @@ It calibrates important HDR display characteristics before Virtual HDR OSD's sub
 See the project's third-party notices and dependency metadata for the licenses of bundled or installed dependencies.
 
 Virtual HDR OSD uses PySide6 and PySide6-Fluent-Widgets for its graphical interface. Review the applicable dependency licenses before redistribution.
----
-
-# Final note
-
-The central design principle is simple:
-
-> **Calibrate HDR properly first; use Virtual HDR OSD only for the small corrections your monitor's locked HDR OSD no longer lets you make.**
-
-For users who only need reliable SDR/HDR profile restoration, the **standalone watchdog can be used independently without installing or using Virtual HDR OSD at all.**
