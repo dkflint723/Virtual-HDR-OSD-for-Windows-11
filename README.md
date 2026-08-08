@@ -214,6 +214,7 @@ If there was no SDR profile, the application does nothing.
 After Windows completes the transition back to HDR, Virtual HDR OSD reapplies the active HDR profile.
 
 This is intended to reduce profile-association problems around repeated `Win + Alt + B` transitions.
+
 ---
 
 # HDR Calibration Profile
