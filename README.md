@@ -613,7 +613,9 @@ This means the watchdog can be shared separately with another Windows 11 user wh
 The standalone installer contains the required watchdog logic itself and installs it under the current user's local application-data directory.
 
 > [!NOTE]
-> The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app. 
+> The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app.
+>
+> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog` and configured to start automatically when you sign in to Windows. If Windows does not start it correctly after a sign-in or reboot, you can simply run the watchdog installer again. For convenience, you may keep a copy of the appropriate installer `BAT` on your Desktop: use the watchdog installer included with Virtual HDR OSD if you use the application, or the standalone `.bat` if you use the independent standalone watchdog (rename the `.bat`s if you want). Do not alternate between both installers, as they share the same installation location and the last installation will replace the previous watchdog configuration.
 
 ---
 
