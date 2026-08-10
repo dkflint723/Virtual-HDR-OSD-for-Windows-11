@@ -615,7 +615,7 @@ The standalone installer contains the required watchdog logic itself and install
 > [!NOTE]
 > The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app.
 >
-> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog` and configured to start automatically when you sign in to Windows. If Windows does not start it correctly after a sign-in or reboot, you can simply run the watchdog installer again. For convenience, you may keep a copy of the appropriate installer `BAT` on your Desktop: use the watchdog installer included with Virtual HDR OSD if you use the application, or the standalone `.bat` if you use the independent standalone watchdog (rename the `.bat`s if you want). Do not alternate between both installers, as they share the same installation location and the last installation will replace the previous watchdog configuration.
+> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog` and registered as the per-user scheduled task `Virtual HDR OSD - Color Profile Mode Watchdog`. It starts hidden at sign-in with a 10-second delay, allowing Windows to finish initializing the interactive desktop and display topology before profile recovery begins. The GUI-integrated and standalone installers use the same task and installation directory; use only the installer matching the workflow you want to configure.
 
 ---
 
@@ -685,7 +685,7 @@ The standalone watchdog is designed to operate discreetly.
 
 It does not need an open CMD window.
 
-Its startup launcher uses Windows Script Host in background mode and starts the watchdog hidden. There is no normal foreground application window to keep open.
+Its scheduled task launches Windows Script Host in background mode and starts the watchdog hidden after a 10-second sign-in delay. There is no normal foreground application window to keep open.
 
 The installed utility is stored under:
 
@@ -693,7 +693,7 @@ The installed utility is stored under:
 %LOCALAPPDATA%\ColorProfileModeWatchdog\
 ```
 
-Its persistent startup registration is per-user.
+Its persistent startup registration is a per-user Windows Task Scheduler task named `Virtual HDR OSD - Color Profile Mode Watchdog`.
 
 No Windows service is required.
 

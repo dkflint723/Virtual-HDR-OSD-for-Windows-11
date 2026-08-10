@@ -11,10 +11,10 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ErrorActionPreference='SilentlyContinue';" ^
   "$app=Join-Path $env:LOCALAPPDATA 'ColorProfileModeWatchdog';" ^
   "$watchdog=Join-Path $app 'Watchdog.ps1';" ^
+  "$task='Virtual HDR OSD - Color Profile Mode Watchdog';" ^
+  "Unregister-ScheduledTask -TaskName $task -Confirm:`$false;" ^
   "$escaped=[Regex]::Escape($watchdog);" ^
   "Get-CimInstance Win32_Process | Where-Object { ($_.Name -ieq 'powershell.exe' -or $_.Name -ieq 'pwsh.exe') -and $_.CommandLine -and ($_.CommandLine -match $escaped) } | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null };" ^
-  "$rk='HKCU:\Software\Microsoft\Windows\CurrentVersion\Run';" ^
-  "Remove-ItemProperty -Path $rk -Name 'ColorProfileModeWatchdog' -Force;" ^
   "Start-Sleep -Milliseconds 300;" ^
   "Remove-Item -LiteralPath $app -Recurse -Force;" ^
   "$startup=[Environment]::GetFolderPath('Startup');" ^

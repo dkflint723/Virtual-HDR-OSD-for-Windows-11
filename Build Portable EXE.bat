@@ -26,6 +26,11 @@ if exist "build-portable" rmdir /s /q "build-portable"
 if exist "release\Virtual HDR OSD for Windows.exe" del /q "release\Virtual HDR OSD for Windows.exe"
 if not exist "release" mkdir "release"
 
+echo Validating the embedded watchdog resources...
+powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$installer=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\2- OPTIONAL - Install-Watchdog.bat'; $uninstaller=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\Uninstall-Watchdog.bat'; $i=Get-Content -Raw -LiteralPath $installer; $u=Get-Content -Raw -LiteralPath $uninstaller; if($i -notmatch 'Register-ScheduledTask' -or $i.Contains('CurrentVersion\Run') -or $u.Contains('CurrentVersion\Run')){ throw 'Embedded watchdog resources are stale. Expected Task Scheduler registration and no legacy Run-key registration.' }"
+if errorlevel 1 goto :fail
+
 set "UV_NO_CACHE=1"
 set "UV_LINK_MODE=copy"
 set "UV_PYTHON_INSTALL_DIR=%~dp0.python"

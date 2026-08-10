@@ -69,8 +69,7 @@ $StatePath = Join-Path $AppDir 'State.json'
 $LogPath = Join-Path $AppDir 'Watchdog.log'
 $GammaStatePath = Join-Path $env:LOCALAPPDATA 'Virtual_HDR_OSD_for_Windows\gamma_hotkeys.json'
 $LauncherPath = Join-Path $AppDir 'Launcher.vbs'
-$RunKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-$RunName = 'ColorProfileModeWatchdog'
+$TaskName = 'Virtual HDR OSD - Color Profile Mode Watchdog'
 
 function Write-Log {
     param([string]$Message)
@@ -940,9 +939,13 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
 "@
     Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding ASCII
 
-    $runCommand = '"{0}" //B //Nologo "{1}"' -f (Join-Path $env:WINDIR 'System32\wscript.exe'), $LauncherPath
-    New-Item -Path $RunKey -Force | Out-Null
-    New-ItemProperty -Path $RunKey -Name $RunName -Value $runCommand -PropertyType String -Force | Out-Null
+    # Task Scheduler starts after the interactive desktop and display topology
+    # are available; HKCU\Run could launch too early and never recover.
+    $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('//B //Nologo "{0}"' -f $LauncherPath)
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+    $trigger.Delay = 'PT10S'
+    $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
 
     Write-Host ''
     Write-Host 'Captured display profile associations:' -ForegroundColor Cyan
@@ -955,7 +958,7 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
     }
 
     Write-Host ''
-    Write-Host 'Startup mode: hidden / invisible' -ForegroundColor Green
+    Write-Host 'Startup mode: Task Scheduler / hidden / delayed 10 seconds' -ForegroundColor Green
     Write-Host ('State: {0}' -f $StatePath)
     Write-Host ('Log  : {0}' -f $LogPath)
 
