@@ -9,8 +9,13 @@ echo Output:
 echo   release\Virtual HDR OSD for Windows.exe
 echo.
 
-if not exist ".venv\Scripts\python.exe" (
+set "NEEDS_RUNTIME=0"
+if not exist ".venv\Scripts\python.exe" set "NEEDS_RUNTIME=1"
+if "%NEEDS_RUNTIME%"=="0" ".venv\Scripts\python.exe" --version >nul 2>&1
+if not "%NEEDS_RUNTIME%"=="1" if errorlevel 1 set "NEEDS_RUNTIME=1"
+if "%NEEDS_RUNTIME%"=="1" (
     echo Preparing the project-local runtime first...
+    if exist ".venv" rmdir /s /q ".venv"
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Install.ps1"
     if errorlevel 1 goto :fail
 )
