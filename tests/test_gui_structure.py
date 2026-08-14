@@ -83,6 +83,21 @@ class GuiStructureTests(unittest.TestCase):
         self.assertNotIn("pythonw.exe", installer.lower())
 
 
+    def test_watchdog_scheduler_uses_sid_com_registration_with_fallback(self):
+        installer = (self.root / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
+        embedded = (self.root / "src/sdr_hdr_profile_creator/resources/2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
+        standalone = (self.root / "watchdogs standalone/Install-Watchdog.bat").read_text(encoding="utf-8")
+        for payload in (installer, embedded, standalone):
+            self.assertIn("Schedule.Service", payload)
+            self.assertIn("RegisterTaskDefinition", payload)
+            self.assertIn("currentSid", payload)
+            self.assertIn("Principal.UserId = $currentSid", payload)
+            self.assertIn("logonTrigger.UserId = $currentSid", payload)
+            self.assertIn("LogonType = 3", payload)
+            self.assertIn("HKCU Run fallback", payload)
+            self.assertNotIn("Register-ScheduledTask", payload)
+            self.assertNotIn("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME", payload)
+
     def test_gamma_off_is_immediate_and_authoritative(self):
         self.assertIn('self._apply_mode_profile("HDR", "Gamma correction changed")', self.app)
         self.assertIn('self.state.hdr.sdr_gamma_correction = "Off"', self.app)
@@ -90,7 +105,7 @@ class GuiStructureTests(unittest.TestCase):
         self.assertIn('if option == "Off":\n            return None', self.app)
 
     def test_builder_outputs_only_onefile_exe(self):
-        builder = (self.root / "Build Portable EXE.bat").read_text(encoding="utf-8")
+        builder = (self.root / "3- (Advanced users & developers) - Build Portable EXE.bat").read_text(encoding="utf-8")
         self.assertIn("--onefile", builder)
         self.assertIn('--windows-console-mode=disable', builder)
         self.assertIn('Virtual HDR OSD for Windows.exe', builder)

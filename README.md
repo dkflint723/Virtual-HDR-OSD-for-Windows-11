@@ -59,7 +59,7 @@ On first launch the script prepares the project-local runtime. Subsequent launch
 Run:
 
 ```text
-Build Portable EXE.bat
+3- (Advanced users & developers) - Build Portable EXE.bat
 ```
 
 The builder creates only the portable one-file release:
@@ -615,7 +615,7 @@ The standalone installer contains the required watchdog logic itself and install
 > [!NOTE]
 > The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app.
 >
-> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog` and registered as the per-user scheduled task `Virtual HDR OSD - Color Profile Mode Watchdog`. It starts hidden at sign-in with a 10-second delay, allowing Windows to finish initializing the interactive desktop and display topology before profile recovery begins. The GUI-integrated and standalone installers use the same task and installation directory; use only the installer matching the workflow you want to configure.
+> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog`. Its preferred autostart method is the Windows Task Scheduler COM API using the current account's SID and `InteractiveToken`, which avoids storing credentials and works consistently with local, Microsoft, Entra ID, and domain-backed interactive accounts. The task is named `Virtual HDR OSD - Color Profile Mode Watchdog` and starts hidden 10 seconds after sign-in. If Task Scheduler registration is unavailable on a particular system, the installer automatically falls back to a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry instead of failing the installation. The GUI-integrated and standalone installers use the same task/fallback name and installation directory; use only the installer matching the workflow you want to configure.
 
 ---
 
@@ -685,7 +685,7 @@ The standalone watchdog is designed to operate discreetly.
 
 It does not need an open CMD window.
 
-Its scheduled task launches Windows Script Host in background mode and starts the watchdog hidden after a 10-second sign-in delay. There is no normal foreground application window to keep open.
+Its preferred startup method is a per-user Task Scheduler task registered through the Windows Task Scheduler COM API using the current account SID. The task launches Windows Script Host in background mode after a 10-second sign-in delay. If Task Scheduler registration fails, the installer transparently uses a per-user `HKCU\...\Run` fallback. There is no normal foreground application window to keep open.
 
 The installed utility is stored under:
 
@@ -693,7 +693,7 @@ The installed utility is stored under:
 %LOCALAPPDATA%\ColorProfileModeWatchdog\
 ```
 
-Its persistent startup registration is a per-user Windows Task Scheduler task named `Virtual HDR OSD - Color Profile Mode Watchdog`.
+Its persistent startup registration is normally the per-user Windows Task Scheduler task `Virtual HDR OSD - Color Profile Mode Watchdog`; on systems where Task Scheduler registration is rejected, the installer falls back to a current-user Run-key entry with the same watchdog installation.
 
 No Windows service is required.
 

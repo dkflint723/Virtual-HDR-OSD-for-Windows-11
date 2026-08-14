@@ -12,7 +12,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
   "$app=Join-Path $env:LOCALAPPDATA 'ColorProfileModeWatchdog';" ^
   "$watchdog=Join-Path $app 'Watchdog.ps1';" ^
   "$task='Virtual HDR OSD - Color Profile Mode Watchdog';" ^
-  "Unregister-ScheduledTask -TaskName $task -Confirm:`$false;" ^
+  "try{ $svc=New-Object -ComObject 'Schedule.Service'; $svc.Connect(); $svc.GetFolder('\').DeleteTask($task,0) }catch{};" ^
+  "Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force;" ^
   "$escaped=[Regex]::Escape($watchdog);" ^
   "Get-CimInstance Win32_Process | Where-Object { ($_.Name -ieq 'powershell.exe' -or $_.Name -ieq 'pwsh.exe') -and $_.CommandLine -and ($_.CommandLine -match $escaped) } | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null };" ^
   "Start-Sleep -Milliseconds 300;" ^

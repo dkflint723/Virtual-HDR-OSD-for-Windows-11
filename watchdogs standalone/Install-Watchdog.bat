@@ -939,13 +939,71 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
 "@
     Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding ASCII
 
-    # Task Scheduler starts after the interactive desktop and display topology
-    # are available; HKCU\Run could launch too early and never recover.
-    $action = New-ScheduledTaskAction -Execute (Join-Path $env:WINDIR 'System32\wscript.exe') -Argument ('//B //Nologo "{0}"' -f $LauncherPath)
-    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-    $trigger.Delay = 'PT10S'
-    $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel Limited
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+    # Register persistence through the Task Scheduler COM API instead of the
+    # ScheduledTasks CIM cmdlets.  A SID is unambiguous for local, Microsoft,
+    # Entra ID, and domain-backed interactive accounts, and InteractiveToken
+    # requires no stored password.  Keep HKCU Run only as a compatibility
+    # fallback if Task Scheduler registration is unavailable on this machine.
+    $startupMethod = 'Task Scheduler (COM / current-user SID)'
+    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    $currentSid = $currentIdentity.User.Value
+    $wscriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
+    $taskArguments = '//B //Nologo "{0}"' -f $LauncherPath
+
+    try {
+        $taskService = New-Object -ComObject 'Schedule.Service'
+        $taskService.Connect()
+        $taskRoot = $taskService.GetFolder('\')
+
+        # Delete a previous definition first. This also repairs tasks created by
+        # older builds with an incompatible principal/trigger identity.
+        try { $taskRoot.DeleteTask($TaskName, 0) } catch {}
+
+        $taskDefinition = $taskService.NewTask(0)
+        $taskDefinition.RegistrationInfo.Description = 'Keeps Windows SDR/HDR color profile associations stable across display-mode changes.'
+        $taskDefinition.Settings.Enabled = $true
+        $taskDefinition.Settings.StartWhenAvailable = $true
+        $taskDefinition.Settings.DisallowStartIfOnBatteries = $false
+        $taskDefinition.Settings.StopIfGoingOnBatteries = $false
+        $taskDefinition.Settings.MultipleInstances = 2  # TASK_INSTANCES_IGNORE_NEW
+
+        # TASK_LOGON_INTERACTIVE_TOKEN = 3, TASK_RUNLEVEL_LUA = 0.
+        $taskDefinition.Principal.UserId = $currentSid
+        $taskDefinition.Principal.LogonType = 3
+        $taskDefinition.Principal.RunLevel = 0
+
+        # TASK_TRIGGER_LOGON = 9. LogonTrigger.UserId accepts a SID.
+        $logonTrigger = $taskDefinition.Triggers.Create(9)
+        $logonTrigger.UserId = $currentSid
+        $logonTrigger.Delay = 'PT10S'
+        $logonTrigger.Enabled = $true
+
+        # TASK_ACTION_EXEC = 0.
+        $execAction = $taskDefinition.Actions.Create(0)
+        $execAction.Path = $wscriptPath
+        $execAction.Arguments = $taskArguments
+
+        # TASK_CREATE_OR_UPDATE = 6; TASK_LOGON_INTERACTIVE_TOKEN = 3.
+        $taskRoot.RegisterTaskDefinition(
+            $TaskName,
+            $taskDefinition,
+            6,
+            $currentSid,
+            $null,
+            3,
+            $null
+        ) | Out-Null
+
+        # Remove an old fallback entry if a previous installation needed it.
+        Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
+    }
+    catch {
+        $startupMethod = 'HKCU Run fallback'
+        Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $_.Exception.Message)
+        $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
+        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+        New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+    }
 
     Write-Host ''
     Write-Host 'Captured display profile associations:' -ForegroundColor Cyan
@@ -958,7 +1016,7 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
     }
 
     Write-Host ''
-    Write-Host 'Startup mode: Task Scheduler / hidden / delayed 10 seconds' -ForegroundColor Green
+    Write-Host ('Startup mode: {0} / hidden / 10-second Task Scheduler delay when supported' -f $startupMethod) -ForegroundColor Green
     Write-Host ('State: {0}' -f $StatePath)
     Write-Host ('Log  : {0}' -f $LogPath)
 
