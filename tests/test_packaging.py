@@ -50,6 +50,19 @@ class WatchdogPackagingTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, script)
 
+    def test_watchdog_guards_its_own_startup(self):
+        """A hung instance holds the singleton and blocks every healthy one."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        for needle in ("ArmStartupGuard", "MarkStartupComplete", "Startup: singleton acquired."):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, script)
+        # The guard is useless if it is armed after the step that blocks.
+        self.assertLess(
+            script.index("ArmStartupGuard($LogPath"),
+            script.index("$state = Get-Content -Raw -LiteralPath $StatePath"),
+            "the startup guard must be armed before the work it protects",
+        )
+
     def test_watchdog_registers_its_task_for_the_current_sid(self):
         """Registering by username breaks on renamed or non-ASCII accounts."""
         script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")

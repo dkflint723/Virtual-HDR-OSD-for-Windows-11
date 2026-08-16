@@ -367,6 +367,46 @@ namespace ColorProfileWatchdog
             return gammaHotkeysRegistered;
         }
 
+        // Startup guard. The watchdog has been observed acquiring the singleton
+        // mutex and then blocking before its main loop ever begins, which leaves a
+        // process that enforces nothing while preventing any healthy instance from
+        // starting. If startup does not complete in time, say so in the log and exit
+        // so the next instance can take over. Implemented here rather than as a
+        // PowerShell timer because a scriptblock delegate invoked on a threadpool
+        // thread has no runspace and would not run.
+        private static volatile bool _startupComplete = false;
+
+        public static void MarkStartupComplete()
+        {
+            _startupComplete = true;
+        }
+
+        public static void ArmStartupGuard(string logPath, int seconds)
+        {
+            System.Threading.Thread guard = new System.Threading.Thread(delegate()
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+                while (DateTime.UtcNow < deadline)
+                {
+                    System.Threading.Thread.Sleep(200);
+                    if (_startupComplete) { return; }
+                }
+                try
+                {
+                    System.IO.File.AppendAllText(
+                        logPath,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                            + "  Startup did not finish within " + seconds
+                            + "s; exiting so a fresh instance can start."
+                            + Environment.NewLine);
+                }
+                catch { }
+                Environment.Exit(9);
+            });
+            guard.IsBackground = true;
+            guard.Start();
+        }
+
         public static int PollGammaHotkey()
         {
             int id;
@@ -1180,6 +1220,11 @@ if (-not $createdNew) {
 }
 
 try {
+    # Each step is logged so that a hang names its own location; previously the
+    # first log line came after all of this, so a stuck instance was silent.
+    Write-Log 'Startup: singleton acquired.'
+    [ColorProfileWatchdog.Native]::ArmStartupGuard($LogPath, 25)
+
     if (-not (Test-Path -LiteralPath $StatePath)) {
         Write-Log 'State.json is missing; watchdog stopped.'
         exit 2
@@ -1190,6 +1235,7 @@ try {
         Write-Log 'No saved display associations; watchdog stopped.'
         exit 3
     }
+    Write-Log 'Startup: saved state loaded.'
 
     Write-Log 'Watchdog started.'
 
@@ -1198,6 +1244,9 @@ try {
     $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
     $lastHotkeyRetry = Get-Date
     Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
+
+    # Past every step that has been seen to block; disarm the guard.
+    [ColorProfileWatchdog.Native]::MarkStartupComplete()
 
     $pollCounter = 0
     while ($true) {
