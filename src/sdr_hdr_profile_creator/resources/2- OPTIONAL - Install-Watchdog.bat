@@ -867,11 +867,23 @@ function Get-DesiredExtendedProfile {
                 $name = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
             }
 
-            # Never hand Windows a profile that is not installed; fall through to the
-            # captured state instead, which is what the old code effectively did.
+            # Never hand Windows a profile that is not installed.
             if ((-not [string]::IsNullOrWhiteSpace($name)) -and (Test-InstalledColorProfile -ProfileName $name)) {
                 return $name
             }
+
+            # The requested variant is unusable. Falling through to the captured state
+            # here would answer with the OPPOSITE variant whenever GammaEnabled still
+            # disagrees -- turning the correction back ON moments after the user chose
+            # Off, which is precisely the guarantee this block exists to keep. Try the
+            # captured name for the SAME direction, and otherwise change nothing.
+            $sameDirection = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
+            if ((-not [string]::IsNullOrWhiteSpace($sameDirection)) -and
+                (Test-InstalledColorProfile -ProfileName $sameDirection)) {
+                return $sameDirection
+            }
+            Write-Log ('Gamma correction {0} was requested for {1} but no installed profile provides it; leaving the association unchanged.' -f $wanted.ToUpper(), $CurrentDisplay.GdiName)
+            return ''
         }
     }
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import zipfile
 import unittest
 from pathlib import Path
 
@@ -55,6 +56,44 @@ class WatchdogPackagingTests(unittest.TestCase):
         self.assertIn("Principal.UserId = $currentSid", script)
         self.assertIn("logonTrigger.UserId = $currentSid", script)
         self.assertIn("HKCU Run fallback", script)
+
+
+class StandaloneArchiveTests(unittest.TestCase):
+    """The zip is distributed on its own, so it must not go stale or unlicensed."""
+
+    ARCHIVE = ROOT / "watchdogs standalone" / "watchdogs-standalone.zip"
+
+    def members(self) -> dict:
+        with zipfile.ZipFile(self.ARCHIVE) as archive:
+            return {name: archive.read(name) for name in archive.namelist()}
+
+    def test_archive_matches_the_scripts_beside_it(self):
+        """It shipped a build predating every watchdog fix in this fork."""
+        members = self.members()
+        for name in ("Install-Watchdog.bat", "Uninstall-Watchdog.bat"):
+            with self.subTest(member=name):
+                on_disk = (ROOT / "watchdogs standalone" / name).read_bytes()
+                self.assertIn(name, members)
+                self.assertEqual(
+                    hashlib.sha256(members[name]).hexdigest(),
+                    hashlib.sha256(on_disk).hexdigest(),
+                    f"{name} in the archive differs from the one beside it",
+                )
+
+    def test_archive_carries_the_licence(self):
+        """GPL-3.0: the archive is distributed separately from the repository."""
+        members = self.members()
+        self.assertIn("LICENSE", members)
+        self.assertEqual(
+            hashlib.sha256(members["LICENSE"]).hexdigest(),
+            hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest(),
+        )
+
+    def test_archive_contains_the_watchdog_fixes(self):
+        body = self.members()["Install-Watchdog.bat"].decode("utf-8", "replace")
+        for needle in ("Resolve-BaseExtendedProfile", "GammaUpdatedAt", "ConvertTo-GammaTimestamp"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, body)
 
 
 class EntryPointTests(unittest.TestCase):

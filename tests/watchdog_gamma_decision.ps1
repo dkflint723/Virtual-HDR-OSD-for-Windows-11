@@ -10,6 +10,7 @@ param([Parameter(Mandatory = $true)][string]$FunctionsPath)
 
 $ErrorActionPreference = 'Stop'   # matches the watchdog itself
 $script:fail = 0
+function Write-Log { param([string]$Message) }
 
 $colorDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vhdrosd-wd-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $colorDir | Out-Null
@@ -113,9 +114,11 @@ Set-Runtime -enabled $true -updatedAt ''
 Assert-Profile 'empty timestamp -> captured state' 'VOff.icm' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $false $old))
 
-# Never hand Windows a profile that is not installed.
+# Never hand Windows a profile that is not installed. The newer intent still wins
+# its DIRECTION though: falling back to the captured state here would answer with
+# the opposite variant and undo what the user just asked for.
 Set-Runtime -enabled $true -updatedAt $new -profiles @{ Off = 'Ghost_Off.icm'; On = 'Ghost_On.icm' }
-Assert-Profile 'GUI names an uninstalled profile -> captured state' 'VOff.icm' `
+Assert-Profile 'GUI names an uninstalled profile -> captured name, same direction' 'VOn.icm' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $false $old))
 
 # The GUI regenerates the pair under new filenames when the adapter LUID changes.
@@ -154,6 +157,17 @@ Set-RuntimeMulti @(
 )
 Assert-Profile 'unparseable timestamps everywhere -> captured state' 'VOn.icm' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+# "Off is authoritative": when the requested variant is not installed, the answer
+# must never be the opposite one.
+Set-Runtime -enabled $false -updatedAt $new -profiles @{ Off = 'Ghost_Off.icm'; On = 'VOn.icm' } -active 'Ghost_Off.icm'
+Assert-Profile 'Off requested, GUI Off missing -> captured Off, not On' 'VOff.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+$noOff = New-Saved $true $old
+$noOff.WorkingOff = 'AlsoGone.icm'
+Assert-Profile 'Off requested and nothing provides it -> change nothing' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $noOff)
 
 # --- Resolve-BaseExtendedProfile -------------------------------------------
 # The captured HDR fallback must never be one of the app's own working profiles.
