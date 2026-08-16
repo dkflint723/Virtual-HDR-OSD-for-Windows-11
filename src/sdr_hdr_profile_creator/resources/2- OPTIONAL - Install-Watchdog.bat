@@ -375,29 +375,54 @@ namespace ColorProfileWatchdog
         // PowerShell timer because a scriptblock delegate invoked on a threadpool
         // thread has no runspace and would not run.
         private static volatile bool _startupComplete = false;
+        private static long _lastAliveTicks = 0;
 
         public static void MarkStartupComplete()
         {
             _startupComplete = true;
+            MarkAlive();
         }
 
-        public static void ArmStartupGuard(string logPath, int seconds)
+        // Called once per reconcile pass. The loop has been seen to stop making
+        // progress after a reboot without throwing, logging, or exiting, which
+        // leaves a process that holds the singleton and enforces nothing.
+        public static void MarkAlive()
+        {
+            System.Threading.Interlocked.Exchange(ref _lastAliveTicks, DateTime.UtcNow.Ticks);
+        }
+
+        public static void ArmStartupGuard(string logPath, int seconds, int stallSeconds)
         {
             System.Threading.Thread guard = new System.Threading.Thread(delegate()
             {
                 DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
-                while (DateTime.UtcNow < deadline)
+                string reason = null;
+                while (true)
                 {
                     System.Threading.Thread.Sleep(200);
-                    if (_startupComplete) { return; }
+                    if (!_startupComplete)
+                    {
+                        if (DateTime.UtcNow >= deadline)
+                        {
+                            reason = "Startup did not finish within " + seconds + "s";
+                            break;
+                        }
+                        continue;
+                    }
+                    long last = System.Threading.Interlocked.Read(ref _lastAliveTicks);
+                    double stalled = (DateTime.UtcNow - new DateTime(last, DateTimeKind.Utc)).TotalSeconds;
+                    if (stalled > stallSeconds)
+                    {
+                        reason = "Reconcile loop stalled for " + ((int)stalled) + "s";
+                        break;
+                    }
                 }
                 try
                 {
                     System.IO.File.AppendAllText(
                         logPath,
                         DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
-                            + "  Startup did not finish within " + seconds
-                            + "s; exiting so a fresh instance can start."
+                            + "  " + reason + "; exiting so a fresh instance can start."
                             + Environment.NewLine);
                 }
                 catch { }
@@ -1119,9 +1144,17 @@ if ($Install) {
     $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatePath -Encoding UTF8
 
     $escapedPs1 = $PSCommandPath.Replace('"', '""')
+    # The launcher supervises rather than fire-and-forget. The watchdog exits itself
+    # when its guard sees startup or the reconcile loop stall, and without a
+    # supervisor that would simply leave no watchdog running until the next logon.
+    # Run with bWaitOnReturn = True so this script blocks until the process ends,
+    # then restart it after a short pause.
     $vbs = @"
 Set shell = CreateObject("WScript.Shell")
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, False
+Do
+  shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, True
+  WScript.Sleep 5000
+Loop
 "@
     Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding ASCII
 
@@ -1223,7 +1256,7 @@ try {
     # Each step is logged so that a hang names its own location; previously the
     # first log line came after all of this, so a stuck instance was silent.
     Write-Log 'Startup: singleton acquired.'
-    [ColorProfileWatchdog.Native]::ArmStartupGuard($LogPath, 25)
+    [ColorProfileWatchdog.Native]::ArmStartupGuard($LogPath, 25, 60)
 
     if (-not (Test-Path -LiteralPath $StatePath)) {
         Write-Log 'State.json is missing; watchdog stopped.'
@@ -1263,6 +1296,8 @@ try {
                 elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
             }
         }
+        [ColorProfileWatchdog.Native]::MarkAlive()
+
         $pollCounter++
         if (($pollCounter % 8) -ne 0) {
             Start-Sleep -Milliseconds 100

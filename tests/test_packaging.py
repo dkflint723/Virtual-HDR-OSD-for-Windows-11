@@ -56,6 +56,14 @@ class WatchdogPackagingTests(unittest.TestCase):
         for needle in ("ArmStartupGuard", "MarkStartupComplete", "Startup: singleton acquired."):
             with self.subTest(needle=needle):
                 self.assertIn(needle, script)
+        for needle in ("MarkAlive", "Reconcile loop stalled"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, script)
+        # A guard that only covers startup misses a loop that stops later, and a
+        # watchdog that exits itself needs something to start it again.
+        self.assertIn("shell.Run", script)
+        supervises = re.search(r"Do\s+shell\.Run.*, 0, True", script)
+        self.assertIsNotNone(supervises, "launcher must supervise, not fire and forget")
         # The guard is useless if it is armed after the step that blocks.
         self.assertLess(
             script.index("ArmStartupGuard($LogPath"),
