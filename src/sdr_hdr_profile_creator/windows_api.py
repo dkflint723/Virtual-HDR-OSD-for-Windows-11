@@ -568,6 +568,29 @@ def reapply_existing_default_profile(display: DisplayInfo, mode: str, profile_na
     return active
 
 
+def associate_profile(profile_name: str, display: DisplayInfo, mode: str) -> None:
+    """Ensure a already-installed profile is associated with the display.
+
+    Setting a profile as the display default does not persist unless the profile
+    is also in that display's association list, and removing a profile drops it
+    from that list. Re-adding is idempotent and cheap: unlike
+    install_and_associate_profile it does not copy the file into the colour
+    directory, so it is safe to call on every apply.
+    """
+    if not IS_WINDOWS or not hasattr(mscms, "ColorProfileAddDisplayAssociation"):
+        return
+    result = mscms.ColorProfileAddDisplayAssociation(
+        WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
+        Path(profile_name).name,
+        _luid(display),
+        display.source_id,
+        True,
+        mode == "HDR",
+    )
+    if result < 0:
+        raise _hresult_error("ColorProfileAddDisplayAssociation failed", result)
+
+
 def install_and_associate_profile(profile_path: Path, display: DisplayInfo, mode: str, make_default: bool = True) -> str:
     if not IS_WINDOWS:
         raise WindowsColorError("Windows profile APIs are only available on Windows")

@@ -76,10 +76,16 @@ class WindowTestCase(unittest.TestCase):
         self.associations: list[str] = []
         (self.color_dir / "BaseCalibration.icm").write_bytes(b"")
 
+        self.associated: list[str] = []
+
         def fake_install(path: Path, display, mode, make_default=True):
             shutil.copyfile(path, self.color_dir / path.name)
             self.installed.append(path.name)
+            self.associated.append(path.name)
             return path.name
+
+        def fake_associate(profile_name, display, mode):
+            self.associated.append(profile_name)
 
         def fake_reapply(display, mode, profile_name):
             self.associations.append(profile_name)
@@ -103,6 +109,7 @@ class WindowTestCase(unittest.TestCase):
             "get_default_profile": lambda display, mode: self.default_profiles[mode],
             "get_sdr_white_level_nits": lambda display: 240.0,
             "install_and_associate_profile": fake_install,
+            "associate_profile": fake_associate,
             "reapply_existing_default_profile": fake_reapply,
             "remove_profile": fake_remove,
             # Registering real global hotkeys from a test would be antisocial.
@@ -339,6 +346,26 @@ class ApplyPipelineTests(WindowTestCase):
             self.apply()
         self.assertEqual(self.installed, [], "a later build time counted as a settings change")
         self.assertEqual(self.removed, [])
+
+    def test_an_unchanged_variant_is_still_re_associated(self):
+        """Installing and associating are separate; only the first may be skipped.
+
+        remove_profile drops a profile from the display's association list, and
+        setting an unassociated profile as the default does not persist -- the
+        read-back succeeds and Windows reverts moments later. Skipping the
+        association on a cache hit made Reapply work while changing the
+        correction silently did not.
+        """
+        self.apply()
+        self.installed.clear()
+        self.associated.clear()
+        self.apply()
+        self.assertEqual(self.installed, [], "unchanged content should not reinstall")
+        pair = {p.name for p in self.window._working_profile_paths(self.display)}
+        self.assertEqual(
+            set(self.associated), pair,
+            "both variants must be re-associated even when nothing was reinstalled",
+        )
 
     def test_force_reinstalls_even_when_nothing_changed(self):
         self.apply()

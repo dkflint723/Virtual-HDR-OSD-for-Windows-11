@@ -49,6 +49,7 @@ from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState
 from .windows_api import (
     DisplayInfo,
     enumerate_displays,
+    associate_profile,
     install_and_associate_profile,
     get_color_directory,
     open_windows_display_settings,
@@ -1676,7 +1677,17 @@ class MainWindow(FluentWidget):
 
             installed: dict[str, tuple[str, Path]] = {}
             for label, (path, payload) in payloads.items():
-                name = self._install_variant(display, path, payload) if label in pending else path.name
+                if label in pending:
+                    name = self._install_variant(display, path, payload)
+                else:
+                    # Content is unchanged, so the file need not be reinstalled — but the
+                    # association still must be re-asserted. Removing a profile drops it
+                    # from the display's association list, and setting an unassociated
+                    # profile as the default silently fails to persist: the read-back
+                    # succeeds and Windows reverts moments later. Skipping this is why
+                    # Reapply worked while changing the correction did not.
+                    name = path.name
+                    associate_profile(name, display, "HDR")
                 installed[label] = (name, path)
 
             active_label = "On" if enabled else "Off"
