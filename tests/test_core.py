@@ -331,6 +331,39 @@ class BaseProfileNamingTests(unittest.TestCase):
             self.assertTrue((path.parent / imported.state.base_profile_name).is_file())
 
 
+class BaseNameMigrationTests(unittest.TestCase):
+    """State written by earlier versions stored a description where a name belongs."""
+
+    def test_loading_repairs_a_description_stored_as_the_name(self):
+        state = ModeState.from_dict(
+            {
+                "base_profile": r"C:\Windows\System32\spool\drivers\color\HDR Calibrated Profile 8-14-2026 132247.icc",
+                "base_profile_name": "HDR Calibrated Profile 8/14/2026 132247",
+            },
+            "HDR",
+        )
+        self.assertEqual(state.base_profile_name, "HDR Calibrated Profile 8-14-2026 132247.icc")
+        self.assertNotIn("/", state.base_profile_name)
+
+    def test_a_correct_name_is_left_alone(self):
+        state = ModeState.from_dict(
+            {"base_profile": r"C:\dir\Vendor.icm", "base_profile_name": "Vendor.icm"}, "HDR"
+        )
+        self.assertEqual(state.base_profile_name, "Vendor.icm")
+
+    def test_no_base_profile_leaves_the_name_untouched(self):
+        state = ModeState.from_dict({"base_profile": "", "base_profile_name": "Whatever"}, "HDR")
+        self.assertEqual(state.base_profile_name, "Whatever")
+
+    def test_migration_is_idempotent(self):
+        first = ModeState.from_dict(
+            {"base_profile": r"C:\d\A B.icc", "base_profile_name": "A/B"}, "HDR"
+        )
+        second = ModeState.from_dict(first.to_dict(), "HDR")
+        self.assertEqual(first.base_profile_name, second.base_profile_name)
+        self.assertEqual(second.base_profile_name, "A B.icc")
+
+
 class TemplateMergeTests(unittest.TestCase):
     """A base profile is an ICC tag template; half of one is worse than none."""
 

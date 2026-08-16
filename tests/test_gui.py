@@ -87,6 +87,14 @@ class WindowTestCase(unittest.TestCase):
         def fake_associate(profile_name, display, mode):
             self.associated.append(profile_name)
 
+        self.hdr_switch_calls: list[tuple[str, bool]] = []
+
+        def fake_set_hdr(display, enabled):
+            self.hdr_switch_calls.append((display.key, enabled))
+
+        def fake_send_toggle():
+            self.hdr_switch_calls.append(("win+alt+b", True))
+
         def fake_reapply(display, mode, profile_name):
             self.associations.append(profile_name)
             self.default_profiles[mode] = profile_name
@@ -110,6 +118,9 @@ class WindowTestCase(unittest.TestCase):
             "get_sdr_white_level_nits": lambda display: 240.0,
             "install_and_associate_profile": fake_install,
             "associate_profile": fake_associate,
+            # Both of these change the real display; never let them through.
+            "set_hdr_enabled": fake_set_hdr,
+            "send_hdr_toggle_shortcut": fake_send_toggle,
             "reapply_existing_default_profile": fake_reapply,
             "remove_profile": fake_remove,
             # Registering real global hotkeys from a test would be antisocial.
@@ -133,6 +144,63 @@ class WindowTestCase(unittest.TestCase):
 
     def read_runtime(self) -> dict:
         return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+
+
+class FixtureSafetyTests(WindowTestCase):
+    """Every call that can change the machine's colour configuration must be faked.
+
+    A new Windows-mutating helper was once added to app.py without being added
+    here, so the suite and the UI harness called the real mscms API against a
+    fabricated display. It failed on the bogus adapter LUID rather than doing
+    damage, but on a machine where that LUID resolved it would have altered real
+    profile associations.
+    """
+
+    MUTATING = (
+        "install_and_associate_profile",
+        "associate_profile",
+        "reapply_existing_default_profile",
+        "remove_profile",
+        "set_hdr_enabled",
+        "send_hdr_toggle_shortcut",
+    )
+
+    def test_every_mutating_windows_call_is_faked(self):
+        import inspect
+
+        from sdr_hdr_profile_creator import windows_api
+
+        for name in self.MUTATING:
+            with self.subTest(call=name):
+                self.assertTrue(hasattr(windows_api, name), f"{name} no longer exists")
+                patched = getattr(app_module, name)
+                real = getattr(windows_api, name)
+                self.assertIsNot(
+                    patched, real,
+                    f"{name} is not faked; the test would call the real Windows API",
+                )
+                self.assertNotEqual(
+                    inspect.getmodule(patched), windows_api,
+                    f"{name} still resolves into windows_api",
+                )
+
+    def test_the_mutating_list_still_covers_windows_api(self):
+        """Catches a newly added mutator that nobody remembered to fake."""
+        from sdr_hdr_profile_creator import windows_api
+
+        # Reads may reach the real machine; only writes must be faked.
+        read_only = {"list_installed_profiles"}
+        suspicious = {
+            name for name in dir(windows_api)
+            if not name.startswith("_")
+            and callable(getattr(windows_api, name))
+            and any(word in name for word in ("install", "associate", "remove", "set_", "send_"))
+        }
+        unlisted = suspicious - set(self.MUTATING) - read_only
+        self.assertFalse(
+            unlisted,
+            f"windows_api gained mutating call(s) {sorted(unlisted)} that are not faked in tests",
+        )
 
 
 class EditorStructureTests(WindowTestCase):

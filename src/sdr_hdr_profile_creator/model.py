@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field, fields
+from pathlib import PurePath
 from typing import Any, Literal
 
 DisplayMode = Literal["SDR", "HDR"]
@@ -121,6 +122,14 @@ class ModeState:
         merged["imported_profile"] = str(merged.get("imported_profile", ""))
         merged["base_profile"] = str(merged.get("base_profile", ""))
         merged["base_profile_name"] = str(merged.get("base_profile_name", ""))[:240]
+        # base_profile is the authoritative full path, so the name is always its
+        # basename. Deriving it repairs state written by earlier versions, which
+        # stored the ICC description here instead: Windows HDR Calibration describes
+        # a profile as "... 8/14/2026 ..." while naming the file "... 8-14-2026.icc",
+        # so the stored value was not a filename and every consumer that handed it
+        # back to Windows failed silently.
+        if merged["base_profile"]:
+            merged["base_profile_name"] = PurePath(merged["base_profile"]).name
         try:
             merged["lut_entries"] = max(256, min(4096, int(merged["lut_entries"])))
         except Exception:
