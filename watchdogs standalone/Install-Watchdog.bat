@@ -780,7 +780,23 @@ function Get-GammaEntryForDisplay {
 
     if (-not (Test-Path -LiteralPath $GammaStatePath)) { return $null }
     try {
-        $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+        # The GUI publishes this file by writing a temporary copy and renaming over
+        # the original, so a read landing in that window fails. Returning $null then
+        # makes the caller fall back to the state captured at install time, which can
+        # assert the OPPOSITE correction variant -- the user's choice appears to
+        # revert seconds after they make it, with nothing logged. Retry briefly.
+        $gamma = $null
+        foreach ($attempt in 1..4) {
+            try {
+                $raw = Get-Content -Raw -LiteralPath $GammaStatePath -ErrorAction Stop
+                if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                    $gamma = $raw | ConvertFrom-Json
+                    break
+                }
+            } catch {}
+            Start-Sleep -Milliseconds (40 * $attempt)
+        }
+        if (-not $gamma) { return $null }
         if (-not $gamma.displays) { return $null }
 
         # Records are keyed by an id derived from the adapter LUID, which Windows
