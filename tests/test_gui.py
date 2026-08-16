@@ -241,6 +241,15 @@ class EditStateTests(WindowTestCase):
         self.apply()
         self.assertEqual(self.window.dirty_label.text(), "No unapplied edits")
 
+    def test_slider_edits_are_persisted_without_an_apply(self):
+        """A kill between editing and applying used to lose the change."""
+        self.window.control_widgets["contrast"].set_value(7.5, emit=True)
+        self.assertTrue(self.window.state_save_timer.isActive())
+        self.window.state_save_timer.stop()
+        self.window._save_state_now()
+        saved = json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(saved["hdr"]["contrast"], 7.5)
+
     def test_edit_signature_tracks_the_gamma_correction_choice(self):
         before = self.window._edit_signature()
         self.window.state.hdr.sdr_gamma_correction = "200 nits / Brightness 30"
@@ -794,6 +803,54 @@ class HdrSwitchTests(WindowTestCase):
         self.display.advanced_color_supported = False
         self.window._sync_display_widgets(self.display)
         self.assertFalse(self.window.hdr_switch.isEnabled())
+
+
+class WatchdogLaunchTests(WindowTestCase):
+    """The installer runs detached, so its outcome has to be verified separately."""
+
+    def setUp(self):
+        super().setUp()
+        self.install_root = self.temp / "ColorProfileModeWatchdog"
+        self.install_root.mkdir(parents=True, exist_ok=True)
+        patcher = mock.patch.object(app_module, "WATCHDOG_INSTALL_ROOT", self.install_root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.script = self.install_root / "Watchdog.ps1"
+
+    def test_install_that_updates_the_script_is_reported_as_success(self):
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("installed", encoding="utf-8")
+        self.window._report_watchdog_outcome(True, before)
+        self.assertIn("Watchdog installed", self.window.status_label.text())
+        self.assertNotIn("Error", self.window.status_label.text())
+
+    def test_install_that_silently_does_nothing_is_reported_as_failure(self):
+        """The original `start`-based launch made this case invisible."""
+        self.script.write_text("stale", encoding="utf-8")
+        before = self.window._watchdog_script_stamp()
+        self.window._report_watchdog_outcome(True, before)
+        self.assertIn("did not complete", self.window.status_label.text())
+        self.assertIn("Error", self.window.status_label.text())
+
+    def test_uninstall_outcome_is_reported_both_ways(self):
+        self.script.write_text("still here", encoding="utf-8")
+        self.window._report_watchdog_outcome(False, 0.0)
+        self.assertIn("did not complete", self.window.status_label.text())
+
+        self.script.unlink()
+        self.window._report_watchdog_outcome(False, 0.0)
+        self.assertIn("Watchdog uninstalled", self.window.status_label.text())
+
+    def test_missing_script_stamps_as_zero_rather_than_raising(self):
+        self.assertEqual(self.window._watchdog_script_stamp(), 0.0)
+
+    def test_launch_is_not_detached_through_start(self):
+        """`start` returns success even when the batch file never runs."""
+        calls = []
+        with mock.patch.object(app_module.subprocess, "Popen", lambda *a, **k: calls.append(a[0])),              mock.patch.object(app_module.QTimer, "singleShot"):
+            self.window._run_watchdog_script("Uninstall-Watchdog.bat")
+        self.assertTrue(calls, "the installer was never launched")
+        self.assertNotIn("start", calls[0], "launching via `start` discards the exit code")
 
 
 class RebootStabilityTests(WindowTestCase):

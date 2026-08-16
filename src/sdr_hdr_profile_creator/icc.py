@@ -14,6 +14,13 @@ from .model import DisplayMode, ModeState
 
 D50_XYZ = (0.9642, 1.0, 0.8249)
 D65_XYZ = (0.95047, 1.0, 1.08883)
+# Tag groups that are only coherent when they all come from the same source.
+COUPLED_TAG_GROUPS: tuple[tuple[bytes, ...], ...] = (
+    (b"rXYZ", b"gXYZ", b"bXYZ"),   # colorants
+    (b"rTRC", b"gTRC", b"bTRC"),   # per-channel tone curves
+    (b"wtpt", b"chad"),            # media white and its adaptation to the PCS
+)
+
 PRIMARIES = {
     "SDR": (0.640, 0.330, 0.300, 0.600, 0.150, 0.060, 0.3127, 0.3290),
     "HDR": (0.708, 0.292, 0.170, 0.797, 0.131, 0.046, 0.3127, 0.3290),
@@ -281,11 +288,23 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
         try:
             source = Path(template_profile)
             if source.is_file():
-                template_tags = _read_tags(source.read_bytes())
+                template_tags = _read_tags(source.read_bytes(), strict=True)
         except (OSError, ValueError, struct.error):
+            # A truncated or malformed base is not usable as a template. Fall back
+            # to a wholly self-consistent generated profile instead of splicing.
             template_tags = {}
 
     if template_tags:
+        # Tags that only mean anything as a set. Taking some members from the base
+        # profile and synthesising the rest produces a plausible-looking profile
+        # describing a display that does not exist — a base missing gTRC and bTRC
+        # yielded its real red curve beside linear green and blue, a gross colour
+        # cast, with no error raised anywhere.
+        for group in COUPLED_TAG_GROUPS:
+            if not all(signature in template_tags for signature in group):
+                for signature in group:
+                    template_tags.pop(signature, None)
+
         tags: list[tuple[bytes, bytes]] = []
         seen: set[bytes] = set()
         for signature, payload in template_tags.items():
@@ -335,19 +354,30 @@ def content_digest(profile: bytes) -> str:
     return hashlib.sha256(bytes(mutable)).hexdigest()
 
 
-def _read_tags(data: bytes) -> dict[bytes, bytes]:
+def _read_tags(data: bytes, *, strict: bool = False) -> dict[bytes, bytes]:
+    """Parse the tag table.
+
+    Entries pointing past the end of the file are dropped, which keeps importing a
+    slightly odd profile working. ``strict`` refuses such a profile instead: a
+    caller using it as a *template* must not silently inherit half of it.
+    """
     if len(data) < 132 or data[36:40] != b"acsp":
         raise ValueError("Not a valid ICC profile")
     count = struct.unpack_from(">I", data, 128)[0]
     if count > 256 or 132 + count * 12 > len(data):
         raise ValueError("Invalid ICC tag table")
     result: dict[bytes, bytes] = {}
+    dropped = 0
     for index in range(count):
         offset = 132 + index * 12
         signature = data[offset : offset + 4]
         payload_offset, payload_size = struct.unpack_from(">II", data, offset + 4)
         if payload_offset + payload_size <= len(data):
             result[signature] = data[payload_offset : payload_offset + payload_size]
+        else:
+            dropped += 1
+    if strict and dropped:
+        raise ValueError(f"ICC profile is truncated: {dropped} of {count} tags are unreadable")
     return result
 
 

@@ -71,6 +71,11 @@ PACKAGE_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = PACKAGE_ROOT / "resources"
 GAMMA_HOTKEY_STATE_PATH = LOCAL_ROOT / "gamma_hotkeys.json"
 GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
+# Where the standalone watchdog installs itself. Read only, to confirm that its
+# installer actually ran; this app never writes there.
+WATCHDOG_INSTALL_ROOT = Path(
+    os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")
+) / "ColorProfileModeWatchdog"
 GAMMA_RUNTIME_SCHEMA = "virtual-hdr-osd-gamma-hotkeys-v2"
 
 # SDR handling is deliberately opt-in. Third-party calibration suites (Calman,
@@ -149,6 +154,11 @@ class MainWindow(FluentWidget):
         self.live_timer.setSingleShot(True)
         self.live_timer.setInterval(420)
         self.live_timer.timeout.connect(self._apply_live_edit)
+
+        self.state_save_timer = QTimer(self)
+        self.state_save_timer.setSingleShot(True)
+        self.state_save_timer.setInterval(900)
+        self.state_save_timer.timeout.connect(self._save_state_now)
 
         self.mode_timer = QTimer(self)
         self.mode_timer.setInterval(900)
@@ -801,7 +811,17 @@ class MainWindow(FluentWidget):
         else:
             self._set_status(f"HDR fine correction: {field.replace('_', ' ')} = {value:g}", "ok")
         self._update_activity_bar()
+        self._save_state_soon()
         self._queue_live_apply()
+
+    def _save_state_soon(self) -> None:
+        """Persist slider edits shortly after the user stops adjusting.
+
+        Writing on every step would rewrite the file dozens of times during a
+        drag; writing only on apply or on a clean close lost the edit whenever the
+        process was killed.
+        """
+        self.state_save_timer.start()
 
     def _load_mode_into_controls(self) -> None:
         state = self.state.hdr
@@ -1010,10 +1030,60 @@ class MainWindow(FluentWidget):
         if not path.is_file():
             QMessageBox.critical(self, "Watchdog Settings", f"Watchdog script not found:\n{path}")
             return
+        # `start` detaches immediately and discards the installer's exit code and its
+        # console output, so a failed install was indistinguishable from a successful
+        # one: the button appeared to do nothing at all. Give the installer its own
+        # visible console instead, then verify the outcome and report it.
+        before = self._watchdog_script_stamp()
         try:
-            subprocess.Popen(["cmd.exe", "/c", "start", "", str(path)], cwd=str(path.parent))
+            subprocess.Popen(
+                ["cmd.exe", "/c", str(path)],
+                cwd=str(path.parent),
+                creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+            )
         except Exception as exc:
             QMessageBox.critical(self, "Watchdog Settings", f"Could not launch watchdog setup:\n\n{exc}")
+            return
+        self._set_status(
+            f"Running {name} in a separate window. Follow its prompts; the result is "
+            "reported here when it finishes.",
+            "warning",
+        )
+        QTimer.singleShot(9000, lambda: self._report_watchdog_outcome(installing, before))
+
+    @staticmethod
+    def _watchdog_script_stamp() -> float:
+        """Modification time of the installed watchdog script, or 0 when absent."""
+        try:
+            return (WATCHDOG_INSTALL_ROOT / "Watchdog.ps1").stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _report_watchdog_outcome(self, installing: bool, before: float) -> None:
+        """Say whether the installer actually changed anything."""
+        after = self._watchdog_script_stamp()
+        if installing:
+            if after > before:
+                self._set_status(
+                    "Watchdog installed. It now keeps your SDR/HDR associations stable and "
+                    "owns Alt+1 / Alt+2.",
+                    "ok",
+                )
+            else:
+                self._set_status(
+                    "Watchdog install did not complete — the installed script was not "
+                    "updated. Check the installer window for an error message.",
+                    "error",
+                )
+            return
+        if after == 0.0:
+            self._set_status("Watchdog uninstalled.", "ok")
+        else:
+            self._set_status(
+                "Watchdog uninstall did not complete — its files are still present. "
+                "Check the uninstaller window for an error message.",
+                "error",
+            )
 
     # ----------------------------------------------------------------------------------
     # Display detection and application
@@ -1841,6 +1911,7 @@ class MainWindow(FluentWidget):
         self.live_timer.stop()
         self.mode_timer.stop()
         self.gamma_runtime_timer.stop()
+        self.state_save_timer.stop()
         if self._hotkey_listener is not None:
             self._hotkey_listener.close()
         self._save_state_now()

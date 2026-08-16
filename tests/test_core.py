@@ -8,6 +8,9 @@ from pathlib import Path
 
 from sdr_hdr_profile_creator.curves import build_transform
 from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma22
+from unittest import mock
+
+from sdr_hdr_profile_creator import icc as icc_module
 from sdr_hdr_profile_creator.icc import _parse_mhc2, _read_tags, build_profile, content_digest, import_profile
 from sdr_hdr_profile_creator.model import ApplicationState, ModeState
 
@@ -270,6 +273,76 @@ class ProfileStructureTests(unittest.TestCase):
         minimum, peak = parsed[0], parsed[1]
         self.assertAlmostEqual(minimum, 0.005, places=4)
         self.assertAlmostEqual(peak, 1450.0, places=3)
+
+
+class TemplateMergeTests(unittest.TestCase):
+    """A base profile is an ICC tag template; half of one is worse than none."""
+
+    @staticmethod
+    def curve_kind(payload: bytes | None) -> str:
+        if not payload or payload[:4] != b"curv":
+            return "absent"
+        count = struct.unpack_from(">I", payload, 8)[0]
+        if count == 0:
+            return "linear"
+        if count == 1:
+            return f"gamma{struct.unpack_from('>H', payload, 12)[0] / 256:.2f}"
+        return f"table{count}"
+
+    def build_with_base(self, base_bytes: bytes) -> dict[bytes, bytes]:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory) / "base.icm"
+            base.write_bytes(base_bytes)
+            state = ModeState.neutral("HDR")
+            state.base_profile = str(base)
+            return _read_tags(build_profile("HDR", state, build_transform(state, hdr=True)))
+
+    def vendor_like_profile(self) -> bytes:
+        """A profile whose per-channel curves are real tables, not a gamma value."""
+        state = ModeState.neutral("HDR")
+        blob = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
+        return bytes(blob)
+
+    def test_truncated_base_is_refused_rather_than_half_inherited(self):
+        full = self.vendor_like_profile()
+        with self.assertRaises(ValueError):
+            _read_tags(full[: len(full) // 2], strict=True)
+        # Non-strict stays lenient so importing an odd profile still works.
+        self.assertIsInstance(_read_tags(full[: len(full) // 2]), dict)
+
+    def test_a_base_missing_one_trc_contributes_no_trc_at_all(self):
+        """Otherwise the output mixes a real curve with synthesised neighbours."""
+        state = ModeState.neutral("HDR")
+        blob = build_profile("HDR", state, build_transform(state, hdr=True))
+        tags = dict(_read_tags(blob))
+        self.assertIn(b"gTRC", tags)
+
+        with mock.patch.object(icc_module, "_read_tags") as fake:
+            partial = {k: v for k, v in tags.items() if k != b"gTRC"}
+            fake.return_value = partial
+            with tempfile.TemporaryDirectory() as directory:
+                base = Path(directory) / "base.icm"
+                base.write_bytes(blob)
+                state.base_profile = str(base)
+                out = _read_tags(build_profile("HDR", state, build_transform(state, hdr=True)))
+
+        kinds = {sig: self.curve_kind(out.get(sig)) for sig in (b"rTRC", b"gTRC", b"bTRC")}
+        self.assertEqual(
+            len(set(kinds.values())), 1,
+            f"channel curves came from different sources: {kinds}",
+        )
+
+    def test_an_intact_base_still_supplies_its_tags(self):
+        blob = self.vendor_like_profile()
+        out = self.build_with_base(blob)
+        for signature in (b"rXYZ", b"gXYZ", b"bXYZ", b"wtpt", b"chad"):
+            with self.subTest(tag=signature):
+                self.assertIn(signature, out)
+
+    def test_coupled_groups_are_declared_for_every_multi_tag_set(self):
+        for group in icc_module.COUPLED_TAG_GROUPS:
+            with self.subTest(group=group):
+                self.assertGreaterEqual(len(group), 2)
 
 
 if __name__ == "__main__":
