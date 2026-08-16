@@ -910,6 +910,34 @@ class RebootStabilityTests(WindowTestCase):
             "the sibling of an orphaned pair was left installed forever",
         )
 
+    def test_cleanup_spares_a_configured_display_that_is_not_attached(self):
+        """A monitor that is switched off is not enumerated; it is not abandoned."""
+        absent = r"\?\DISPLAY#DEL9999#OFF#{guid}"
+        self.window.state.binding(absent).hdr_profile = "SomeBase.icm"
+        pair = [p.name for p in self.window._working_profile_paths_for(absent)]
+        for name in pair:
+            (self.color_dir / name).write_bytes(b"")
+        self.window._persisted_live_registry["absent"] = {
+            "profile_name": pair[1], "profile_path": "",
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        self.window._cleanup_legacy_managed_profiles(self.display)
+        for name in pair:
+            with self.subTest(profile=name):
+                self.assertNotIn(name, self.removed)
+
+    def test_cleanup_still_reclaims_a_display_with_no_binding(self):
+        forgotten = r"\?\DISPLAY#OLD0000#GONE#{guid}"
+        pair = [p.name for p in self.window._working_profile_paths_for(forgotten)]
+        self.window._persisted_live_registry["forgotten"] = {
+            "profile_name": pair[1], "profile_path": "",
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        self.window._cleanup_legacy_managed_profiles(self.display)
+        self.assertIn(pair[1], self.removed)
+
     def test_runtime_state_drops_records_for_a_previous_luid(self):
         """The watchdog looks entries up by gdi_name, so duplicates are rivals."""
         self.apply()

@@ -506,7 +506,7 @@ class MainWindow(FluentWidget):
         self.automatic_mode_checkbox = SwitchButton(bar)
         self.automatic_mode_checkbox.setOffText("Automatic Mode Switching")
         self.automatic_mode_checkbox.setOnText("Automatic Mode Switching")
-        self.automatic_mode_checkbox.setToolTip("Automatically follow Windows SDR/HDR transitions. HDR → SDR restores only the previously associated Windows STANDARD profile; SDR → HDR reapplies the active HDR profile. No neutral SDR profile is created.")
+        self.automatic_mode_checkbox.setToolTip("Automatically follow Windows SDR/HDR transitions. On HDR → SDR the app restores the SDR profile pinned in row 2, or, on Auto, the one Windows previously had; with SDR set to Leave unmanaged it does nothing. On SDR → HDR it reapplies the active HDR profile. An SDR profile is never created, edited, or overwritten — only the association is set.")
         automatic_enabled = self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
@@ -1516,22 +1516,36 @@ class MainWindow(FluentWidget):
                 protected.update(path.name for path in self._working_profile_paths(attached))
         except Exception:
             pass
+        # Also spare every display the user has configured, attached or not. A monitor
+        # that is switched off, unplugged, or on an inactive input is not enumerated,
+        # and deleting its pair would silently discard its calibration until the next
+        # time it happens to be connected while the app is open.
+        for stable_key in self.state.display_bindings:
+            protected.update(path.name for path in self._working_profile_paths_for(stable_key))
         for name in names - protected:
             try:
                 remove_profile(name, display, "HDR")
             except Exception:
                 pass
 
-    def _working_profile_paths(self, display: DisplayInfo) -> tuple[Path, Path]:
+    @staticmethod
+    def _working_profile_paths_for(stable_key: str) -> tuple[Path, Path]:
         # Keyed on stable_key, not key: `key` embeds the adapter LUID, which Windows
         # reissues on reboot, so the filename changed every boot and orphaned the
         # previous pair in the Windows colour directory — one leaked profile per
         # reboot, in the directory this app promises holds at most two.
-        token = hashlib.sha256(display.stable_key.encode("utf-8")).hexdigest()[:10]
+        #
+        # Taking the key rather than a DisplayInfo means the names of a display that
+        # is not attached right now are still derivable, which is what lets cleanup
+        # spare a monitor that is merely switched off.
+        token = hashlib.sha256(stable_key.encode("utf-8")).hexdigest()[:10]
         return (
             LIVE_ROOT / f"Virtual_HDR_OSD_{token}_Off.icm",
             LIVE_ROOT / f"Virtual_HDR_OSD_{token}_On.icm",
         )
+
+    def _working_profile_paths(self, display: DisplayInfo) -> tuple[Path, Path]:
+        return self._working_profile_paths_for(display.stable_key)
 
     def _toggle_windows_mode(self) -> None:
         try:

@@ -43,8 +43,11 @@ HELP_SECTIONS: tuple[tuple[str, str], ...] = (
         "Only the EXTENDED (HDR) colour-profile association for the display you select. Two profiles are "
         "installed with stable filenames — one with the SDR-in-HDR gamma correction off, one with it on — and "
         "the app switches which of the two is the Windows default.\n\n"
-        "Your STANDARD (SDR) association is never modified. The app remembers it so that it can put it back "
-        "after an HDR to SDR transition, and it never invents a neutral SDR fallback.",
+        "No SDR profile is ever created, edited or overwritten, and no neutral SDR fallback is invented. "
+        "The STANDARD (SDR) association is set at exactly one moment — an HDR to SDR transition, with "
+        "Automatic Mode Switching on — and only to a profile already installed on this PC: the one you "
+        "pinned in row 2, or, on Auto, the one Windows previously had. Set SDR to Leave unmanaged and "
+        "the association is never touched at all.",
     ),
     (
         "The editing controls",
