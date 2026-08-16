@@ -44,7 +44,7 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
-from .icc import build_profile, content_digest, import_profile
+from .icc import build_profile, content_digest, import_profile, is_app_generated
 from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState
 from .windows_api import (
     DisplayInfo,
@@ -126,6 +126,10 @@ class MainWindow(FluentWidget):
         self._persisted_live_registry = self._load_live_registry()
         self._remembered_sdr_profiles: dict[str, str | None] = {}
         self._base_hdr_profiles: dict[str, dict[str, str]] = {}
+        # name -> (mtime_ns, size, generated). Keyed by stat so a profile that is
+        # reinstalled over the top of an old one is re-examined.
+        self._generated_profile_cache: dict[str, tuple[int, int, bool]] = {}
+        self._announced_base_divergence = ""
         self.control_widgets: dict[str, SliderControl] = {}
         self._last_enabled_gamma_correction = self.state.hdr.sdr_gamma_correction if self.state.hdr.sdr_gamma_correction != "Off" else "Auto (Recommended)"
         self._hotkey_listener: GammaHotkeyListener | None = None
@@ -1226,8 +1230,17 @@ class MainWindow(FluentWidget):
         binding = self.state.binding(display.stable_key)
         installed = [
             name for name in list_installed_profiles()
-            if not self._is_managed_profile(name)
+            if not self._is_generated_profile(name)
         ]
+        if self._is_generated_profile(binding.hdr_profile):
+            # An older build listed its own output as a selectable base and this
+            # display was pinned to one. That pin outranks the Windows default
+            # permanently, so recalibrating -- with Windows HDR Calibration, or
+            # with Calman writing a new profile and making it the default -- left
+            # the app still editing the superseded one. Settings already loaded
+            # from it are kept; only the pin goes.
+            binding.hdr_profile = ""
+            self._save_state_soon()
 
         self._loading_controls = True
         try:
@@ -1396,6 +1409,59 @@ class MainWindow(FluentWidget):
     def _is_managed_profile(name: str) -> bool:
         return any(name.startswith(prefix) for prefix in MANAGED_PREFIXES)
 
+    def _is_generated_profile(self, name: str) -> bool:
+        """True for any profile this app produced, whatever it ended up called.
+
+        The filename prefixes only recognise what *this* build writes. Releases
+        before the stable working-profile names installed their output as
+        ``<base>_HDR.icm``, so for anything already on disk the content check is
+        the one that counts.
+
+        Such a profile in the colour directory is a live working profile, not a
+        calibration source: it is this app's own output for the display and is
+        rewritten on every Apply. Listing one as a base is how a display ends up
+        pinned to it, and a pin outranks the Windows default, so a freshly
+        calibrated profile can then never be adopted. Import is deliberately not
+        filtered -- loading a saved copy restores its exact settings.
+        """
+        if not name:
+            return False
+        if self._is_managed_profile(Path(name).name):
+            return True
+        path = Path(name)
+        if not path.is_file():
+            try:
+                path = get_color_directory() / path.name
+            except Exception:
+                return False
+        try:
+            stamp = path.stat()
+        except OSError:
+            return False
+        cached = self._generated_profile_cache.get(path.name)
+        if cached is not None and cached[0] == stamp.st_mtime_ns and cached[1] == stamp.st_size:
+            return cached[2]
+        generated = is_app_generated(path)
+        self._generated_profile_cache[path.name] = (stamp.st_mtime_ns, stamp.st_size, generated)
+        return generated
+
+    def _announce_diverged_base(self, pinned: str, windows_default: str) -> None:
+        """Say once that Windows' HDR default no longer matches the pinned base.
+
+        Repeated on every poll this would bury every other message, so each new
+        default is reported a single time.
+        """
+        name = Path(windows_default).name
+        if self._announced_base_divergence == name:
+            return
+        self._announced_base_divergence = name
+        self._set_status(
+            f"Windows now uses {name} as the HDR profile for this display, but "
+            f"{Path(pinned).name} stays pinned as the base being edited. Choose {name} "
+            "in the HDR box to build on the newer calibration instead.",
+            "warning",
+        )
+
     def _capture_current_hdr_base(self, display: DisplayInfo, *, load_controls: bool = False) -> None:
         """Remember the real Windows HDR default as the fallback source profile.
 
@@ -1424,9 +1490,16 @@ class MainWindow(FluentWidget):
         self._base_hdr_profiles[display.key] = {"profile_name": profile_name, "profile_path": str(profile_path)}
 
         binding = self.state.display_bindings.get(display.stable_key)
+        if binding is not None and self._is_generated_profile(binding.hdr_profile):
+            # Never let one of our own profiles hold the pin; see _is_generated_profile.
+            binding.hdr_profile = ""
         if binding is not None and binding.hdr_profile and not load_controls:
             # The user pinned an HDR profile for this display; it outranks whatever
-            # Windows currently happens to have as the default.
+            # Windows currently happens to have as the default. Say so when the two
+            # diverge, or recalibrating in Calman or Windows HDR Calibration looks
+            # like the app quietly ignoring the new profile.
+            if Path(profile_name).name != Path(binding.hdr_profile).name:
+                self._announce_diverged_base(binding.hdr_profile, profile_name)
             self._save_state_now()
             return
         if not load_controls and self._base_is_user_selected:
@@ -1440,6 +1513,10 @@ class MainWindow(FluentWidget):
         self.state.hdr.imported_profile = str(profile_path)
         # Adopting the Windows default as the base replaces any earlier import.
         self._base_is_user_selected = False
+        if binding is not None:
+            # The picker reads the binding. Leaving the previous value here let it
+            # name one profile while the sliders were editing another.
+            binding.hdr_profile = Path(profile_name).name
         if load_controls:
             try:
                 imported = import_profile(profile_path, "HDR")

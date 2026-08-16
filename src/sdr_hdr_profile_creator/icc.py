@@ -354,6 +354,42 @@ def content_digest(profile: bytes) -> str:
     return hashlib.sha256(bytes(mutable)).hexdigest()
 
 
+# A tag table is at most 256 entries of 12 bytes after the 132 byte header.
+_TAG_TABLE_LIMIT = 132 + 256 * 12
+
+
+def is_app_generated(path: Path) -> bool:
+    """True when this app produced the profile, including under older names.
+
+    The test is the private ``sdhs`` tag, not the filename, because a generated
+    profile can be renamed and because releases before the stable working-profile
+    names installed theirs as ``<base>_HDR.icm``, which no prefix rule catches.
+
+    Note that this does not make a profile unusable as a base: ``import_profile``
+    reads the embedded state back exactly, including the base it was itself built
+    from, so loading one restores settings rather than stacking a second
+    correction. It marks a profile as *ours*, which is what callers listing
+    calibration sources need to know.
+
+    ``MHC2`` cannot serve as the test. Windows HDR Calibration writes that tag
+    too, and its profiles are exactly the ones most users start from.
+
+    Only the header and tag table are read, so this stays cheap to call for
+    every profile in the colour directory.
+    """
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_TAG_TABLE_LIMIT)
+    except OSError:
+        return False
+    if len(head) < 132 or head[36:40] != b"acsp":
+        return False
+    count = struct.unpack_from(">I", head, 128)[0]
+    if count > 256 or 132 + count * 12 > len(head):
+        return False
+    return any(head[132 + index * 12 : 136 + index * 12] == b"sdhs" for index in range(count))
+
+
 def _read_tags(data: bytes, *, strict: bool = False) -> dict[bytes, bytes]:
     """Parse the tag table.
 

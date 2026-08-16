@@ -756,19 +756,36 @@ class MultiMonitorTests(WindowTestCase):
 class ProfileBindingTests(WindowTestCase):
     """Pinning the SDR and HDR profiles per display, persisted across restarts."""
 
-    def setUp(self):
-        super().setUp()
+    @staticmethod
+    def third_party_bytes(state=None) -> bytes:
+        """A profile that is real but is not one of ours.
+
+        Everything here is built with our own builder, which always embeds the
+        private ``sdhs`` state tag. A profile from Calman or Windows HDR
+        Calibration has no such tag, and the app now tells the two apart by
+        content, so the signature is renamed to a harmless one. Without this
+        every fixture profile would look app-generated.
+        """
         from sdr_hdr_profile_creator.curves import build_transform
         from sdr_hdr_profile_creator.icc import build_profile
         from sdr_hdr_profile_creator.model import ModeState
 
+        state = state if state is not None else ModeState.neutral("HDR")
+        data = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
+        count = int.from_bytes(data[128:132], "big")
+        for index in range(count):
+            offset = 132 + index * 12
+            if data[offset : offset + 4] == b"sdhs":
+                data[offset : offset + 4] = b"targ"
+        return bytes(data)
+
+    def setUp(self):
+        super().setUp()
+
         # Real profiles: selecting one loads it, and a zero-byte placeholder would
         # raise into a modal error dialog that blocks the test run.
         for name in ("Calman_SDR_Calibrated.icm", "HDR Calibrated Profile.icc", "sRGB.icm"):
-            state = ModeState.neutral("HDR")
-            (self.color_dir / name).write_bytes(
-                build_profile("HDR", state, build_transform(state, hdr=True))
-            )
+            (self.color_dir / name).write_bytes(self.third_party_bytes())
         # Any unexpected modal would hang the suite rather than fail it.
         blocker = mock.patch.object(QMessageBox, "critical")
         blocker.start()
@@ -826,21 +843,120 @@ class ProfileBindingTests(WindowTestCase):
         self.assertEqual(self.associations, [])
 
     def test_choosing_an_hdr_profile_loads_it_as_the_base_immediately(self):
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
         from sdr_hdr_profile_creator.model import ModeState
 
         state = ModeState.neutral("HDR")
-        state.contrast = 4.0
+        state.peak_luminance_nits = 640.0
         (self.color_dir / "HDR Calibrated Profile.icc").write_bytes(
-            build_profile("HDR", state, build_transform(state, hdr=True))
+            self.third_party_bytes(state)
         )
         self.window._populate_profile_pickers()
         self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
         self.assertEqual(
             Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc"
         )
+        # Recovered from the profile's curves, not from an embedded state tag.
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 640.0, places=0)
+
+    def test_importing_a_saved_copy_of_our_own_profile_restores_exact_settings(self):
+        """Export Copy then Import is how a tuned result is kept; it must round-trip."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.contrast = 4.0
+        state.base_profile = str(self.color_dir / "HDR Calibrated Profile.icc")
+        saved = self.temp / "my tuned copy.icm"
+        saved.write_bytes(build_profile("HDR", state, build_transform(state, hdr=True)))
+
+        self.window._load_profile_from_path(saved)
         self.assertAlmostEqual(self.window.state.hdr.contrast, 4.0)
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc",
+            "importing a copy must keep building from the calibration it came from",
+        )
+
+    def test_our_own_profiles_are_not_offered_as_bases_under_any_name(self):
+        """Older releases installed working profiles as <base>_HDR.icm."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        (self.color_dir / "HDR Calibrated Profile_HDR.icm").write_bytes(
+            build_profile("HDR", state, build_transform(state, hdr=True))
+        )
+        self.window._populate_profile_pickers()
+        listed = [self.window.hdr_profile_combo.itemText(i)
+                  for i in range(self.window.hdr_profile_combo.count())]
+        self.assertIn("HDR Calibrated Profile.icc", listed)
+        self.assertNotIn("HDR Calibrated Profile_HDR.icm", listed)
+
+    def test_a_pin_naming_one_of_our_own_profiles_is_dropped(self):
+        """Such a pin outranks the Windows default forever, freezing the base."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        (self.color_dir / "Stale_HDR.icm").write_bytes(
+            build_profile("HDR", state, build_transform(state, hdr=True))
+        )
+        binding = self.window.state.binding(self.display.stable_key)
+        binding.hdr_profile = "Stale_HDR.icm"
+
+        self.window._populate_profile_pickers()
+        self.assertEqual(binding.hdr_profile, "")
+        self.assertNotEqual(self.window.hdr_profile_combo.currentText(), "Stale_HDR.icm")
+
+    def test_a_freshly_calibrated_windows_default_becomes_the_base(self):
+        """Calman writing a new HDR profile must flow through, not be ignored."""
+        (self.color_dir / "PG32UCDM_120_Standard.icm").write_bytes(self.third_party_bytes())
+        binding = self.window.state.binding(self.display.stable_key)
+        binding.hdr_profile = ""
+        self.default_profiles["HDR"] = "PG32UCDM_120_Standard.icm"
+
+        self.window._capture_current_hdr_base(self.display)
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name, "PG32UCDM_120_Standard.icm"
+        )
+        self.window._populate_profile_pickers()
+        self.assertEqual(
+            self.window.hdr_profile_combo.currentText(), "PG32UCDM_120_Standard.icm",
+            "the picker must name the profile the sliders are actually editing",
+        )
+
+    def test_reloading_the_base_moves_the_pin_with_it(self):
+        """The mode-switch path adopts the Windows default over any pin.
+
+        The pin is what the picker displays, so leaving it behind made the box
+        name one profile while the sliders edited another.
+        """
+        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        (self.color_dir / "PG32UCDM_120_Standard.icm").write_bytes(self.third_party_bytes())
+        self.default_profiles["HDR"] = "PG32UCDM_120_Standard.icm"
+
+        self.window._capture_current_hdr_base(self.display, load_controls=True)
+        self.assertEqual(
+            self.window.state.binding(self.display.stable_key).hdr_profile,
+            "PG32UCDM_120_Standard.icm",
+        )
+        self.assertEqual(
+            self.window.hdr_profile_combo.currentText(), "PG32UCDM_120_Standard.icm"
+        )
+
+    def test_a_deliberate_pin_is_kept_but_the_divergence_is_reported(self):
+        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        (self.color_dir / "PG32UCDM_120_Standard.icm").write_bytes(self.third_party_bytes())
+        self.default_profiles["HDR"] = "PG32UCDM_120_Standard.icm"
+
+        self.window._capture_current_hdr_base(self.display)
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc",
+            "an explicit pin must not be silently overwritten",
+        )
+        self.assertIn("PG32UCDM_120_Standard.icm", self.window.status_label.text())
 
     def test_a_pinned_hdr_profile_survives_apply(self):
         self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
