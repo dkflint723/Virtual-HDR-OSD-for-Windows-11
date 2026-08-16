@@ -561,7 +561,13 @@ def import_profile(path: Path, fallback_mode: DisplayMode) -> ImportedProfile:
     state.profile_name = description
     state.imported_profile = str(path)
     state.base_profile = str(path)
-    state.base_profile_name = description
+    # The FILENAME, not the ICC description. Every consumer of base_profile_name
+    # treats it as a name it can hand back to Windows: the app reapplies it as a
+    # default association, and the watchdog checks it against the colour directory
+    # to avoid capturing an app-managed profile as its HDR fallback. A description
+    # like "HDR Calibrated Profile 8/14/2026 132247" is not a filename, and the
+    # slashes in it make it an invalid path, so both silently did nothing.
+    state.base_profile_name = path.name
     return ImportedProfile(
         mode=fallback_mode,
         state=state,

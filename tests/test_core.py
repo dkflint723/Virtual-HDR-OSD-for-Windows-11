@@ -276,6 +276,61 @@ class ProfileStructureTests(unittest.TestCase):
         self.assertAlmostEqual(peak, 1450.0, places=3)
 
 
+class BaseProfileNamingTests(unittest.TestCase):
+    """base_profile_name must be a filename Windows can resolve.
+
+    It is handed straight back to Windows as a default association, and the
+    standalone watchdog checks it against the colour directory to avoid adopting
+    an app-managed working profile as its HDR fallback. Windows HDR Calibration
+    writes descriptions like "HDR Calibrated Profile 8/14/2026 132247" while
+    naming the file "...8-14-2026 132247.icc", so a description used as a name is
+    not merely wrong: its slashes make it an invalid path, and every consumer
+    then fails silently.
+    """
+
+    @staticmethod
+    def third_party_profile(directory: Path, filename: str, description: str) -> Path:
+        """An ICC with no embedded app state, as any external profile would be.
+
+        Built by generating one and blanking the private 'sdhs' tag signature, so
+        import falls through to the same path a vendor profile takes.
+        """
+        state = ModeState.neutral("HDR")
+        state.profile_name = description
+        blob = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
+        count = struct.unpack_from(">I", blob, 128)[0]
+        for index in range(count):
+            offset = 132 + index * 12
+            if blob[offset : offset + 4] == b"sdhs":
+                blob[offset : offset + 4] = b"zzzz"
+                break
+        else:
+            raise AssertionError("generated profile had no sdhs tag to blank")
+        path = directory / filename
+        path.write_bytes(bytes(blob))
+        return path
+
+    def test_import_records_the_filename_not_the_description(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.third_party_profile(
+                Path(directory), "Calibrated 1-2-2026 30405.icm", "Calibrated 1/2/2026 3:4:5"
+            )
+            imported = import_profile(path, "HDR")
+
+        self.assertFalse(imported.exact_state, "fixture still carried embedded state")
+        self.assertIn("/", imported.description, "fixture description should differ from the name")
+        self.assertEqual(imported.state.base_profile_name, path.name)
+        self.assertNotIn("/", imported.state.base_profile_name)
+
+    def test_the_recorded_name_resolves_next_to_the_source_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.third_party_profile(
+                Path(directory), "Some Display 9-9-2026.icc", "Some Display 9/9/2026"
+            )
+            imported = import_profile(path, "HDR")
+            self.assertTrue((path.parent / imported.state.base_profile_name).is_file())
+
+
 class TemplateMergeTests(unittest.TestCase):
     """A base profile is an ICC tag template; half of one is worse than none."""
 

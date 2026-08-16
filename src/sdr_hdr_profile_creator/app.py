@@ -1831,7 +1831,8 @@ class MainWindow(FluentWidget):
         imported.state.imported_profile = str(source)
         if not imported.state.base_profile:
             imported.state.base_profile = str(source)
-            imported.state.base_profile_name = imported.description
+            # Filename, not description; see import_profile.
+            imported.state.base_profile_name = source.name
         self.state.set_mode_state("HDR", imported.state)
         self._base_is_user_selected = True
         binding = self._selected_binding()
