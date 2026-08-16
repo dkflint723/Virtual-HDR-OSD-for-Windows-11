@@ -747,11 +747,33 @@ function Get-GammaEntryForDisplay {
     try {
         $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
         if (-not $gamma.displays) { return $null }
+
+        # Records are keyed by an id derived from the adapter LUID, which Windows
+        # reissues on reboots and driver restarts, so one monitor accumulates several
+        # records carrying the same gdi_name. Returning the first match handed the
+        # caller a stale record naming profiles that no longer exist, defeating the
+        # intent comparison in Get-DesiredExtendedProfile. Take the newest record.
+        $candidates = @()
         foreach ($property in $gamma.displays.PSObject.Properties) {
             if ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
-                return $property.Value
+                $candidates += $property.Value
             }
         }
+        if ($candidates.Count -eq 0) { return $null }
+        if ($candidates.Count -eq 1) { return $candidates[0] }
+
+        # When no timestamp is usable, fall back to the last record written.
+        $best = $candidates[$candidates.Count - 1]
+        $bestAt = $null
+        foreach ($candidate in $candidates) {
+            $at = ConvertTo-GammaTimestamp ([string]$candidate.updated_at)
+            if ($null -eq $at) { continue }
+            if (($null -eq $bestAt) -or ($at -gt $bestAt)) {
+                $best = $candidate
+                $bestAt = $at
+            }
+        }
+        return $best
     } catch {}
     return $null
 }
@@ -920,10 +942,14 @@ function Invoke-GammaHotkey {
             }
 
             $saved.GammaEnabled = [bool]$Enable
-            # Stamp when this script last chose a variant, so Get-DesiredExtendedProfile can
-            # tell whether the GUI's runtime intent is newer than our own. Add-Member -Force
-            # covers State.json files written before this field existed.
-            $saved | Add-Member -NotePropertyName GammaUpdatedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
+            # ONE stamp, written to both files. Two Get-Date calls left the runtime file
+            # microseconds newer than State.json, so the comparison in
+            # Get-DesiredExtendedProfile always favoured the runtime copy and this
+            # script's own captured state could never win a tie.
+            $switchedAt = [DateTimeOffset]::Now.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+            # Add-Member -Force also creates the property on State.json files written
+            # before this field existed; a plain assignment throws on those.
+            $saved | Add-Member -NotePropertyName GammaUpdatedAt -NotePropertyValue $switchedAt -Force
             $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
 
             # Keep the GUI runtime file synchronized when it exists, but do not depend on it.
@@ -934,7 +960,7 @@ function Invoke-GammaHotkey {
                         if ($property.Value.gdi_name -eq $current.GdiName) {
                             $property.Value.enabled = [bool]$Enable
                             $property.Value.active_profile = [string]$profile
-                            $property.Value.updated_at = (Get-Date).ToString('o')
+                            $property.Value.updated_at = $switchedAt
                         }
                     }
                     $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $GammaStatePath -Encoding UTF8

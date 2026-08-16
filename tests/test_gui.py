@@ -124,6 +124,9 @@ class WindowTestCase(unittest.TestCase):
     def apply(self, reason="Apply Edits", **kwargs):
         self.window._apply_mode_profile(reason, **kwargs)
 
+    def read_runtime(self) -> dict:
+        return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+
 
 class EditorStructureTests(WindowTestCase):
     def test_both_editor_pages_are_present(self):
@@ -793,10 +796,95 @@ class HdrSwitchTests(WindowTestCase):
         self.assertFalse(self.window.hdr_switch.isEnabled())
 
 
-class RuntimeStateTests(WindowTestCase):
-    def read_runtime(self) -> dict:
-        return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+class RebootStabilityTests(WindowTestCase):
+    """Adapter LUIDs are reissued on reboot; nothing user-visible may depend on them."""
 
+    def setUp(self):
+        super().setUp()
+        self.display.device_path = r"\?\DISPLAY#AUS32F2#5&2564&0&UID4357#{guid}"
+
+    def reboot(self):
+        """Same monitor, new adapter LUID -- exactly what a reboot does."""
+        self.display.key = self.display.key.replace("BBBB", "CCCC")
+        self.display.adapter_low += 1
+
+    def test_working_profile_names_survive_a_reboot(self):
+        before = [p.name for p in self.window._working_profile_paths(self.display)]
+        self.reboot()
+        after = [p.name for p in self.window._working_profile_paths(self.display)]
+        self.assertEqual(
+            before, after,
+            "the working-profile filename changed across a reboot, orphaning the old pair",
+        )
+
+    def test_two_monitors_still_get_distinct_names(self):
+        other = hdr_display(key="ADAPTER1:0:2")
+        other.device_path = r"\?\DISPLAY#DEL1234#5&9999&0&UID4358#{guid}"
+        self.assertNotEqual(
+            {p.name for p in self.window._working_profile_paths(self.display)},
+            {p.name for p in self.window._working_profile_paths(other)},
+        )
+
+    def test_a_display_with_no_device_path_still_gets_a_name(self):
+        self.display.device_path = ""
+        names = [p.name for p in self.window._working_profile_paths(self.display)]
+        self.assertTrue(all(n.startswith("Virtual_HDR_OSD_") for n in names))
+        self.assertEqual(len(set(names)), 2)
+
+    def test_cleanup_reclaims_both_halves_of_an_orphaned_pair(self):
+        """The registry records only the active variant; the sibling is derivable.
+
+        A real machine leaked Virtual_HDR_OSD_79255fb06f_Off.icm exactly this way:
+        its _On sibling was named in the registry and removed, while the _Off half
+        was named nowhere and survived forever.
+        """
+        for name in ("Virtual_HDR_OSD_deadbeef01_Off.icm", "Virtual_HDR_OSD_deadbeef01_On.icm"):
+            (self.color_dir / name).write_bytes(b"")
+        self.window._persisted_live_registry["previous-boot"] = {
+            "profile_name": "Virtual_HDR_OSD_deadbeef01_On.icm",  # active variant only
+            "profile_path": "",
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        self.window._cleanup_legacy_managed_profiles(self.display)
+        self.assertIn("Virtual_HDR_OSD_deadbeef01_On.icm", self.removed)
+        self.assertIn(
+            "Virtual_HDR_OSD_deadbeef01_Off.icm", self.removed,
+            "the sibling of an orphaned pair was left installed forever",
+        )
+
+    def test_runtime_state_drops_records_for_a_previous_luid(self):
+        """The watchdog looks entries up by gdi_name, so duplicates are rivals."""
+        self.apply()
+        first_key = self.display.key
+        self.reboot()
+        self.apply()
+
+        entries = self.read_runtime()["displays"]
+        self.assertIn(self.display.key, entries)
+        self.assertNotIn(
+            first_key, entries,
+            "a stale record for the same monitor survived and would rival the current one",
+        )
+        same_gdi = [k for k, v in entries.items() if v.get("gdi_name") == self.display.gdi_name]
+        self.assertEqual(len(same_gdi), 1, f"{len(same_gdi)} records share one gdi_name")
+
+    def test_pruning_leaves_other_monitors_alone(self):
+        self.apply()
+        other = hdr_display(key="ADAPTER9:0:9")
+        other.friendly_name = "Other"
+        other.gdi_name = r"\.\DISPLAY2"
+        other.device_path = r"\?\DISPLAY#DEL1234#5&1&0&UID9#{guid}"
+        payload, displays_state, record = self.window._runtime_entry(other)
+        displays_state[other.key] = {"gdi_name": other.gdi_name, "profiles": {}}
+        app_module.MainWindow._write_json_atomic(app_module.GAMMA_HOTKEY_STATE_PATH, payload)
+
+        self.apply()
+        entries = self.read_runtime()["displays"]
+        self.assertIn(other.key, entries, "another monitor's record was pruned")
+
+
+class RuntimeStateTests(WindowTestCase):
     def test_runtime_state_publishes_the_keys_the_watchdog_reads(self):
         self.apply()
         payload = self.read_runtime()

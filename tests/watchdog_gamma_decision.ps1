@@ -35,6 +35,23 @@ function Set-Runtime {
         ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $script:GammaStatePath -Encoding UTF8
 }
 
+function Set-RuntimeMulti {
+    # Several records for ONE monitor, as accumulates when the adapter LUID is
+    # reissued. Ordered stale-first, which is the order that used to be returned.
+    param($records)
+    $displays = [ordered]@{}
+    $i = 0
+    foreach ($r in $records) {
+        $i++
+        $displays["key$i"] = @{
+            gdi_name = $script:TargetGdi; enabled = $r.enabled; updated_at = $r.updatedAt
+            active_profile = $r.active; profiles = $r.profiles
+        }
+    }
+    @{ displays = $displays } | ConvertTo-Json -Depth 8 |
+        Set-Content -LiteralPath $script:GammaStatePath -Encoding UTF8
+}
+
 function New-Saved {
     param($gammaEnabled, $updatedAt)
     $o = [pscustomobject]@{
@@ -47,6 +64,7 @@ function New-Saved {
     return $o
 }
 
+$script:TargetGdi = '\\.\DISPLAY1'
 $display = [pscustomobject]@{ GdiName = '\\.\DISPLAY1' }
 
 function Assert-Profile {
@@ -108,6 +126,33 @@ Assert-Profile 'adapter LUID changed -> GUI filenames preferred' 'NewOn.icm' `
 # The GUI wrote naive local timestamps before they became offset-aware.
 Set-Runtime -enabled $false -updatedAt (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss') -active 'VOff.icm'
 Assert-Profile 'legacy naive timestamp still compares' 'VOff.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+
+# One monitor with several records, from adapter-LUID reissues. Reading the first
+# match handed back a stale record naming profiles that no longer exist, which
+# silently defeated the whole intent comparison.
+Set-RuntimeMulti @(
+    @{ enabled = $true;  updatedAt = $old; active = 'VOn.icm';  profiles = @{ Off = 'Ghost_Off.icm'; On = 'Ghost_On.icm' } },
+    @{ enabled = $false; updatedAt = $new; active = 'VOff.icm'; profiles = @{ Off = 'VOff.icm'; On = 'VOn.icm' } }
+)
+Assert-Profile 'stale duplicate record must not shadow the current one' 'VOff.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+# Newest wins regardless of enumeration order.
+Set-RuntimeMulti @(
+    @{ enabled = $false; updatedAt = $new; active = 'VOff.icm'; profiles = @{ Off = 'VOff.icm'; On = 'VOn.icm' } },
+    @{ enabled = $true;  updatedAt = $old; active = 'VOn.icm';  profiles = @{ Off = 'Ghost_Off.icm'; On = 'Ghost_On.icm' } }
+)
+Assert-Profile 'newest record wins regardless of order' 'VOff.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+# No usable timestamp anywhere: must not crash, falls through to captured state.
+Set-RuntimeMulti @(
+    @{ enabled = $true;  updatedAt = 'bad'; active = 'VOn.icm';  profiles = @{ Off = 'Ghost_Off.icm'; On = 'Ghost_On.icm' } },
+    @{ enabled = $false; updatedAt = '';    active = 'VOff.icm'; profiles = @{ Off = 'VOff.icm'; On = 'VOn.icm' } }
+)
+Assert-Profile 'unparseable timestamps everywhere -> captured state' 'VOn.icm' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
 
 Remove-Item -LiteralPath $script:GammaStatePath -Force -ErrorAction SilentlyContinue

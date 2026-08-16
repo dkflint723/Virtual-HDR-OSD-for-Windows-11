@@ -1429,6 +1429,15 @@ class MainWindow(FluentWidget):
                         names.add(active)
             except Exception:
                 pass
+        # The registry records only whichever variant was active, so an orphaned pair
+        # leaves its sibling named nowhere. Derive it: the sibling of an app-owned
+        # working profile is by definition also app-owned.
+        for name in list(names):
+            if name.endswith("_Off.icm"):
+                names.add(name[: -len("_Off.icm")] + "_On.icm")
+            elif name.endswith("_On.icm"):
+                names.add(name[: -len("_On.icm")] + "_Off.icm")
+
         # The current display is always protected, even if enumeration fails here,
         # so a transient failure can never uninstall what we are about to activate.
         protected = {path.name for path in self._working_profile_paths(display)}
@@ -1444,7 +1453,11 @@ class MainWindow(FluentWidget):
                 pass
 
     def _working_profile_paths(self, display: DisplayInfo) -> tuple[Path, Path]:
-        token = hashlib.sha256(display.key.encode("utf-8")).hexdigest()[:10]
+        # Keyed on stable_key, not key: `key` embeds the adapter LUID, which Windows
+        # reissues on reboot, so the filename changed every boot and orphaned the
+        # previous pair in the Windows colour directory — one leaked profile per
+        # reboot, in the directory this app promises holds at most two.
+        token = hashlib.sha256(display.stable_key.encode("utf-8")).hexdigest()[:10]
         return (
             LIVE_ROOT / f"Virtual_HDR_OSD_{token}_Off.icm",
             LIVE_ROOT / f"Virtual_HDR_OSD_{token}_On.icm",
@@ -1670,10 +1683,11 @@ class MainWindow(FluentWidget):
                 "base_profile_path": base.get("profile_path", self.state.hdr.base_profile),
                 "profiles": {"Off": off_name, "On": on_name},
                 "paths": {"Off": str(off_path), "On": str(on_path)},
-                # Timezone-aware: the watchdog compares this against its own timestamp to
-                # decide who acted last, and a naive local time is ambiguous across a DST
-                # fall-back.
-                "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+                # Timezone-aware and full precision: the watchdog compares this against
+                # its own timestamp to decide who acted last. A naive local time is
+                # ambiguous across a DST fall-back, and truncating to whole seconds made
+                # a same-second write compare as older than the watchdog's 100ns stamp.
+                "updated_at": datetime.now().astimezone().isoformat(),
             }
         )
         displays_state[display.key] = record
@@ -1692,7 +1706,7 @@ class MainWindow(FluentWidget):
         record.setdefault("paths", {})
         record["selected"] = self._last_enabled_gamma_correction
         record["enabled"] = self.state.hdr.sdr_gamma_correction != "Off"
-        record["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        record["updated_at"] = datetime.now().astimezone().isoformat()
         displays_state[display.key] = record
         payload["schema"] = GAMMA_RUNTIME_SCHEMA
         self._write_json_atomic(GAMMA_HOTKEY_STATE_PATH, payload)
@@ -1720,6 +1734,19 @@ class MainWindow(FluentWidget):
         record = displays_state.get(display.key)
         if not isinstance(record, dict):
             record = {}
+
+        # Drop records describing this same monitor under a previous adapter LUID.
+        # The watchdog looks entries up by gdi_name, so leftovers are not merely
+        # clutter: they are rival records for the same display, and it used to act
+        # on whichever came first.
+        for stale_key in [
+            key for key, value in displays_state.items()
+            if key != display.key
+            and isinstance(value, dict)
+            and value.get("gdi_name") == display.gdi_name
+        ]:
+            displays_state.pop(stale_key, None)
+
         return payload, displays_state, record
 
     # ----------------------------------------------------------------------------------
