@@ -35,6 +35,19 @@ class DisplayInfo:
         return self.advanced_color_kind == "WCG"
 
     @property
+    def stable_key(self) -> str:
+        """Identity that survives reboots, unlike ``key``.
+
+        ``key`` embeds the adapter LUID, which Windows reissues on reboot and on
+        driver restarts, so anything the user configured against it would be lost.
+        The monitor device path is derived from the EDID and stays put, so it is
+        the right anchor for remembered per-display settings.
+        """
+        if self.device_path:
+            return self.device_path
+        return f"{self.friendly_name}|{self.gdi_name}"
+
+    @property
     def label(self) -> str:
         # Capability and current state in one phrase. Listing both separately
         # produced the unreadable "… · HDR · HDR" for a display in HDR mode.
@@ -129,6 +142,13 @@ if IS_WINDOWS:
         _fields_ = [
             ("adapterId", LUID),
             ("id", UINT32),
+            # The SDK has a union { UINT32 modeInfoIdx; struct { UINT32
+            # desktopModeInfoIdx:16; targetModeInfoIdx:16; }; } here. Omitting it
+            # made this struct 44 bytes instead of 48, so QueryDisplayConfig wrote
+            # 4 bytes per path past the end of the buffer and every field from
+            # outputTechnology onward — including the adapter LUID and ids of the
+            # second and later displays — was read from the wrong offset.
+            ("modeInfoIdx", UINT32),
             ("outputTechnology", UINT32),
             ("rotation", UINT32),
             ("scaling", UINT32),
@@ -144,6 +164,23 @@ if IS_WINDOWS:
             ("targetInfo", DISPLAYCONFIG_PATH_TARGET_INFO),
             ("flags", UINT32),
         ]
+
+    # QueryDisplayConfig takes an element count, not an element size, so a struct
+    # that disagrees with the OS layout cannot be rejected by the API — it silently
+    # overruns the buffer and misparses every element after the first. Fail loudly
+    # at import instead.
+    _EXPECTED_SIZES = (
+        (DISPLAYCONFIG_PATH_SOURCE_INFO, 20),
+        (DISPLAYCONFIG_PATH_TARGET_INFO, 48),
+        (DISPLAYCONFIG_PATH_INFO, 72),
+    )
+    for _structure, _expected in _EXPECTED_SIZES:
+        _actual = ctypes.sizeof(_structure)
+        if _actual != _expected:
+            raise RuntimeError(
+                f"{_structure.__name__} is {_actual} bytes but Windows expects "
+                f"{_expected}; QueryDisplayConfig would overrun its buffer"
+            )
 
     class DISPLAYCONFIG_DEVICE_INFO_HEADER(ctypes.Structure):
         _fields_ = [
@@ -188,6 +225,12 @@ if IS_WINDOWS:
             ("activeColorMode", UINT32),
         ]
 
+    class DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE(ctypes.Structure):
+        _fields_ = [
+            ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
+            ("value", UINT32),  # bit 0 = enableAdvancedColor
+        ]
+
     class DISPLAYCONFIG_SDR_WHITE_LEVEL(ctypes.Structure):
         _fields_ = [
             ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
@@ -211,6 +254,8 @@ if IS_WINDOWS:
     user32.QueryDisplayConfig.restype = LONG
     user32.DisplayConfigGetDeviceInfo.argtypes = [ctypes.POINTER(DISPLAYCONFIG_DEVICE_INFO_HEADER)]
     user32.DisplayConfigGetDeviceInfo.restype = LONG
+    user32.DisplayConfigSetDeviceInfo.argtypes = [ctypes.POINTER(DISPLAYCONFIG_DEVICE_INFO_HEADER)]
+    user32.DisplayConfigSetDeviceInfo.restype = LONG
 
     mscms.InstallColorProfileW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
     mscms.InstallColorProfileW.restype = BOOL
@@ -268,6 +313,7 @@ DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2
 DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9
 DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO_2 = 15
 DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11
+DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE = 10
 DISPLAYCONFIG_ADVANCED_COLOR_MODE_SDR = 0
 DISPLAYCONFIG_ADVANCED_COLOR_MODE_WCG = 1
 DISPLAYCONFIG_ADVANCED_COLOR_MODE_HDR = 2
@@ -590,6 +636,47 @@ def remove_profile(profile_name: str, display: DisplayInfo, mode: str) -> tuple[
     error = ctypes.get_last_error()
     messages.append(f"uninstall Win32 {error}")
     return association_removed, ", ".join(messages)
+
+
+def set_hdr_enabled(display: DisplayInfo, enabled: bool) -> None:
+    """Turn HDR on or off for one specific display.
+
+    Win + Alt + B only toggles whichever display Windows considers current, so it
+    cannot target a chosen monitor and cannot be made idempotent. This is the
+    documented per-target DisplayConfig setter behind the HDR switch in Settings.
+    """
+    if not IS_WINDOWS:
+        raise WindowsColorError("HDR switching is only available on Windows")
+    if not display.advanced_color_supported:
+        raise WindowsColorError(f"{display.friendly_name} does not report HDR support to Windows")
+    packet = DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE()
+    packet.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE
+    packet.header.size = ctypes.sizeof(packet)
+    packet.header.adapterId = _luid(display)
+    packet.header.id = display.target_id
+    packet.value = 1 if enabled else 0
+    result = int(user32.DisplayConfigSetDeviceInfo(ctypes.byref(packet.header)))
+    if result != ERROR_SUCCESS:
+        raise _hresult_error(f"Could not turn HDR {'on' if enabled else 'off'}", result)
+
+
+def list_installed_profiles() -> list[str]:
+    """Filenames of every ICC/ICM profile installed in the Windows colour directory."""
+    if not IS_WINDOWS:
+        return []
+    try:
+        directory = get_color_directory()
+    except WindowsColorError:
+        return []
+    try:
+        names = [
+            entry.name
+            for entry in directory.iterdir()
+            if entry.is_file() and entry.suffix.lower() in (".icc", ".icm")
+        ]
+    except OSError:
+        return []
+    return sorted(names, key=str.casefold)
 
 
 def get_sdr_white_level_nits(display: DisplayInfo) -> float:

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -38,13 +39,13 @@ from qfluentwidgets import (
     setThemeColor,
 )
 
-from .controls import Card, ControlSpec, PathField, SliderControl
+from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
 from .icc import build_profile, content_digest, import_profile
-from .model import ApplicationState, DisplayMode, ModeState
+from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState
 from .windows_api import (
     DisplayInfo,
     enumerate_displays,
@@ -55,6 +56,8 @@ from .windows_api import (
     open_windows_color_profile_directory,
     get_default_profile,
     get_sdr_white_level_nits,
+    list_installed_profiles,
+    set_hdr_enabled,
     reapply_existing_default_profile,
     remove_profile,
     send_hdr_toggle_shortcut,
@@ -70,9 +73,18 @@ GAMMA_HOTKEY_STATE_PATH = LOCAL_ROOT / "gamma_hotkeys.json"
 GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
 GAMMA_RUNTIME_SCHEMA = "virtual-hdr-osd-gamma-hotkeys-v2"
 
+# SDR handling is deliberately opt-in. Third-party calibration suites (Calman,
+# DisplayCAL, i1Profiler) install an SDR profile *and* run their own loader that
+# re-asserts its VCGT; a second process re-associating profiles behind their back
+# is how calibration silently breaks. AUTO reproduces the historical behaviour,
+# UNMANAGED tells this app to keep its hands off SDR entirely.
+SDR_AUTO = "Auto — restore whatever Windows had"
+SDR_UNMANAGED = "Leave unmanaged (third-party calibration owns SDR)"
+
 # Filename prefixes this app has ever used for its own managed HDR profiles.
 # Cleanup matches on these only, so a user's own profile is never removed.
 MANAGED_PREFIXES = ("VirtualHDR_OSD_", "Virtual_HDR_OSD_")
+
 
 # Fields that change the generated profile bytes. Used for the unapplied-edits
 # indicator; the authoritative check before reinstalling is a content digest.
@@ -119,6 +131,9 @@ class MainWindow(FluentWidget):
         self._installed_digests: dict[str, str] = {}
         self._legacy_cleaned: set[str] = set()
         self._applied_signature: str | None = None
+        # True once the user picks a base with Import or Revert to Base. That choice
+        # is the ICC tag template and must outlive an Apply.
+        self._base_is_user_selected = False
         self._active_profile_name: str = ""
 
         self.setWindowTitle("Virtual HDR OSD for Windows")
@@ -170,7 +185,7 @@ class MainWindow(FluentWidget):
         if not STATE_PATH.is_file():
             return ApplicationState.neutral()
         try:
-            return ApplicationState.from_dict(json.loads(STATE_PATH.read_text(encoding="utf-8")))
+            return ApplicationState.from_dict(json.loads(STATE_PATH.read_text(encoding="utf-8-sig")))
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return ApplicationState.neutral()
 
@@ -178,7 +193,7 @@ class MainWindow(FluentWidget):
         if not LIVE_REGISTRY_PATH.is_file():
             return {}
         try:
-            data = json.loads(LIVE_REGISTRY_PATH.read_text(encoding="utf-8"))
+            data = json.loads(LIVE_REGISTRY_PATH.read_text(encoding="utf-8-sig"))
             if not isinstance(data, dict):
                 return {}
             result: dict[str, dict[str, str]] = {}
@@ -201,18 +216,38 @@ class MainWindow(FluentWidget):
         self._write_json_atomic(LIVE_REGISTRY_PATH, self._persisted_live_registry)
 
     @staticmethod
-    def _write_json_atomic(path: Path, payload: object) -> None:
+    def _write_json_atomic(path: Path, payload: object) -> bool:
         """Write JSON via a temporary file so a crash cannot leave a truncated file.
 
         The watchdog polls these files continuously; a half-written state file
         would be parsed as corrupt and silently ignored.
+
+        On Windows the rename fails with a PermissionError whenever another
+        process has the destination open without FILE_SHARE_DELETE — which the
+        watchdog does on every poll. Retrying briefly covers that window; the
+        temporary file is cleaned up rather than left behind, and the caller is
+        told whether the publish actually landed.
         """
+        temporary = path.with_name(path.name + ".tmp")
         try:
-            temporary = path.with_name(path.name + ".tmp")
             temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            temporary.replace(path)
+        except OSError:
+            return False
+        for attempt in range(5):
+            try:
+                temporary.replace(path)
+                return True
+            except PermissionError:
+                # The watchdog reads these files roughly every 800ms; a few short
+                # retries clear a collision without blocking the GUI meaningfully.
+                time.sleep(0.04 * (attempt + 1))
+            except OSError:
+                break
+        try:
+            temporary.unlink(missing_ok=True)
         except OSError:
             pass
+        return False
 
     def _save_state_now(self) -> None:
         self._write_json_atomic(STATE_PATH, self.state.to_dict())
@@ -259,8 +294,14 @@ class MainWindow(FluentWidget):
         self._editor_pages: dict[str, QWidget] = {}
         self.tab_selector = SegmentedWidget(self)
         self.page_stack = QStackedWidget(self)
-        self._add_editor_page("tonePage", "Tone & Brightness", self._build_tone_tab())
-        self._add_editor_page("colorPage", "Color & White Balance", self._build_color_tab())
+        self._add_editor_page(
+            "tonePage", "Tone & Brightness", self._build_tone_tab(),
+            "Gamma, midtone brightness, contrast, and the optional SDR-in-HDR gamma correction.",
+        )
+        self._add_editor_page(
+            "colorPage", "Color & White Balance", self._build_color_tab(),
+            "White-point temperature, green/magenta tint, saturation, and per-channel RGB balance.",
+        )
         self.tab_selector.setToolTip("Switch between tone/luminance adjustments and color/white-balance adjustments.")
         self.tab_selector.currentItemChanged.connect(self._show_editor_page)
         self.page_stack.currentChanged.connect(self._page_changed)
@@ -303,7 +344,7 @@ class MainWindow(FluentWidget):
         layout.addWidget(self.dirty_label)
         return bar
 
-    def _add_editor_page(self, route_key: str, text: str, page: QWidget) -> None:
+    def _add_editor_page(self, route_key: str, text: str, page: QWidget, tooltip: str = "") -> None:
         page.setObjectName(route_key)
         self._editor_pages[route_key] = page
         self.page_stack.addWidget(page)
@@ -312,6 +353,12 @@ class MainWindow(FluentWidget):
             text=text,
             onClick=lambda _checked=False, key=route_key: self._show_editor_page(key),
         )
+        if tooltip:
+            # addItem returns None on some qfluentwidgets releases, so look the
+            # freshly added tab up by route key instead of relying on a handle.
+            item = self.tab_selector.items.get(route_key) if hasattr(self.tab_selector, "items") else None
+            if item is not None:
+                item.setToolTip(tooltip)
 
     def _show_editor_page(self, route_key: object) -> None:
         """Switch the editor stack from a Fluent segmented-navigation route.
@@ -362,14 +409,19 @@ class MainWindow(FluentWidget):
         self.display_combo.setToolTip("Select the active Windows display to target. HDR state and profile association are tracked per display.")
         self.display_combo.currentIndexChanged.connect(self._display_selected)
         display_row.addWidget(self.display_combo, 1)
+        self.hdr_switch = SwitchButton(bar)
+        self.hdr_switch.setOffText("HDR Off")
+        self.hdr_switch.setOnText("HDR On")
+        self.hdr_switch.setToolTip(
+            "Turn Windows HDR on or off for the selected display, without leaving this app. "
+            "Unlike Win + Alt + B this targets the display you picked above."
+        )
+        self.hdr_switch.checkedChanged.connect(self._hdr_switch_toggled)
+        display_row.addWidget(self.hdr_switch)
         refresh_displays = PushButton("Refresh", bar)
         refresh_displays.setToolTip("Rescan active Windows displays and refresh the selected display information.")
         refresh_displays.clicked.connect(self._refresh_displays)
         display_row.addWidget(refresh_displays)
-        toggle_button = PushButton("Compare SDR / HDR", bar)
-        toggle_button.setToolTip("Send Windows Win + Alt + B to switch HDR on or off for visual comparison. SDR profile associations are never modified by this app.")
-        toggle_button.clicked.connect(self._toggle_windows_mode)
-        display_row.addWidget(toggle_button)
         display_settings = PushButton("Display Settings", bar)
         display_settings.setToolTip("Open the main Windows display settings page.")
         display_settings.clicked.connect(open_windows_display_settings)
@@ -382,35 +434,58 @@ class MainWindow(FluentWidget):
 
         profile_row = QHBoxLayout()
         profile_row.setSpacing(8)
-        profile_label = StrongBodyLabel("2 · Base Profile & Edits", bar)
-        profile_label.setToolTip("Choose the HDR profile to edit and manage your slider settings. Nothing in this row changes your Windows configuration.")
+        profile_label = StrongBodyLabel("2 · Profiles for this Display", bar)
+        profile_label.setToolTip(
+            "Pin which installed profile is this display's SDR profile and which is the HDR "
+            "profile you want to edit. Both are remembered per monitor across restarts."
+        )
         profile_row.addWidget(profile_label)
-        self.profile_path_edit = PathField(bar)
-        self.profile_path_edit.setMinimumWidth(300)
-        self.profile_path_edit.setToolTip("Path of the currently loaded HDR ICC/ICM profile. The field is read-only; use Import to choose another file.")
-        profile_row.addWidget(self.profile_path_edit, 1)
+
+        sdr_label = BodyLabel("SDR", bar)
+        sdr_label.setToolTip("The profile Windows should use when this display is in SDR mode.")
+        profile_row.addWidget(sdr_label)
+        self.sdr_profile_combo = ComboBox(bar)
+        self.sdr_profile_combo.setMinimumWidth(210)
+        self.sdr_profile_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.sdr_profile_combo.setToolTip(
+            "The SDR profile for this display. Pinning it means the app can restore it on an "
+            "HDR → SDR switch instead of hoping it observed the right one earlier. "
+            "This app never edits your SDR profile."
+        )
+        self.sdr_profile_combo.currentTextChanged.connect(self._sdr_profile_chosen)
+        profile_row.addWidget(self.sdr_profile_combo, 1)
+
+        hdr_label = BodyLabel("HDR", bar)
+        hdr_label.setToolTip("The HDR profile used as the editable base for the sliders.")
+        profile_row.addWidget(hdr_label)
+        self.hdr_profile_combo = ComboBox(bar)
+        self.hdr_profile_combo.setMinimumWidth(210)
+        self.hdr_profile_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.hdr_profile_combo.setToolTip(
+            "The HDR profile the sliders edit. Pick one and it loads immediately as the base — "
+            "no import round trip. The app's own working profiles are excluded so your edits "
+            "never compound on already-edited data."
+        )
+        self.hdr_profile_combo.currentTextChanged.connect(self._hdr_profile_chosen)
+        profile_row.addWidget(self.hdr_profile_combo, 1)
+
         import_button = PushButton("Import…", bar)
-        import_button.setToolTip("Import an HDR .icm or .icc profile to use as the editable base. The file picker opens in the Windows system color-profile folder.")
+        import_button.setToolTip("Use an HDR .icm or .icc file that is not installed in the Windows colour folder.")
         import_button.clicked.connect(self._import_profile)
         profile_row.addWidget(import_button)
         export_button = PushButton("Export Copy…", bar)
         export_button.setToolTip("Save the current HDR profile, with all slider corrections embedded, to a file of your choosing. Does not install anything.")
         export_button.clicked.connect(self._export_profile)
         profile_row.addWidget(export_button)
-        revert_button = PushButton("Revert to Base", bar)
-        revert_button.setToolTip("Discard your slider edits and reload the untouched profile you imported.")
-        revert_button.clicked.connect(self._revert_to_base)
-        profile_row.addWidget(revert_button)
-        reset_button = PushButton("Reset All Sliders", bar)
-        reset_button.setToolTip("Return every slider to its neutral default without changing which base profile is loaded.")
-        reset_button.clicked.connect(self._reset_all_controls)
-        profile_row.addWidget(reset_button)
         layout.addLayout(profile_row)
 
         runtime_row = QHBoxLayout()
         runtime_row.setSpacing(12)
-        runtime_label = StrongBodyLabel("3 · Apply to Windows", bar)
-        runtime_label.setToolTip("These actions install and associate the generated HDR profile with the selected display.")
+        runtime_label = StrongBodyLabel("3 · Edits & Apply", bar)
+        runtime_label.setToolTip(
+            "Manage your slider edits on the left; the two buttons on the right are the ones "
+            "that install and associate the generated profile with Windows."
+        )
         runtime_row.addWidget(runtime_label)
         self.live_checkbox = SwitchButton(bar)
         self.live_checkbox.setOffText("Live Apply")
@@ -426,6 +501,14 @@ class MainWindow(FluentWidget):
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
         runtime_row.addWidget(self.automatic_mode_checkbox)
+        revert_button = PushButton("Revert to Base", bar)
+        revert_button.setToolTip("Discard your slider edits and reload the selected HDR profile untouched.")
+        revert_button.clicked.connect(self._revert_to_base)
+        runtime_row.addWidget(revert_button)
+        reset_button = PushButton("Reset All Sliders", bar)
+        reset_button.setToolTip("Return every slider to its neutral default without changing which profile is selected.")
+        reset_button.clicked.connect(self._reset_all_controls)
+        runtime_row.addWidget(reset_button)
         runtime_row.addStretch(1)
         self.refresh_profile_button = PushButton("Reapply", bar)
         self.refresh_profile_button.setToolTip("Force a full reinstall of the current settings. Use this if Windows has dropped the HDR association, typically after a mode change or resume from sleep.")
@@ -673,7 +756,7 @@ class MainWindow(FluentWidget):
         if display is None or not GAMMA_HOTKEY_STATE_PATH.is_file():
             return
         try:
-            payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+            payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8-sig"))
             displays = payload.get("displays", {}) if isinstance(payload, dict) else {}
             if not isinstance(displays, dict):
                 return
@@ -789,7 +872,10 @@ class MainWindow(FluentWidget):
         self.state.live_mode = checked
         if checked:
             self._set_status("Live Apply enabled. Slider changes are installed shortly after you stop adjusting.", "warning")
-            self.live_timer.start(120)
+            # A one-shot kick, deliberately not live_timer.start(120): QTimer.start(int)
+            # reassigns the interval property, which would permanently shorten the
+            # debounce for every later edit in this session.
+            QTimer.singleShot(120, self._apply_live_edit)
         else:
             self.live_timer.stop()
             self._set_status("Live Apply disabled. Use Apply Edits when you are ready to install your changes.", "ok")
@@ -810,8 +896,10 @@ class MainWindow(FluentWidget):
 
     def _show_guide(self) -> None:
         actions = {
+            "enable_hdr": lambda: self.hdr_switch.setChecked(True),
             "display_settings": open_windows_display_settings,
             "hdr_calibration_app": open_windows_hdr_calibration_app,
+            "focus_profiles": self._highlight_profile_pickers,
             "import_profile": self._import_profile,
             "enable_live": lambda: self.live_checkbox.setChecked(True),
             "watchdog": self._show_watchdog_settings,
@@ -829,6 +917,17 @@ class MainWindow(FluentWidget):
         finally:
             self._guide_dialog = None
 
+    def _highlight_profile_pickers(self) -> None:
+        """Refresh and focus the profile row so the guide can point at it."""
+        self._populate_profile_pickers()
+        self.hdr_profile_combo.setFocus(Qt.FocusReason.OtherFocusReason)
+        count = max(0, self.hdr_profile_combo.count())
+        self._set_status(
+            f"Profile row refreshed: {count} installed HDR profile(s) to choose from. "
+            "Pick one and the sliders start editing it right away.",
+            "ok",
+        )
+
     def _check_hdr_active(self) -> tuple[bool, str]:
         display = self._selected_display()
         if display is None:
@@ -841,9 +940,15 @@ class MainWindow(FluentWidget):
 
     def _check_profile_imported(self) -> tuple[bool, str]:
         base = self.state.hdr.base_profile or self.state.hdr.imported_profile
+        binding = self._selected_binding()
+        sdr = (binding.sdr_profile if binding else "") or SDR_AUTO
+        sdr_note = {
+            SDR_AUTO: "SDR: Auto",
+            SDR_UNMANAGED: "SDR: left to your calibration software",
+        }.get(sdr, f"SDR: {sdr}")
         if base and Path(base).is_file():
-            return True, f"Base profile loaded: {Path(base).name}"
-        return False, "No base HDR profile has been imported yet."
+            return True, f"HDR base: {Path(base).name}  ·  {sdr_note}"
+        return False, f"No HDR profile is selected for this display yet.  ·  {sdr_note}"
 
     def _check_live_enabled(self) -> tuple[bool, str]:
         if self.state.live_mode:
@@ -947,6 +1052,7 @@ class MainWindow(FluentWidget):
             self._update_mode_badge(selected)
             if initial:
                 self._last_detected_mode = selected.current_mode  # type: ignore[assignment]
+            self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
             self._set_status(f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.", "ok")
 
@@ -959,7 +1065,17 @@ class MainWindow(FluentWidget):
         self._last_detected_mode = None
         self._remember_current_sdr_profile(selected)
         self._update_mode_badge(selected)
+        self._sync_display_widgets(selected)
         self._sync_active_profile_from_windows(selected)
+
+    def _sync_display_widgets(self, display: DisplayInfo) -> None:
+        """Refresh the per-display widgets after the target or its mode changes."""
+        if not hasattr(self, "hdr_switch"):
+            return
+        with QSignalBlocker(self.hdr_switch):
+            self.hdr_switch.setChecked(display.current_mode == "HDR")
+        self.hdr_switch.setEnabled(display.advanced_color_supported)
+        self._populate_profile_pickers()
 
     def _sync_active_profile_from_windows(self, display: DisplayInfo) -> None:
         """Report the HDR default Windows actually has, not what we last wrote."""
@@ -991,6 +1107,9 @@ class MainWindow(FluentWidget):
             return
         self._current_display_snapshot = selected
         self._update_mode_badge(selected)
+        if hasattr(self, "hdr_switch"):
+            with QSignalBlocker(self.hdr_switch):
+                self.hdr_switch.setChecked(selected.current_mode == "HDR")
         detected: DisplayMode = "HDR" if selected.advanced_color_enabled else "SDR"
         previous = self._last_detected_mode
         self._last_detected_mode = detected
@@ -1013,6 +1132,128 @@ class MainWindow(FluentWidget):
             # full reinstall rather than trusting the installed-content cache.
             QTimer.singleShot(650, lambda: self._apply_mode_profile("Automatic Mode Switching", force=True))
 
+    # ----------------------------------------------------------------------------------
+    # Per-display profile bindings
+
+    def _selected_binding(self) -> "DisplayBinding | None":
+        display = self._selected_display()
+        if display is None:
+            return None
+        binding = self.state.binding(display.stable_key)
+        binding.display_label = display.friendly_name
+        return binding
+
+    def _populate_profile_pickers(self) -> None:
+        """Refill both pickers from the Windows colour directory.
+
+        The app's own working profiles are excluded from the HDR list: selecting
+        one as the base would mean editing already-edited data.
+        """
+        display = self._selected_display()
+        if display is None:
+            return
+        binding = self.state.binding(display.stable_key)
+        installed = [
+            name for name in list_installed_profiles()
+            if not self._is_managed_profile(name)
+        ]
+
+        self._loading_controls = True
+        try:
+            with QSignalBlocker(self.sdr_profile_combo):
+                self.sdr_profile_combo.clear()
+                self.sdr_profile_combo.addItems([SDR_AUTO, SDR_UNMANAGED, *installed])
+                current = binding.sdr_profile or SDR_AUTO
+                index = self.sdr_profile_combo.findText(current)
+                if index < 0:
+                    # A pinned profile that has since been uninstalled.
+                    self.sdr_profile_combo.addItem(current)
+                    index = self.sdr_profile_combo.count() - 1
+                self.sdr_profile_combo.setCurrentIndex(max(0, index))
+
+            with QSignalBlocker(self.hdr_profile_combo):
+                self.hdr_profile_combo.clear()
+                entries = list(installed)
+                chosen = binding.hdr_profile or Path(self.state.hdr.base_profile or "").name
+                # An imported file living outside the colour directory still needs a row.
+                if chosen and chosen not in entries:
+                    entries.append(chosen)
+                self.hdr_profile_combo.addItems(entries)
+                if chosen:
+                    index = self.hdr_profile_combo.findText(chosen)
+                    if index >= 0:
+                        self.hdr_profile_combo.setCurrentIndex(index)
+        finally:
+            self._loading_controls = False
+
+    def _sdr_profile_chosen(self, text: str) -> None:
+        if self._loading_controls or not text:
+            return
+        binding = self._selected_binding()
+        if binding is None:
+            return
+        binding.sdr_profile = "" if text == SDR_AUTO else text
+        self._save_state_now()
+
+        if text == SDR_AUTO:
+            self._set_status(
+                "SDR profile: following whatever Windows already has associated.", "ok"
+            )
+        elif text == SDR_UNMANAGED:
+            self._set_status(
+                "SDR profile left unmanaged. This app will not touch the SDR association, "
+                "so your calibration software keeps full ownership of it.",
+                "ok",
+            )
+        else:
+            self._set_status(
+                f"SDR profile pinned to {text}. It will be restored when Windows drops back "
+                "to SDR. Nothing is applied to SDR right now.",
+                "ok",
+            )
+
+    def _hdr_profile_chosen(self, text: str) -> None:
+        """Selecting an HDR profile loads it as the base immediately."""
+        if self._loading_controls or not text:
+            return
+        binding = self._selected_binding()
+        if binding is None:
+            return
+        binding.hdr_profile = text
+        candidate = Path(text)
+        if not candidate.is_file():
+            try:
+                candidate = get_color_directory() / text
+            except Exception:
+                self._set_status(f"Could not locate {text} in the Windows colour folder.", "error")
+                return
+        if not candidate.is_file():
+            self._set_status(f"{text} is no longer installed.", "error")
+            return
+        self._load_profile_from_path(candidate)
+
+    def _hdr_switch_toggled(self, checked: bool) -> None:
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a display first.", "error")
+            return
+        if checked == (display.current_mode == "HDR"):
+            return
+        try:
+            set_hdr_enabled(display, checked)
+        except Exception as exc:
+            self._set_status(f"Could not turn HDR {'on' if checked else 'off'}: {exc}", "error")
+            with QSignalBlocker(self.hdr_switch):
+                self.hdr_switch.setChecked(display.current_mode == "HDR")
+            return
+        self._set_status(
+            f"HDR turned {'on' if checked else 'off'} for {display.friendly_name}. "
+            "Waiting for Windows to settle…",
+            "warning",
+        )
+        # Let the mode poller pick the transition up and run the normal handling.
+        QTimer.singleShot(700, self._refresh_displays)
+
     def _remember_current_sdr_profile(self, display: DisplayInfo) -> None:
         """Remember Windows' existing STANDARD profile without modifying any association."""
         try:
@@ -1022,14 +1263,40 @@ class MainWindow(FluentWidget):
         self._remembered_sdr_profiles[display.key] = profile_name or None
 
     def _restore_remembered_sdr_profile(self, display: DisplayInfo, reason: str) -> None:
-        """Reapply only the SDR profile that Windows already had; never create a neutral fallback."""
-        profile_name = self._remembered_sdr_profiles.get(display.key)
-        if not profile_name:
+        """Reapply the SDR profile for this display; never create a neutral fallback.
+
+        A pinned binding wins over what happened to be observed earlier, and an
+        explicit "unmanaged" binding suppresses the restore entirely so that
+        third-party calibration software keeps sole ownership of SDR.
+        """
+        binding = self.state.display_bindings.get(display.stable_key)
+        pinned = binding.sdr_profile if binding else ""
+
+        if pinned == SDR_UNMANAGED:
             self._set_status(
-                f"{reason}: no existing SDR profile was remembered for this display, so nothing was applied.",
+                f"{reason}: SDR is set to unmanaged, so the SDR association was left untouched.",
                 "ok",
             )
             return
+
+        profile_name = pinned or self._remembered_sdr_profiles.get(display.key) or ""
+        if not profile_name:
+            self._set_status(
+                f"{reason}: no SDR profile is pinned for this display and none was observed, "
+                "so nothing was applied. Pin one in the Profiles row to make this reliable.",
+                "warning",
+            )
+            return
+
+        # If Windows already has it, do not re-assert it — a redundant association
+        # write is exactly what fights a third-party calibration loader.
+        try:
+            if Path(get_default_profile(display, "SDR")).name.casefold() == Path(profile_name).name.casefold():
+                self._set_status(f"{reason}: Windows already has {profile_name} for SDR.", "ok")
+                return
+        except Exception:
+            pass
+
         try:
             active = reapply_existing_default_profile(display, "SDR", profile_name)
             self._set_status(f"{reason}: restored SDR profile {active}.", "ok")
@@ -1059,10 +1326,17 @@ class MainWindow(FluentWidget):
         return any(name.startswith(prefix) for prefix in MANAGED_PREFIXES)
 
     def _capture_current_hdr_base(self, display: DisplayInfo, *, load_controls: bool = False) -> None:
-        """Remember the real Windows HDR default as the immutable source profile.
+        """Remember the real Windows HDR default as the fallback source profile.
 
         App-managed working profiles are never promoted to base profiles. This prevents
         repeated HDR transitions from recursively editing an already edited profile.
+
+        The Windows default is always recorded for this display, because the watchdog and
+        the park-before-reinstall step need a profile that is genuinely installed. It only
+        becomes the *editing* base when the user has not chosen one: a profile picked with
+        Import is the ICC tag template every generated profile is built from, and silently
+        replacing it here made Apply produce the colorimetry of the Windows default while
+        the path field still showed the imported filename.
         """
         try:
             profile_name = get_default_profile(display, "HDR")
@@ -1077,9 +1351,24 @@ class MainWindow(FluentWidget):
         if not profile_path.is_file():
             return
         self._base_hdr_profiles[display.key] = {"profile_name": profile_name, "profile_path": str(profile_path)}
+
+        binding = self.state.display_bindings.get(display.stable_key)
+        if binding is not None and binding.hdr_profile and not load_controls:
+            # The user pinned an HDR profile for this display; it outranks whatever
+            # Windows currently happens to have as the default.
+            self._save_state_now()
+            return
+        if not load_controls and self._base_is_user_selected:
+            chosen = self.state.hdr.base_profile
+            if chosen and Path(chosen).is_file():
+                self._save_state_now()
+                return
+
         self.state.hdr.base_profile = str(profile_path)
         self.state.hdr.base_profile_name = profile_name
         self.state.hdr.imported_profile = str(profile_path)
+        # Adopting the Windows default as the base replaces any earlier import.
+        self._base_is_user_selected = False
         if load_controls:
             try:
                 imported = import_profile(profile_path, "HDR")
@@ -1090,7 +1379,7 @@ class MainWindow(FluentWidget):
                 self.state.hdr.base_profile_name = profile_name
                 self.state.hdr.imported_profile = str(profile_path)
                 self._load_mode_into_controls()
-                self.profile_path_edit.setText(str(profile_path))
+                self._populate_profile_pickers()
             except Exception:
                 pass
         self._save_state_now()
@@ -1100,13 +1389,23 @@ class MainWindow(FluentWidget):
 
         Profiles are removed by their installed filename, never by ICC description, so a
         user's original Windows HDR Calibration profile is not touched even when older
-        app-generated copies inherited the same visible description. The current stable
-        pair is excluded so this can never uninstall what we are about to activate.
+        app-generated copies inherited the same visible description.
+
+        The candidate names are gathered from the registry and runtime state, which cover
+        *every* display this app has ever managed, across every past session. Two kinds of
+        entry must survive: the current display's pair, and the pair belonging to any other
+        display Windows currently reports — on a multi-monitor system, uninstalling the
+        latter would silently break the calibration of a display the user is not editing.
+
+        Everything else goes, and that deliberately includes stale pairs whose filename
+        token no longer matches any attached display. The token is a hash of the display
+        key, which embeds the adapter LUID, and Windows reissues adapter LUIDs across
+        reboots and driver restarts — so without this the colour directory accumulates an
+        orphaned pair every time the LUID changes.
         """
         if display.key in self._legacy_cleaned:
             return
         self._legacy_cleaned.add(display.key)
-        current = {path.name for path in self._working_profile_paths(display)}
         names: set[str] = set()
         for entry in self._persisted_live_registry.values():
             if isinstance(entry, dict):
@@ -1115,7 +1414,7 @@ class MainWindow(FluentWidget):
                     names.add(name)
         if GAMMA_HOTKEY_STATE_PATH.is_file():
             try:
-                payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                payload = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8-sig"))
                 displays = payload.get("displays", {}) if isinstance(payload, dict) else {}
                 for entry in displays.values() if isinstance(displays, dict) else ():
                     if not isinstance(entry, dict):
@@ -1130,7 +1429,15 @@ class MainWindow(FluentWidget):
                         names.add(active)
             except Exception:
                 pass
-        for name in names - current:
+        # The current display is always protected, even if enumeration fails here,
+        # so a transient failure can never uninstall what we are about to activate.
+        protected = {path.name for path in self._working_profile_paths(display)}
+        try:
+            for attached in enumerate_displays():
+                protected.update(path.name for path in self._working_profile_paths(attached))
+        except Exception:
+            pass
+        for name in names - protected:
             try:
                 remove_profile(name, display, "HDR")
             except Exception:
@@ -1398,7 +1705,7 @@ class MainWindow(FluentWidget):
         payload: dict[str, object] = {}
         if GAMMA_HOTKEY_STATE_PATH.is_file():
             try:
-                candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+                candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8-sig"))
                 if isinstance(candidate, dict):
                     payload = candidate
             except (OSError, ValueError, json.JSONDecodeError):
@@ -1426,8 +1733,17 @@ class MainWindow(FluentWidget):
             imported.state.base_profile = str(source)
             imported.state.base_profile_name = imported.description
         self.state.set_mode_state("HDR", imported.state)
+        self._base_is_user_selected = True
+        binding = self._selected_binding()
+        if binding is not None:
+            try:
+                in_colour_dir = source.parent.samefile(get_color_directory())
+            except Exception:
+                in_colour_dir = False
+            binding.hdr_profile = source.name if in_colour_dir else str(source)
         self._load_mode_into_controls()
-        self.profile_path_edit.setText(str(source))
+        self._populate_profile_pickers()
+        self.hdr_profile_combo.setToolTip("Editing base profile:\n" + str(source))
         self._save_state_now()
         message = (
             f"Loaded {imported.description}. Exact slider state recovered."

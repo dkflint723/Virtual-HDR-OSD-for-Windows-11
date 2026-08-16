@@ -196,14 +196,3 @@ class Card(SimpleCardWidget):
 
     def add_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
         self.body.addLayout(layout)
-
-
-class PathField(LineEdit):
-    """Read-only path field that still supports selection and copying."""
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setReadOnly(True)
-        self.setClearButtonEnabled(False)
-        self.setPlaceholderText("No HDR profile selected")
-        self.setToolTip("Path of the currently loaded HDR ICC/ICM profile.")

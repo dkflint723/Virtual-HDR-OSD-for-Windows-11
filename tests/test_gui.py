@@ -164,6 +164,33 @@ class EditorStructureTests(WindowTestCase):
                 self.assertAlmostEqual(spec.default, default)
                 self.assertAlmostEqual(spec.step, step)
 
+    def test_every_documented_action_has_a_reachable_button(self):
+        """A method with no button is dead to the user even though tests call it.
+
+        Rebuilding the top bar once dropped Revert to Base and Reset All Sliders
+        while every test still passed, because the tests invoked the methods
+        directly. Assert on the actual widget tree instead.
+        """
+        from PySide6.QtWidgets import QAbstractButton
+
+        labels = {
+            b.text().rstrip(" •") for b in self.window.findChildren(QAbstractButton) if b.text()
+        }
+        for expected in (
+            "Refresh", "Display Settings", "Profile Folder",
+            "Import…", "Export Copy…", "Revert to Base", "Reset All Sliders",
+            "Reapply", "Apply Edits",
+            "Getting Started", "Watchdog Settings…", "Help",
+        ):
+            with self.subTest(button=expected):
+                self.assertIn(expected, labels, f"no button labelled {expected!r} in the window")
+
+    def test_the_per_display_switches_and_pickers_exist(self):
+        for name in ("hdr_switch", "sdr_profile_combo", "hdr_profile_combo",
+                     "live_checkbox", "automatic_mode_checkbox", "display_combo"):
+            with self.subTest(widget=name):
+                self.assertTrue(hasattr(self.window, name))
+
     def test_gamma_correction_dropdown_offers_exactly_the_supported_options(self):
         combo = self.window.gamma_correction_combo
         listed = tuple(combo.itemText(index) for index in range(combo.count()))
@@ -389,6 +416,61 @@ class ApplyPipelineTests(WindowTestCase):
         self.window._cleanup_legacy_managed_profiles(self.display)
         self.assertEqual(self.removed, first, "cleanup repeated for the same display")
 
+    def make_profile(self, name: str) -> Path:
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.profile_name = name
+        path = self.temp / f"{name}.icm"
+        path.write_bytes(build_profile("HDR", state, build_transform(state, hdr=True)))
+        return path
+
+    def test_apply_keeps_the_base_the_user_imported(self):
+        """The imported file is the ICC tag template; Apply must not swap it out.
+
+        Windows' own HDR default is still the factory profile at this point, and
+        adopting it would build the profile from the wrong colorimetry while the
+        path field kept showing the imported name.
+        """
+        vendor = self.make_profile("MyVendorProfile")
+        self.window._load_profile_from_path(vendor)
+        self.assertEqual(Path(self.window.state.hdr.base_profile).name, "MyVendorProfile.icm")
+
+        self.default_profiles["HDR"] = "BaseCalibration.icm"
+        self.apply()
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name,
+            "MyVendorProfile.icm",
+            "Apply discarded the imported base profile",
+        )
+        # A file outside the colour directory is tracked by full path so it stays
+        # findable; the picker shows that path, but it must name the same profile.
+        self.assertEqual(
+            Path(self.window.hdr_profile_combo.currentText()).name,
+            Path(self.window.state.hdr.base_profile).name,
+            "the HDR picker and the actual base disagree",
+        )
+
+    def test_an_hdr_transition_still_adopts_the_windows_default(self):
+        """Protecting an import must not freeze out a genuine Windows change."""
+        self.window._load_profile_from_path(self.make_profile("Imported"))
+        self.default_profiles["HDR"] = "BaseCalibration.icm"
+        self.window._capture_current_hdr_base(self.display, load_controls=True)
+        self.assertEqual(Path(self.window.state.hdr.base_profile).name, "BaseCalibration.icm")
+
+    def test_enabling_live_apply_keeps_the_configured_debounce(self):
+        """QTimer.start(int) reassigns the interval; the kick must not do that."""
+        configured = self.window.live_timer.interval()
+        self.window.live_checkbox.setChecked(True)
+        self.assertEqual(
+            self.window.live_timer.interval(), configured,
+            "enabling Live Apply permanently shortened the debounce",
+        )
+        self.window.control_widgets["gamma"].set_value(2.3, emit=True)
+        self.assertEqual(self.window.live_timer.interval(), configured)
+
     def test_failed_live_update_disables_live_apply(self):
         """A repeating failure must not fire every 420 ms forever."""
         self.window.state.live_mode = True
@@ -452,6 +534,263 @@ class DisplayLabelTests(unittest.TestCase):
 
         display.advanced_color_supported = False
         self.assertIn("SDR only", display.label)
+
+
+class MultiMonitorTests(WindowTestCase):
+    """Two HDR displays, each with its own stable working pair."""
+
+    def setUp(self):
+        super().setUp()
+        self.second = hdr_display(key="ADAPTER1:0:2")
+        self.second.friendly_name = "Second Monitor"
+        self.displays = [self.display, self.second]
+        patcher = mock.patch.object(app_module, "enumerate_displays", lambda: list(self.displays))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # Repopulate the combo: the window was built while only one display existed.
+        self.window._refresh_displays()
+        self.assertEqual(self.window.display_combo.count(), 2)
+
+    def select(self, display):
+        """Switch the target the way the user does — through the combo.
+
+        _selected_display() resolves via display_combo.currentData(), so setting
+        only the snapshot leaves the apply pipeline pointed at the old display.
+        """
+        for index in range(self.window.display_combo.count()):
+            if self.window.display_combo.itemData(index).key == display.key:
+                self.window.display_combo.setCurrentIndex(index)
+                break
+        else:
+            self.fail(f"display {display.key} is not in the combo")
+        self.assertEqual(self.window._selected_display().key, display.key)
+
+    def test_each_display_gets_a_distinct_working_pair(self):
+        first = {p.name for p in self.window._working_profile_paths(self.display)}
+        second = {p.name for p in self.window._working_profile_paths(self.second)}
+        self.assertEqual(len(first), 2)
+        self.assertFalse(first & second, "two displays share working-profile filenames")
+
+    def test_applying_to_one_display_keeps_the_others_profiles_installed(self):
+        """Calibrating monitor B must not uninstall monitor A's calibration."""
+        self.select(self.display)
+        self.apply("apply to A")
+        first_pair = [p.name for p in self.window._working_profile_paths(self.display)]
+        for name in first_pair:
+            self.assertTrue((self.color_dir / name).is_file(), f"{name} was not installed")
+
+        self.removed.clear()
+        self.select(self.second)
+        self.apply("apply to B")
+
+        for name in first_pair:
+            with self.subTest(profile=name):
+                self.assertNotIn(name, self.removed, "the other display's profile was uninstalled")
+                self.assertTrue(
+                    (self.color_dir / name).is_file(),
+                    "applying to a second display removed the first display's working profile",
+                )
+
+    def test_legacy_timestamped_profiles_are_still_removed(self):
+        """Protecting attached displays must not neuter legacy cleanup."""
+        legacy = "Virtual_HDR_OSD_20240101_120000_HDR.icm"
+        (self.color_dir / legacy).write_bytes(b"")
+        self.window._persisted_live_registry["old"] = {
+            "profile_name": legacy,
+            "profile_path": str(self.color_dir / legacy),
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        self.window._cleanup_legacy_managed_profiles(self.display)
+        self.assertIn(legacy, self.removed, "a legacy timestamped profile was not cleaned up")
+
+    def test_stale_pairs_from_a_previous_adapter_luid_are_removed(self):
+        """Adapter LUIDs are reissued across reboots, changing the filename token.
+
+        Those orphaned pairs look exactly like current ones, so they must be
+        identified by not belonging to any attached display, not by their shape.
+        """
+        stale = "Virtual_HDR_OSD_deadbeef01_Off.icm"
+        (self.color_dir / stale).write_bytes(b"")
+        self.window._persisted_live_registry["previous-boot"] = {
+            "profile_name": stale,
+            "profile_path": str(self.color_dir / stale),
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        self.window._cleanup_legacy_managed_profiles(self.display)
+        self.assertIn(
+            stale, self.removed,
+            "a working pair orphaned by an adapter-LUID change was left installed forever",
+        )
+
+    def test_cleanup_protects_the_current_display_even_if_enumeration_fails(self):
+        own = [p.name for p in self.window._working_profile_paths(self.display)]
+        self.window._persisted_live_registry["mine"] = {
+            "profile_name": own[0], "profile_path": "",
+        }
+        self.window._legacy_cleaned.clear()
+        self.removed.clear()
+        with mock.patch.object(app_module, "enumerate_displays", side_effect=RuntimeError("boom")):
+            self.window._cleanup_legacy_managed_profiles(self.display)
+        self.assertNotIn(own[0], self.removed)
+
+    def test_returning_to_a_display_does_not_rebuild(self):
+        self.select(self.display)
+        self.apply("apply to A")
+        self.select(self.second)
+        self.apply("apply to B")
+        self.installed.clear()
+        self.select(self.display)
+        self.apply("back to A")
+        self.assertEqual(self.installed, [], "returning to a display reinstalled unchanged profiles")
+
+
+class ProfileBindingTests(WindowTestCase):
+    """Pinning the SDR and HDR profiles per display, persisted across restarts."""
+
+    def setUp(self):
+        super().setUp()
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        # Real profiles: selecting one loads it, and a zero-byte placeholder would
+        # raise into a modal error dialog that blocks the test run.
+        for name in ("Calman_SDR_Calibrated.icm", "HDR Calibrated Profile.icc", "sRGB.icm"):
+            state = ModeState.neutral("HDR")
+            (self.color_dir / name).write_bytes(
+                build_profile("HDR", state, build_transform(state, hdr=True))
+            )
+        # Any unexpected modal would hang the suite rather than fail it.
+        blocker = mock.patch.object(QMessageBox, "critical")
+        blocker.start()
+        self.addCleanup(blocker.stop)
+        patcher = mock.patch.object(
+            app_module, "list_installed_profiles",
+            lambda: sorted(p.name for p in self.color_dir.iterdir() if p.suffix.lower() in (".icc", ".icm")),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.window._populate_profile_pickers()
+
+    def test_pickers_offer_installed_profiles_and_exclude_our_own(self):
+        self.apply()  # installs the app's working pair into the colour dir
+        self.window._populate_profile_pickers()
+        listed = [self.window.hdr_profile_combo.itemText(i)
+                  for i in range(self.window.hdr_profile_combo.count())]
+        self.assertIn("HDR Calibrated Profile.icc", listed)
+        self.assertFalse(
+            [n for n in listed if n.startswith("Virtual_HDR_OSD_")],
+            "the app's own working profiles must not be offered as an editable base",
+        )
+
+    def test_sdr_defaults_to_auto_and_never_applies_on_selection(self):
+        self.assertEqual(self.window.sdr_profile_combo.currentText(), app_module.SDR_AUTO)
+        self.associations.clear()
+        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.assertEqual(
+            self.associations, [],
+            "choosing an SDR profile must not immediately re-associate anything",
+        )
+
+    def test_pinned_sdr_profile_is_restored_on_an_hdr_to_sdr_switch(self):
+        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.default_profiles["SDR"] = "somethingelse.icm"
+        self.associations.clear()
+        self.window._restore_remembered_sdr_profile(self.display, "test")
+        self.assertIn("Calman_SDR_Calibrated.icm", self.associations)
+
+    def test_unmanaged_sdr_is_never_touched(self):
+        """Calman and friends own the SDR association; we must not fight them."""
+        self.window.sdr_profile_combo.setCurrentText(app_module.SDR_UNMANAGED)
+        self.default_profiles["SDR"] = "somethingelse.icm"
+        self.associations.clear()
+        self.window._restore_remembered_sdr_profile(self.display, "test")
+        self.assertEqual(self.associations, [], "unmanaged SDR was re-associated anyway")
+        self.assertIn("unmanaged", self.window.status_label.text())
+
+    def test_restore_is_a_no_op_when_windows_already_has_the_pinned_profile(self):
+        """A redundant association write is what breaks third-party loaders."""
+        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.default_profiles["SDR"] = "Calman_SDR_Calibrated.icm"
+        self.associations.clear()
+        self.window._restore_remembered_sdr_profile(self.display, "test")
+        self.assertEqual(self.associations, [])
+
+    def test_choosing_an_hdr_profile_loads_it_as_the_base_immediately(self):
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.contrast = 4.0
+        (self.color_dir / "HDR Calibrated Profile.icc").write_bytes(
+            build_profile("HDR", state, build_transform(state, hdr=True))
+        )
+        self.window._populate_profile_pickers()
+        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc"
+        )
+        self.assertAlmostEqual(self.window.state.hdr.contrast, 4.0)
+
+    def test_a_pinned_hdr_profile_survives_apply(self):
+        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.default_profiles["HDR"] = "BaseCalibration.icm"
+        self.apply()
+        self.assertEqual(
+            Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc"
+        )
+
+    def test_bindings_are_keyed_on_a_reboot_stable_identity(self):
+        """Adapter LUIDs are reissued on reboot; bindings must not be lost."""
+        self.display.device_path = r"\\?\DISPLAY#AUS32F2#5&2564#{guid}"
+        self.window._populate_profile_pickers()
+        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+
+        stored = self.window.state.display_bindings
+        self.assertIn(self.display.device_path, stored)
+        self.assertNotIn(self.display.key, stored)
+
+    def test_bindings_round_trip_through_the_saved_state_file(self):
+        from sdr_hdr_profile_creator.model import ApplicationState
+
+        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.window._save_state_now()
+        reloaded = ApplicationState.from_dict(
+            json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
+        )
+        key = self.display.stable_key
+        self.assertEqual(reloaded.display_bindings[key].sdr_profile, "Calman_SDR_Calibrated.icm")
+
+
+class HdrSwitchTests(WindowTestCase):
+    def test_switch_reflects_the_current_display_mode(self):
+        self.assertTrue(self.window.hdr_switch.isChecked())
+
+    def test_turning_hdr_on_targets_the_selected_display(self):
+        calls = []
+        self.display.advanced_color_kind = "SDR"
+        self.display.advanced_color_enabled = False
+        self.window._sync_display_widgets(self.display)
+        with mock.patch.object(app_module, "set_hdr_enabled", lambda d, e: calls.append((d.key, e))):
+            self.window.hdr_switch.setChecked(True)
+        self.assertEqual(calls, [(self.display.key, True)])
+
+    def test_a_failed_switch_reports_and_reverts_the_toggle(self):
+        self.display.advanced_color_kind = "SDR"
+        self.display.advanced_color_enabled = False
+        self.window._sync_display_widgets(self.display)
+        with mock.patch.object(app_module, "set_hdr_enabled", side_effect=RuntimeError("denied")):
+            self.window.hdr_switch.setChecked(True)
+        self.assertIn("Could not turn HDR on", self.window.status_label.text())
+        self.assertFalse(self.window.hdr_switch.isChecked())
+
+    def test_switch_is_disabled_for_a_display_without_hdr_support(self):
+        self.display.advanced_color_supported = False
+        self.window._sync_display_widgets(self.display)
+        self.assertFalse(self.window.hdr_switch.isEnabled())
 
 
 class RuntimeStateTests(WindowTestCase):

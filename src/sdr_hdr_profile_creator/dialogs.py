@@ -149,32 +149,37 @@ class GuideStep:
 
 GUIDE_STEPS: tuple[GuideStep, ...] = (
     GuideStep(
-        "1 · Turn HDR on in Windows",
-        "Nothing in this tool applies until Windows itself is in HDR mode for the display you want to adjust.\n\n"
-        "Open Display settings, select the monitor, and switch on HDR (or press Win + Alt + B). Then come back "
-        "here — the badge at the top right updates on its own.",
-        "Open Display Settings",
-        "display_settings",
+        "1 · Pick your display and turn HDR on",
+        "Nothing here applies until Windows is in HDR mode for the display you want to adjust.\n\n"
+        "Choose the monitor in row 1, then use the HDR switch right next to it. That switch targets the "
+        "display you selected, unlike Win + Alt + B which only ever toggles whichever display Windows "
+        "considers current. The badge at the top right follows along on its own.",
+        "Turn HDR On",
+        "enable_hdr",
         "hdr_active",
     ),
     GuideStep(
-        "2 · Create a base profile with Windows HDR Calibration",
+        "2 · Optional — create a base profile with Windows HDR Calibration",
         "This tool edits an existing HDR profile rather than inventing one. The strongly recommended base is "
         "Microsoft's free Windows HDR Calibration app, which measures your panel's real black point, peak "
         "brightness and full-frame brightness.\n\n"
-        "Run it once, save the profile it produces, then return here. If you already have an HDR profile you "
-        "trust, you can skip this step.",
+        "It is a separate Microsoft download, so this is the one step that lives outside this window. Run it "
+        "once and save the profile. Skip this entirely if you already have an HDR profile you trust.",
         "Get Windows HDR Calibration",
         "hdr_calibration_app",
     ),
     GuideStep(
-        "3 · Import that profile",
-        "Import the .icm or .icc file you just created. The file picker opens in the Windows colour-profile "
-        "folder, where HDR Calibration saves its output.\n\n"
-        "Whatever you import becomes the immutable base. Every adjustment you make is layered on top of it, so "
-        "your edits never stack on themselves.",
-        "Import HDR Profile…",
-        "import_profile",
+        "3 · Pin the SDR and HDR profiles for this display",
+        "Row 2 lists every colour profile installed on this PC. Pick which one is this display's HDR profile "
+        "and the sliders start editing it immediately — no import, no restart.\n\n"
+        "The SDR box is about what happens when Windows drops back to SDR. Leave it on Auto to restore "
+        "whatever Windows had, pin a specific profile to make that reliable, or choose "
+        "\"Leave unmanaged\" if Calman, DisplayCAL or similar owns your SDR calibration — this app will then "
+        "never touch the SDR association at all.\n\n"
+        "Both choices are remembered per monitor and survive restarts, so this is a one-time setup. Use "
+        "Import… only for a file that is not installed in the Windows colour folder.",
+        "Show me the profile list",
+        "focus_profiles",
         "profile_imported",
     ),
     GuideStep(
@@ -182,8 +187,8 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
         "With Live Apply on, each slider change is installed a moment after you stop moving it, so you can "
         "judge the result directly.\n\n"
         "Work in small steps and in this order: Gamma first, then Midtone Brightness and Contrast, then "
-        "Temperature and Tint, and only then the per-channel Fine Balance trims. Use Compare SDR / HDR to sanity "
-        "check against the SDR desktop, and Reset All if you lose your bearings.",
+        "Temperature and Tint, and only then the per-channel Fine Balance trims. Flip the HDR switch off and "
+        "on to compare against the SDR desktop, and use Reset All if you lose your bearings.",
         "Enable Live Apply",
         "enable_live",
         "live_enabled",

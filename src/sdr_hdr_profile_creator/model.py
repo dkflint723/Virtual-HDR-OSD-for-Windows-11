@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Literal
 
 DisplayMode = Literal["SDR", "HDR"]
@@ -129,6 +129,37 @@ class ModeState:
 
 
 @dataclass(slots=True)
+class DisplayBinding:
+    """The SDR and HDR profiles a user has pinned to one physical display.
+
+    Without this the app can only *infer* both: it reads whatever Windows happens
+    to have associated at the moment it looks, which means the SDR profile is
+    unknown until an HDR→SDR transition is observed, and the HDR base drifts
+    whenever Windows' default changes. Pinning them makes both explicit and
+    survives restarts.
+    """
+
+    sdr_profile: str = ""       # filename inside the Windows colour directory
+    hdr_profile: str = ""       # filename, or a full path for an imported file
+    display_label: str = ""     # for showing stale bindings when the display is absent
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sdr_profile": self.sdr_profile,
+            "hdr_profile": self.hdr_profile,
+            "display_label": self.display_label,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "DisplayBinding":
+        return cls(
+            sdr_profile=str(data.get("sdr_profile", ""))[:260],
+            hdr_profile=str(data.get("hdr_profile", ""))[:260],
+            display_label=str(data.get("display_label", ""))[:120],
+        )
+
+
+@dataclass(slots=True)
 class ApplicationState:
     current_mode: DisplayMode
     follow_windows_mode: bool
@@ -137,6 +168,9 @@ class ApplicationState:
     selected_display_key: str
     sdr: ModeState
     hdr: ModeState
+    # Keyed by DisplayInfo.stable_key, not .key: adapter LUIDs are reissued on
+    # reboot, so anything keyed on those would be lost every restart.
+    display_bindings: dict[str, DisplayBinding] = field(default_factory=dict)
 
     @classmethod
     def neutral(cls) -> "ApplicationState":
@@ -148,7 +182,16 @@ class ApplicationState:
             "",
             ModeState.neutral("SDR"),
             ModeState.neutral("HDR"),
+            {},
         )
+
+    def binding(self, stable_key: str) -> DisplayBinding:
+        """Return the binding for a display, creating an empty one on demand."""
+        existing = self.display_bindings.get(stable_key)
+        if existing is None:
+            existing = DisplayBinding()
+            self.display_bindings[stable_key] = existing
+        return existing
 
     def mode_state(self, mode: DisplayMode | None = None) -> ModeState:
         return self.sdr if (mode or self.current_mode) == "SDR" else self.hdr
@@ -169,6 +212,9 @@ class ApplicationState:
             "selected_display_key": self.selected_display_key,
             "sdr": self.sdr.to_dict(),
             "hdr": self.hdr.to_dict(),
+            "display_bindings": {
+                key: binding.to_dict() for key, binding in self.display_bindings.items()
+            },
         }
 
     @classmethod
@@ -181,4 +227,15 @@ class ApplicationState:
             str(data.get("selected_display_key", "")),
             ModeState.from_dict(dict(data.get("sdr", {})), "SDR"),
             ModeState.from_dict(dict(data.get("hdr", {})), "HDR"),
+            cls._bindings_from_dict(data.get("display_bindings")),
         )
+
+    @staticmethod
+    def _bindings_from_dict(data: Any) -> dict[str, "DisplayBinding"]:
+        if not isinstance(data, dict):
+            return {}
+        result: dict[str, DisplayBinding] = {}
+        for key, value in data.items():
+            if isinstance(key, str) and key and isinstance(value, dict):
+                result[key] = DisplayBinding.from_dict(value)
+        return result
