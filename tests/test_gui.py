@@ -1199,6 +1199,19 @@ class RuntimeStateTests(WindowTestCase):
         # Publishing intent must not wipe the profile pair the watchdog needs.
         self.assertEqual(set(entry["profiles"]), {"Off", "On"})
 
+    def test_the_sdr_choice_is_published_for_the_watchdog(self):
+        """The watchdog force-restores SDR every five seconds regardless of drift.
+
+        The GUI refusing to touch an unmanaged SDR association is worth nothing
+        unless the watchdog is told to leave it alone too.
+        """
+        self.apply()
+        self.assertFalse(self.read_runtime()["displays"][self.display.key]["sdr_unmanaged"])
+
+        self.window.sdr_profile_combo.setCurrentText(app_module.SDR_UNMANAGED)
+        self.apply()
+        self.assertTrue(self.read_runtime()["displays"][self.display.key]["sdr_unmanaged"])
+
     def test_updated_at_is_timezone_aware(self):
         """The watchdog compares this against its own stamp to decide who acted last.
 

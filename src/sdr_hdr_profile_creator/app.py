@@ -1841,6 +1841,7 @@ class MainWindow(FluentWidget):
             return
         payload, displays_state, record = entry
         base = self._base_hdr_profiles.get(display.key, {})
+        binding = self.state.display_bindings.get(display.stable_key)
         off_name, off_path = installed["Off"]
         on_name, on_path = installed["On"]
         record.update(
@@ -1855,6 +1856,11 @@ class MainWindow(FluentWidget):
                 "base_profile_path": base.get("profile_path", self.state.hdr.base_profile),
                 "profiles": {"Off": off_name, "On": on_name},
                 "paths": {"Off": str(off_path), "On": str(on_path)},
+                # The watchdog force-restores the STANDARD association every five
+                # seconds. Publish the SDR choice so it can honour "third-party
+                # calibration owns SDR" rather than overriding it on a timer; the
+                # GUI's own restraint is worth nothing while the watchdog writes.
+                "sdr_unmanaged": binding is not None and binding.sdr_profile == SDR_UNMANAGED,
                 # Timezone-aware and full precision: the watchdog compares this against
                 # its own timestamp to decide who acted last. A naive local time is
                 # ambiguous across a DST fall-back, and truncating to whole seconds made

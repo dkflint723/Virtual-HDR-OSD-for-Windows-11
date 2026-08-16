@@ -992,7 +992,18 @@ function Restore-SavedProfiles {
         [switch]$Force
     )
 
-    if ($SavedDisplay.StandardProfile) {
+    # The forced reassertion below runs every five seconds whether or not anything
+    # drifted, so leaving SDR alone has to be decided here. Virtual HDR OSD offers
+    # "third-party calibration owns SDR" for exactly this -- Calman and friends
+    # reload the STANDARD association themselves, and a redundant write on a timer
+    # is what fights them. The GUI publishes the choice; honour it.
+    $sdrUnmanaged = $false
+    $sdrEntry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
+    if ($sdrEntry -and ($sdrEntry.PSObject.Properties.Name -contains 'sdr_unmanaged')) {
+        $sdrUnmanaged = [bool]$sdrEntry.sdr_unmanaged
+    }
+
+    if ($SavedDisplay.StandardProfile -and (-not $sdrUnmanaged)) {
         $current = [ColorProfileWatchdog.Native]::GetDefaultProfile(
             $CurrentDisplay,
             [ColorProfileWatchdog.Native]::WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,

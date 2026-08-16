@@ -50,6 +50,13 @@ class WatchdogPackagingTests(unittest.TestCase):
             with self.subTest(key=key):
                 self.assertIn(key, script)
 
+    def test_watchdog_leaves_an_unmanaged_sdr_association_alone(self):
+        """Calman reloads STANDARD itself; a forced write every five seconds fights it."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("sdr_unmanaged", script, "the app publishes this; the watchdog must read it")
+        guard = re.search(r"if \(\$SavedDisplay\.StandardProfile -and \(-not \$sdrUnmanaged\)\)", script)
+        self.assertIsNotNone(guard, "the STANDARD restore must be gated on the published choice")
+
     def test_watchdog_guards_its_own_startup(self):
         """A hung instance holds the singleton and blocks every healthy one."""
         script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
