@@ -815,6 +815,23 @@ class RuntimeStateTests(WindowTestCase):
         # Publishing intent must not wipe the profile pair the watchdog needs.
         self.assertEqual(set(entry["profiles"]), {"Off", "On"})
 
+    def test_updated_at_is_timezone_aware(self):
+        """The watchdog compares this against its own stamp to decide who acted last.
+
+        A naive local time is ambiguous across the DST fall-back hour, which is
+        exactly when a wrong comparison would revert the user's setting.
+        """
+        from datetime import datetime
+
+        self.apply()
+        entry = self.read_runtime()["displays"][self.display.key]
+        stamp = datetime.fromisoformat(entry["updated_at"])
+        self.assertIsNotNone(stamp.tzinfo, f"updated_at {entry['updated_at']!r} has no offset")
+
+        self.window._publish_gamma_runtime_intent(self.display)
+        entry = self.read_runtime()["displays"][self.display.key]
+        self.assertIsNotNone(datetime.fromisoformat(entry["updated_at"]).tzinfo)
+
     def test_runtime_state_survives_a_corrupt_file(self):
         app_module.GAMMA_HOTKEY_STATE_PATH.write_text("{ not json", encoding="utf-8")
         self.apply()

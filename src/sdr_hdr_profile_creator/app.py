@@ -1670,7 +1670,10 @@ class MainWindow(FluentWidget):
                 "base_profile_path": base.get("profile_path", self.state.hdr.base_profile),
                 "profiles": {"Off": off_name, "On": on_name},
                 "paths": {"Off": str(off_path), "On": str(on_path)},
-                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                # Timezone-aware: the watchdog compares this against its own timestamp to
+                # decide who acted last, and a naive local time is ambiguous across a DST
+                # fall-back.
+                "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             }
         )
         displays_state[display.key] = record
@@ -1689,7 +1692,7 @@ class MainWindow(FluentWidget):
         record.setdefault("paths", {})
         record["selected"] = self._last_enabled_gamma_correction
         record["enabled"] = self.state.hdr.sdr_gamma_correction != "Off"
-        record["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        record["updated_at"] = datetime.now().astimezone().isoformat(timespec="seconds")
         displays_state[display.key] = record
         payload["schema"] = GAMMA_RUNTIME_SCHEMA
         self._write_json_atomic(GAMMA_HOTKEY_STATE_PATH, payload)

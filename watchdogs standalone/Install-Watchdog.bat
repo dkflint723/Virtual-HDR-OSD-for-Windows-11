@@ -733,6 +733,10 @@ function Get-SavedProfileState {
         WorkingOff      = $pair.Off
         WorkingOn       = $pair.On
         GammaEnabled    = [bool]$pair.Enabled
+        # Install captures the associations as they are right now, so this capture is by
+        # definition the most recent decision. Anything the GUI does afterwards is newer
+        # and takes over; see Get-DesiredExtendedProfile.
+        GammaUpdatedAt  = (Get-Date).ToString('o')
     }
 }
 
@@ -752,8 +756,67 @@ function Get-GammaEntryForDisplay {
     return $null
 }
 
+function ConvertTo-GammaTimestamp {
+    param([string]$Value)
+
+    # Both sides have written slightly different ISO-8601 shapes: the GUI wrote a naive
+    # local time for a long while, this script writes a round-trip value with an offset.
+    # AssumeLocal makes the naive form comparable. A malformed or empty value must return
+    # $null rather than throw, because $ErrorActionPreference is 'Stop' here.
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse(
+            $Value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeLocal,
+            [ref]$parsed)) {
+        return $parsed
+    }
+    return $null
+}
+
 function Get-DesiredExtendedProfile {
     param($CurrentDisplay, $SavedDisplay)
+
+    $entry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
+
+    # Whichever side acted most recently wins.
+    #
+    # Virtual HDR OSD records its own correction changes in gamma_hotkeys.json; this
+    # script records the switches it performs itself in State.json. Previously only the
+    # captured GammaEnabled below was consulted, so a correction change made in the GUI
+    # was re-associated back to the opposite variant by the next forced restore, roughly
+    # every five seconds, with no way for the user to make it stick.
+    if ($entry -and ($entry.PSObject.Properties.Name -contains 'enabled')) {
+        $guiAt = ConvertTo-GammaTimestamp ([string]$entry.updated_at)
+        $ownAt = $null
+        if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaUpdatedAt') {
+            $ownAt = ConvertTo-GammaTimestamp ([string]$SavedDisplay.GammaUpdatedAt)
+        }
+
+        if ($guiAt -and ((-not $ownAt) -or ($guiAt -gt $ownAt))) {
+            $wanted = $(if ([bool]$entry.enabled) { 'On' } else { 'Off' })
+
+            # Prefer the filenames the GUI last published. It regenerates the working pair
+            # under new names whenever the adapter LUID changes, which State.json captured
+            # at install time cannot know about.
+            $name = $null
+            if (($entry.PSObject.Properties.Name -contains 'profiles') -and $entry.profiles) {
+                if ($entry.profiles.PSObject.Properties.Name -contains $wanted) {
+                    $name = [string]$entry.profiles.$wanted
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                $name = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
+            }
+
+            # Never hand Windows a profile that is not installed; fall through to the
+            # captured state instead, which is what the old code effectively did.
+            if ((-not [string]::IsNullOrWhiteSpace($name)) -and (Test-InstalledColorProfile -ProfileName $name)) {
+                return $name
+            }
+        }
+    }
 
     # The standalone watchdog owns a persistent copy of the prepared Off/On names.
     # This works even when Virtual HDR OSD is closed and its runtime JSON is stale.
@@ -766,7 +829,6 @@ function Get-DesiredExtendedProfile {
         }
     }
 
-    $entry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
     if ($entry -and $entry.active_profile) {
         return [string]$entry.active_profile
     }
@@ -858,6 +920,10 @@ function Invoke-GammaHotkey {
             }
 
             $saved.GammaEnabled = [bool]$Enable
+            # Stamp when this script last chose a variant, so Get-DesiredExtendedProfile can
+            # tell whether the GUI's runtime intent is newer than our own. Add-Member -Force
+            # covers State.json files written before this field existed.
+            $saved | Add-Member -NotePropertyName GammaUpdatedAt -NotePropertyValue ((Get-Date).ToString('o')) -Force
             $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
 
             # Keep the GUI runtime file synchronized when it exists, but do not depend on it.

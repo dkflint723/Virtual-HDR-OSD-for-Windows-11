@@ -447,6 +447,23 @@ the status bar says so explicitly rather than leaving the keys silently dead.
 
 **Off is authoritative:** choosing `Off` (or pressing `Alt + 1`) immediately applies an uncorrected companion profile. The internal mode watchdog and the standalone watchdog are forbidden from restoring a previously corrected profile while the shared correction state is Off. `Alt + 2` is the only hotkey that re-enables the selected correction.
 
+### Which side wins
+
+Two processes can change the correction: this app, and the standalone watchdog. Both
+record when they last acted — the app in `gamma_hotkeys.json`, the watchdog in its own
+`State.json` — and **the more recent decision wins**.
+
+That comparison is what makes the guarantee above real. The watchdog re-asserts the HDR
+association every few seconds, and it used to decide purely from the state it captured when
+it was installed. A correction change made in the GUI was therefore undone within about five
+seconds, permanently and with no explanation, while the dropdown still showed the user's
+choice. The watchdog now honours whichever intent is newer, and prefers the profile
+filenames the app most recently published, so a pair regenerated under new names (which
+happens when the adapter LUID changes) is still followed.
+
+If the app is closed, or its runtime file is missing or unreadable, the watchdog falls back
+to its own captured state exactly as before.
+
 While the GUI is open, **Auto** reads the current Windows SDR white level and regenerates the correction from that value. The app maintains only two fixed per-display working profiles: **Correction Off** and **Correction On**. Their filenames are reused rather than timestamped, so repeated Live Apply operations or SDR/HDR transitions do not accumulate new profiles in Windows. After the GUI closes, the standalone watchdog switches between those last prepared Off/On working profiles with Alt+1 and Alt+2.
 
 ---
