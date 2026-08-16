@@ -229,7 +229,9 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
         # Match the D65-adapted convention used by Windows HDR Calibration:
         # physical D65 colorimetry plus identity chad and an MSCA marker.
         white = D65_XYZ
-        chad = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0)
+        # s15Fixed16Array of exactly nine values. A short array here produces a
+        # malformed chromaticAdaptationTag that mscms may reject outright.
+        chad = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
     else:
         # Keep the standard SDR display profile colorimetry ICC-compliant by
         # adapting its native D65 measurements to the D50 PCS.
@@ -318,9 +320,19 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
     return _apply_profile_id(bytes(header + table + body))
 
 
-def write_profile(path: Path, mode: DisplayMode, state: ModeState, transform: CalibrationTransform) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(build_profile(mode, state, transform))
+def content_digest(profile: bytes) -> str:
+    """Fingerprint a profile by its calibration content, ignoring when it was made.
+
+    Every generated profile embeds the current time in its ICC header, and the
+    profile ID is an MD5 over that header. Two profiles built from identical
+    settings a second apart are therefore not byte-identical even though they
+    describe exactly the same calibration. Callers deciding whether a profile
+    needs reinstalling must compare this, not the raw bytes.
+    """
+    mutable = bytearray(profile)
+    mutable[24:36] = b"\0" * 12  # header dateTime
+    mutable[84:100] = b"\0" * 16  # profile id, derived from the header
+    return hashlib.sha256(bytes(mutable)).hexdigest()
 
 
 def _read_tags(data: bytes) -> dict[bytes, bytes]:
@@ -458,15 +470,6 @@ def _estimate_state_from_curves(mode: DisplayMode, curves: tuple[list[float], li
     # Imported two-point MHC2 profiles must never constrain subsequent edits to two endpoints.
     state.lut_entries = 4096
     return state
-
-
-def _estimate_saturation_from_matrix(matrix: tuple[float, ...]) -> float:
-    if len(matrix) < 11:
-        return 0.0
-    factor = max(0.0, min(2.0, (matrix[0] + matrix[5] + matrix[10] - 1.0) / 2.0))
-    if factor >= 1.0:
-        return (factor - 1.0) * 250.0
-    return (factor - 1.0) * 100.0
 
 
 def import_profile(path: Path, fallback_mode: DisplayMode) -> ImportedProfile:

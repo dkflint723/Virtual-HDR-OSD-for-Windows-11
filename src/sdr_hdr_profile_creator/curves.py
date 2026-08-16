@@ -19,45 +19,8 @@ def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return low if value < low else high if value > high else value
 
 
-def srgb_to_linear(value: float) -> float:
-    if value <= 0.04045:
-        return value / 12.92
-    return ((value + 0.055) / 1.055) ** 2.4
-
-
-def linear_to_srgb(value: float) -> float:
-    value = max(0.0, value)
-    if value <= 0.0031308:
-        return 12.92 * value
-    return 1.055 * (value ** (1.0 / 2.4)) - 0.055
-
-
-def pq_eotf(code: float) -> float:
-    """ST.2084 code value to absolute luminance in nits."""
-    m1 = 2610.0 / 16384.0
-    m2 = 2523.0 / 32.0
-    c1 = 3424.0 / 4096.0
-    c2 = 2413.0 / 128.0
-    c3 = 2392.0 / 128.0
-    p = max(code, 0.0) ** (1.0 / m2)
-    numerator = max(p - c1, 0.0)
-    denominator = c2 - c3 * p
-    if denominator <= 0.0:
-        return 10000.0
-    return 10000.0 * (numerator / denominator) ** (1.0 / m1)
-
-
-def pq_oetf(nits: float) -> float:
-    """Absolute luminance in nits to ST.2084 code value."""
-    m1 = 2610.0 / 16384.0
-    m2 = 2523.0 / 32.0
-    c1 = 3424.0 / 4096.0
-    c2 = 2413.0 / 128.0
-    c3 = 2392.0 / 128.0
-    y = clamp(nits / 10000.0)
-    p = y**m1
-    return ((c1 + c2 * p) / (1.0 + c3 * p)) ** m2
-
+# PQ transfer functions live in gamma_correction.py, which owns the SDR-in-HDR
+# correction. Duplicating them here previously invited the two copies to drift.
 
 # Rec.2020 / D65 matrix, appropriate for Windows HDR's BT.2020-oriented pipeline.
 _REC2020_TO_XYZ = (

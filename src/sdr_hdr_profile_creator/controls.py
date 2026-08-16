@@ -1,16 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable
 
 from PySide6.QtCore import QEvent, Qt, Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
-    BodyLabel,
     CaptionLabel,
     LineEdit,
-    PushButton,
     SimpleCardWidget,
     Slider,
     StrongBodyLabel,
@@ -199,21 +196,6 @@ class Card(SimpleCardWidget):
 
     def add_layout(self, layout: QHBoxLayout | QVBoxLayout) -> None:
         self.body.addLayout(layout)
-
-
-class ActionCard(Card):
-    def __init__(
-        self,
-        title: str,
-        description: str,
-        button_text: str,
-        callback: Callable[[], None],
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(title, description, parent)
-        button = PushButton(button_text, self)
-        button.clicked.connect(callback)
-        self.add_widget(button)
 
 
 class PathField(LineEdit):

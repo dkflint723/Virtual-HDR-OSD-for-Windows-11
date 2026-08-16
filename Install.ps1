@@ -62,7 +62,7 @@ if (-not $UvRunner) {
     Write-Host "Microsoft Defender appears to have blocked the official uv executable." -ForegroundColor Red
     Write-Host "The app itself has not been installed or executed yet." -ForegroundColor Red
     Write-Host "Do not disable Windows Security for this app." -ForegroundColor Yellow
-    Write-Host "Update Defender security intelligence, then retry Run.bat." -ForegroundColor Yellow
+    Write-Host "Update Defender security intelligence, then retry `"1- Install & Run.bat`"." -ForegroundColor Yellow
     Write-Host "You can also install uv from Astral separately and rerun this installer; it will use it only for bootstrap." -ForegroundColor Yellow
     throw "No usable uv executable is available."
 }
@@ -78,4 +78,4 @@ if ($LASTEXITCODE -ne 0) { throw "uv sync failed with exit code $LASTEXITCODE" }
 Write-Host "Installation complete." -ForegroundColor Green
 Write-Host "Python: $PythonDir"
 Write-Host "Environment: $VenvDir"
-Write-Host "Run the app with Run.bat"
+Write-Host "Start the app with `"1- Install & Run.bat`""

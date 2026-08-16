@@ -36,9 +36,17 @@ class DisplayInfo:
 
     @property
     def label(self) -> str:
-        support = "HDR" if self.advanced_color_supported else "SDR only"
-        mode = "ACM/WCG" if self.acm_enabled else self.current_mode
-        return f"{self.friendly_name}  ·  {self.gdi_name}  ·  {support}  ·  {mode}"
+        # Capability and current state in one phrase. Listing both separately
+        # produced the unreadable "… · HDR · HDR" for a display in HDR mode.
+        if not self.advanced_color_supported:
+            status = "SDR only"
+        elif self.advanced_color_kind == "HDR":
+            status = "HDR on"
+        elif self.acm_enabled:
+            status = "HDR off · ACM/WCG"
+        else:
+            status = "HDR off"
+        return f"{self.friendly_name}  ·  {self.gdi_name}  ·  {status}"
 
 
 class WindowsColorError(RuntimeError):
@@ -210,13 +218,6 @@ if IS_WINDOWS:
     mscms.UninstallColorProfileW.restype = BOOL
     mscms.GetColorDirectoryW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
     mscms.GetColorDirectoryW.restype = BOOL
-    if hasattr(mscms, "WcsGetCalibrationManagementState"):
-        mscms.WcsGetCalibrationManagementState.argtypes = [ctypes.POINTER(BOOL)]
-        mscms.WcsGetCalibrationManagementState.restype = BOOL
-    if hasattr(mscms, "WcsSetCalibrationManagementState"):
-        mscms.WcsSetCalibrationManagementState.argtypes = [BOOL]
-        mscms.WcsSetCalibrationManagementState.restype = BOOL
-
     if hasattr(mscms, "ColorProfileAddDisplayAssociation"):
         mscms.ColorProfileAddDisplayAssociation.argtypes = [
             UINT32,
@@ -282,7 +283,10 @@ def _format_windows_error(prefix: str) -> WindowsColorError:
     error = ctypes.get_last_error()
     detail = f"{prefix}: {ctypes.FormatError(error).strip()} (Win32 {error})"
     if error == 5:
-        detail += ". Windows denied profile installation; restart Run.bat as administrator and retry"
+        detail += (
+            '. Windows denied profile installation; close the app, right-click '
+            '"1- Install & Run.bat", choose Run as administrator, and retry'
+        )
     return WindowsColorError(detail)
 
 
@@ -408,16 +412,6 @@ def enumerate_displays() -> list[DisplayInfo]:
     return displays
 
 
-def find_display(display_key: str) -> DisplayInfo | None:
-    displays = enumerate_displays()
-    if not displays:
-        return None
-    for display in displays:
-        if display.key == display_key:
-            return display
-    return displays[0]
-
-
 def _luid(display: DisplayInfo) -> "LUID":
     value = LUID()
     value.LowPart = display.adapter_low
@@ -445,10 +439,6 @@ def resolve_profile_path(profile_name: str) -> Path:
     if candidate.is_file():
         return candidate
     return get_color_directory() / candidate.name
-
-
-def get_default_profile_path(display: DisplayInfo, mode: str) -> Path:
-    return resolve_profile_path(get_default_profile(display, mode))
 
 
 def get_default_profile(display: DisplayInfo, mode: str) -> str:
@@ -602,39 +592,6 @@ def remove_profile(profile_name: str, display: DisplayInfo, mode: str) -> tuple[
     return association_removed, ", ".join(messages)
 
 
-def ensure_calibration_management_enabled() -> tuple[bool, str]:
-    """Best-effort enablement of the legacy VCGT calibration loader.
-
-    MHC2 profiles are loaded automatically by modern Windows. VCGT/MS00
-    calibration is managed by a separate system switch and enabling that
-    switch can require elevation. A failure here must therefore never undo an
-    already verified MHC2/default-profile activation.
-    """
-    if not IS_WINDOWS:
-        return False, "unavailable outside Windows"
-    if not (
-        hasattr(mscms, "WcsGetCalibrationManagementState")
-        and hasattr(mscms, "WcsSetCalibrationManagementState")
-    ):
-        return False, "legacy calibration-management API unavailable"
-
-    enabled = BOOL()
-    ctypes.set_last_error(0)
-    if not mscms.WcsGetCalibrationManagementState(ctypes.byref(enabled)):
-        error = ctypes.get_last_error()
-        return False, f"could not query VCGT loader state (Win32 {error})"
-    if bool(enabled.value):
-        return True, "VCGT loader enabled"
-
-    ctypes.set_last_error(0)
-    if mscms.WcsSetCalibrationManagementState(True):
-        return True, "VCGT loader enabled"
-    error = ctypes.get_last_error()
-    if error == 5:
-        return False, "VCGT loader remains disabled; administrator elevation is required"
-    return False, f"VCGT loader remains disabled (Win32 {error})"
-
-
 def get_sdr_white_level_nits(display: DisplayInfo) -> float:
     """Return Windows' current SDR reference white for an HDR display.
 
@@ -655,22 +612,11 @@ def get_sdr_white_level_nits(display: DisplayInfo) -> float:
     return float(packet.SDRWhiteLevel) / 1000.0 * 80.0
 
 
-def estimate_sdr_brightness_slider(sdr_white_nits: float) -> float:
-    """Invert the documented/reference white table to the Windows 0..100 slider."""
-    points = ((0.0,80.0),(5.0,100.0),(10.0,120.0),(30.0,200.0),(55.0,300.0),(80.0,400.0),(100.0,480.0))
-    n=max(80.0,min(480.0,float(sdr_white_nits)))
-    for (x0,y0),(x1,y1) in zip(points,points[1:]):
-        if n <= y1:
-            t=(n-y0)/(y1-y0) if y1!=y0 else 0.0
-            return x0+(x1-x0)*t
-    return 100.0
-
-
 def open_windows_hdr_settings() -> None:
+    """Open Settings › System › Display › HDR."""
     if not IS_WINDOWS:
         return
     os.startfile("ms-settings:display-advancedcolor")  # type: ignore[attr-defined]
-
 
 
 def open_windows_display_settings() -> None:
@@ -678,11 +624,24 @@ def open_windows_display_settings() -> None:
         return
     os.startfile("ms-settings:display")  # type: ignore[attr-defined]
 
+
+def open_windows_hdr_calibration_app() -> None:
+    """Open the Windows HDR Calibration Store listing.
+
+    The app is a separate Microsoft download rather than a Settings page, so the
+    guided walkthrough sends the user to its Store product page.
+    """
+    if not IS_WINDOWS:
+        return
+    os.startfile("ms-windows-store://pdp/?productid=9N7F2SM5D1LR")  # type: ignore[attr-defined]
+
+
 def open_windows_color_profile_directory() -> None:
     """Open Windows' canonical ICC/ICM profile directory in File Explorer."""
     if not IS_WINDOWS:
         return
     os.startfile(str(get_color_directory()))  # type: ignore[attr-defined]
+
 
 def send_hdr_toggle_shortcut() -> None:
     if not IS_WINDOWS:
@@ -695,8 +654,3 @@ def send_hdr_toggle_shortcut() -> None:
         user32.keybd_event(key, 0, 0, 0)
     for key in (VK_B, VK_MENU, VK_LWIN):
         user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
-
-
-def open_windows_color_settings() -> None:
-    """Backward-compatible alias for the HDR settings page."""
-    open_windows_hdr_settings()

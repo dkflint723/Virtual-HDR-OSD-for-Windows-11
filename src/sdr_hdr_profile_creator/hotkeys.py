@@ -16,6 +16,7 @@ VK_1 = 0x31
 VK_2 = 0x32
 HOTKEY_OFF = 0x5648_01
 HOTKEY_ON = 0x5648_02
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
 
 class GammaHotkeyListener(QObject):
@@ -25,15 +26,30 @@ class GammaHotkeyListener(QObject):
     thread's message queue. A dedicated native message-loop thread is therefore
     used instead of relying on Qt's window-message filter. Signals are queued
     back to the GUI thread before any UI or profile state is changed.
+
+    Registration is exclusive per chord, so it legitimately fails when the
+    standalone watchdog already owns Alt+1 / Alt+2. ``registrationChanged``
+    reports the outcome to the GUI so that a silent no-op hotkey is never
+    mistaken for a broken application.
     """
 
     disableRequested = Signal()
     enableRequested = Signal()
+    registrationChanged = Signal(bool, str)
 
-    def __init__(self, on_disable: Callable[[], None], on_enable: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        on_disable: Callable[[], None],
+        on_enable: Callable[[], None],
+        on_registration: Callable[[bool, str], None] | None = None,
+    ) -> None:
         super().__init__()
         self.disableRequested.connect(on_disable, Qt.ConnectionType.QueuedConnection)
         self.enableRequested.connect(on_enable, Qt.ConnectionType.QueuedConnection)
+        # Connected before the worker starts. Connecting after construction would
+        # race the thread and lose the one-shot registration result.
+        if on_registration is not None:
+            self.registrationChanged.connect(on_registration, Qt.ConnectionType.QueuedConnection)
         self.registered = False
         self._thread_id = 0
         self._ready = threading.Event()
@@ -66,13 +82,23 @@ class GammaHotkeyListener(QObject):
         self.registered = ok_off and ok_on
 
         if not self.registered:
+            last_error = int(kernel32.GetLastError())
             if ok_off:
                 user32.UnregisterHotKey(None, HOTKEY_OFF)
             if ok_on:
                 user32.UnregisterHotKey(None, HOTKEY_ON)
+            if last_error == ERROR_HOTKEY_ALREADY_REGISTERED:
+                reason = (
+                    "another process already owns Alt+1 / Alt+2. If the standalone watchdog "
+                    "is installed this is expected — it handles the hotkeys instead."
+                )
+            else:
+                reason = f"Windows refused the hotkey registration (Win32 {last_error})."
+            self.registrationChanged.emit(False, reason)
             self._ready.set()
             return
 
+        self.registrationChanged.emit(True, "Alt+1 / Alt+2 are active while this window is open.")
         self._ready.set()
         msg = wintypes.MSG()
         try:
