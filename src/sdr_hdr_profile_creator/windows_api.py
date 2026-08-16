@@ -173,6 +173,11 @@ if IS_WINDOWS:
         (DISPLAYCONFIG_PATH_SOURCE_INFO, 20),
         (DISPLAYCONFIG_PATH_TARGET_INFO, 48),
         (DISPLAYCONFIG_PATH_INFO, 72),
+        (DISPLAYCONFIG_VIDEO_SIGNAL_INFO, 48),
+        (DISPLAYCONFIG_SOURCE_MODE, 20),
+        (DISPLAYCONFIG_TARGET_MODE, 48),
+        (DISPLAYCONFIG_DESKTOP_IMAGE_INFO, 40),
+        (DISPLAYCONFIG_MODE_INFO, 64),
     )
     for _structure, _expected in _EXPECTED_SIZES:
         _actual = ctypes.sizeof(_structure)
@@ -236,6 +241,23 @@ if IS_WINDOWS:
             ("header", DISPLAYCONFIG_DEVICE_INFO_HEADER),
             ("SDRWhiteLevel", ULONG),
         ]
+
+    # Same reasoning as the path structs: DisplayConfigGetDeviceInfo trusts the
+    # size the caller puts in the header, so a wrong layout is never rejected.
+    for _structure, _expected in (
+        (DISPLAYCONFIG_DEVICE_INFO_HEADER, 20),
+        (DISPLAYCONFIG_SOURCE_DEVICE_NAME, 84),
+        (DISPLAYCONFIG_TARGET_DEVICE_NAME, 420),
+        (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, 32),
+        (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2, 36),
+        (DISPLAYCONFIG_SDR_WHITE_LEVEL, 24),
+        (DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE, 24),
+    ):
+        _actual = ctypes.sizeof(_structure)
+        if _actual != _expected:
+            raise RuntimeError(
+                f"{_structure.__name__} is {_actual} bytes but Windows expects {_expected}"
+            )
 
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     mscms = ctypes.WinDLL("mscms", use_last_error=True)

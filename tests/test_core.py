@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import struct
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -343,6 +344,52 @@ class TemplateMergeTests(unittest.TestCase):
         for group in icc_module.COUPLED_TAG_GROUPS:
             with self.subTest(group=group):
                 self.assertGreaterEqual(len(group), 2)
+
+
+@unittest.skipUnless(sys.platform == "win32", "DisplayConfig structs are Windows-only")
+class DisplayConfigLayoutTests(unittest.TestCase):
+    """Every struct handed to DisplayConfig must match the Windows SDK exactly.
+
+    Neither QueryDisplayConfig nor DisplayConfigGetDeviceInfo validates the
+    caller's layout: the first takes an element count, the second trusts the size
+    written into the header. A wrong layout is therefore never rejected — it
+    silently overruns the buffer and misparses every element after the first.
+    """
+
+    def test_all_struct_sizes_match_the_sdk(self):
+        import ctypes
+
+        from sdr_hdr_profile_creator import windows_api as wa
+
+        expected = {
+            "DISPLAYCONFIG_PATH_SOURCE_INFO": 20,
+            "DISPLAYCONFIG_PATH_TARGET_INFO": 48,
+            "DISPLAYCONFIG_PATH_INFO": 72,
+            "DISPLAYCONFIG_VIDEO_SIGNAL_INFO": 48,
+            "DISPLAYCONFIG_SOURCE_MODE": 20,
+            "DISPLAYCONFIG_TARGET_MODE": 48,
+            "DISPLAYCONFIG_DESKTOP_IMAGE_INFO": 40,
+            "DISPLAYCONFIG_MODE_INFO": 64,
+            "DISPLAYCONFIG_DEVICE_INFO_HEADER": 20,
+            "DISPLAYCONFIG_SOURCE_DEVICE_NAME": 84,
+            "DISPLAYCONFIG_TARGET_DEVICE_NAME": 420,
+            "DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO": 32,
+            "DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2": 36,
+            "DISPLAYCONFIG_SDR_WHITE_LEVEL": 24,
+            "DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE": 24,
+        }
+        for name, size in expected.items():
+            with self.subTest(struct=name):
+                self.assertEqual(ctypes.sizeof(getattr(wa, name)), size)
+
+    def test_the_target_info_union_member_is_present(self):
+        """Its omission was a real out-of-bounds write; pin the field itself."""
+        from sdr_hdr_profile_creator import windows_api as wa
+
+        names = [n for n, _ in wa.DISPLAYCONFIG_PATH_TARGET_INFO._fields_]
+        self.assertIn("modeInfoIdx", names)
+        self.assertEqual(wa.DISPLAYCONFIG_PATH_TARGET_INFO.modeInfoIdx.offset, 12)
+        self.assertEqual(wa.DISPLAYCONFIG_PATH_TARGET_INFO.outputTechnology.offset, 16)
 
 
 if __name__ == "__main__":
