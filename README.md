@@ -49,11 +49,24 @@ basis for everything here.
   which Windows reissues on reboot. Every restart therefore orphaned a working profile in
   the Windows colour folder and left a rival record the watchdog could read instead of the
   current one. Both are now keyed on the monitor's device path.
-- Installing the watchdog from the app gave no feedback at all: it launched the installer
-  detached, so a silent failure looked exactly like success.
 - A base profile that was truncated or missing a tag was merged tag by tag with the app's
   own synthetic defaults, producing, for example, the display's real red tone curve beside
   linear green and blue. Coupled tag groups are now all-or-nothing.
+- Applying skipped the display *association* whenever the generated profile's content was
+  unchanged. Installing a profile and associating it are separate operations, and removing
+  a profile drops it from the display's association list, so a correction change could
+  report success, verify its own read-back, and then be dropped by Windows.
+- The base profile was recorded by its ICC description rather than its filename. Windows
+  HDR Calibration describes a profile with slashes in the date while naming the file with
+  hyphens, so the recorded value was not merely wrong but an invalid path, and everything
+  that handed it back to Windows failed silently. Existing settings repair themselves on
+  load.
+- The watchdog could adopt one of the app's own working profiles as its HDR fallback,
+  making it restore already-edited data as though it were the source.
+- A watchdog instance that hung during startup kept the singleton lock forever, so every
+  healthy instance exited immediately and nothing enforced the user's setting — with no
+  log line to show why. Startup is now traced step by step, and an instance that has not
+  finished starting within 25 seconds logs the reason and exits so another can take over.
 
 **Behaviour**
 
@@ -71,6 +84,11 @@ Every DisplayConfig structure is size-checked against the Windows SDK at import.
 first takes an element count, the second trusts the size in the header — so a wrong struct
 is never rejected, it just corrupts memory quietly. That is exactly how the bug above went
 unnoticed.
+
+The test suite also refuses to run unless every Windows call that can change the machine's
+colour configuration is faked, and fails when a new one is added without being faked. That
+guard was written after the tests were found to be calling the real association API against
+a fabricated display.
 
 **Divergence from the original's documented behaviour** — see
 [Pinning the SDR and HDR profiles](#pinning-the-sdr-and-hdr-profiles). The original states
