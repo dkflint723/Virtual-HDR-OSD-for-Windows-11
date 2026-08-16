@@ -17,6 +17,72 @@ The application is intended for visual fine-tuning: correcting a slight warm/coo
 
 ---
 
+## About this fork
+
+This is a modified version of **Virtual HDR OSD for Windows 11** by Mixomo:
+
+```text
+https://github.com/Mixomo/Virtual-HDR-OSD-for-Windows-11
+```
+
+It is distributed under the **GNU General Public License v3.0**, the same licence as the
+original. The original project's design intent, safety model and documentation are the
+basis for everything here.
+
+### What this fork changes
+
+**Correctness fixes**
+
+- `DISPLAYCONFIG_PATH_TARGET_INFO` was missing the SDK's `modeInfoIdx` member, making the
+  struct 44 bytes where Windows writes 48. `QueryDisplayConfig` overran its buffer, and
+  every field from the second display onward — including the adapter LUID and target id —
+  was read from the wrong offset, so multi-monitor systems addressed the wrong hardware.
+- The identity `chad` tag was written with eight values instead of nine, so every generated
+  HDR profile carried a malformed chromaticAdaptationTag.
+- Applying to one display uninstalled another display's working profiles.
+- The base profile chosen by the user was silently replaced by the current Windows default
+  on the first apply, so generated profiles carried the wrong colorimetry.
+- The standalone watchdog reverted every correction change made in the GUI within about
+  five seconds, because it decided solely from the state captured at install time. The
+  original project already documented "Off is authoritative"; this fork makes that true.
+- Profile filenames, and the records the watchdog reads, were keyed on the adapter LUID,
+  which Windows reissues on reboot. Every restart therefore orphaned a working profile in
+  the Windows colour folder and left a rival record the watchdog could read instead of the
+  current one. Both are now keyed on the monitor's device path.
+- Installing the watchdog from the app gave no feedback at all: it launched the installer
+  detached, so a silent failure looked exactly like success.
+- A base profile that was truncated or missing a tag was merged tag by tag with the app's
+  own synthetic defaults, producing, for example, the display's real red tone curve beside
+  linear green and blue. Coupled tag groups are now all-or-nothing.
+
+**Behaviour**
+
+- Profiles are chosen per display from dropdowns of what is already installed, rather than
+  inferred, and the choices persist across restarts.
+- HDR can be switched per display from inside the app.
+- Applying compares against what Windows already has and skips redundant reinstalls.
+- Slider edits are saved shortly after you stop adjusting, rather than only on apply or on
+  a clean exit.
+
+**Hardening**
+
+Every DisplayConfig structure is size-checked against the Windows SDK at import. Neither
+`QueryDisplayConfig` nor `DisplayConfigGetDeviceInfo` validates the caller's layout — the
+first takes an element count, the second trusts the size in the header — so a wrong struct
+is never rejected, it just corrupts memory quietly. That is exactly how the bug above went
+unnoticed.
+
+**Divergence from the original's documented behaviour** — see
+[Pinning the SDR and HDR profiles](#pinning-the-sdr-and-hdr-profiles). The original states
+that automatic mode switching "only attempts to restore the SDR profile that Windows already
+had associated with that display." This fork additionally lets you pin a specific SDR
+profile. It still never creates, edits or overwrites an SDR profile, and the *Auto* setting
+reproduces the original behaviour exactly.
+
+---
+
+---
+
 ## Recommended workflow
 
 The recommended starting point is a profile created with **Windows HDR Calibration** from Microsoft.
@@ -132,18 +198,37 @@ Both choices are stored per monitor and survive restarts. They are keyed on the
 monitor's device path rather than its adapter LUID, because Windows reissues
 adapter LUIDs on reboot — anything keyed on those would be lost every restart.
 
-> [!IMPORTANT]
-> **If you calibrate SDR with Calman, DisplayCAL, i1Profiler or similar**, choose
-> *Leave unmanaged*. Those tools install an SDR profile *and* run a loader that
-> re-asserts its VCGT calibration curve; a second program re-associating profiles
-> behind their back is how calibration silently breaks. With *Leave unmanaged*
-> this app confines itself entirely to the HDR (EXTENDED) association.
+> [!NOTE]
+> **This is the one place this fork goes beyond the original project's documented
+> behaviour.** The original restores only the SDR profile Windows already had associated;
+> pinning lets you nominate a different installed profile instead.
 >
-> Even on *Auto* or a pinned profile, the app checks what Windows already has and
-> skips the write when it matches, so it never re-asserts an association
-> needlessly. Note that restoring an ICC association does **not** reload a VCGT —
-> that is the job of Windows' calibration loader or your calibration software's
-> own service.
+> What has not changed: no SDR profile is ever created, edited or overwritten — only the
+> *association* is set, and only to a profile already installed in the Windows colour
+> folder. The association is touched at exactly one moment, an HDR → SDR transition with
+> Automatic Mode Switching enabled, and never when you pick something from the dropdown.
+> Choosing **Auto** reproduces the original behaviour exactly, and **Leave unmanaged**
+> is stricter than the original.
+
+> [!IMPORTANT]
+> **If another program calibrates your SDR** — Calman, DisplayCAL, i1Profiler and
+> the like — which setting to use depends on what that program actually installed.
+>
+> Open its profile from the Windows colour folder and look for a **`vcgt`** tag.
+>
+> - **`vcgt` present.** The calibration lives in a 1D LUT that a resident loader
+>   pushes into the GPU. Choose *Leave unmanaged*: a second program re-associating
+>   profiles behind that loader's back is how calibration silently breaks. Note
+>   that restoring an ICC association does **not** reload a VCGT — that is the
+>   loader's job, never this app's.
+> - **No `vcgt`.** The profile is a pure characterisation, which is what you get
+>   when the calibration was written into the monitor's own hardware LUT. Nothing
+>   is loading anything at runtime, so there is no loader to conflict with, and
+>   *pinning that profile* is the more reliable choice: it guarantees the
+>   association comes back after an HDR → SDR switch.
+>
+> Either way, and on *Auto* too, the app reads what Windows already has and skips
+> the write when it matches, so it never re-asserts an association needlessly.
 
 ## Knowing what is actually applied
 
