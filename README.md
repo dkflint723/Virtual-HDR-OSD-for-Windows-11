@@ -217,6 +217,15 @@ monitor's device path rather than its adapter LUID, because Windows reissues
 adapter LUIDs on reboot — anything keyed on those would be lost every restart.
 
 > [!NOTE]
+> **Known limitation.** The device path includes the port the monitor is plugged
+> into, so moving a display to a different output makes Windows report it as a new
+> device. Its pinned SDR and HDR choices will not follow, and its working profile
+> pair is regenerated under a new name — the old pair is reclaimed automatically,
+> so nothing accumulates, but the two dropdowns need setting again. Re-run the
+> watchdog installer afterwards, as the original project already advises after any
+> monitor or GPU topology change.
+
+> [!NOTE]
 > **This is the one place this fork goes beyond the original project's documented
 > behaviour.** The original restores only the SDR profile Windows already had associated;
 > pinning lets you nominate a different installed profile instead.
