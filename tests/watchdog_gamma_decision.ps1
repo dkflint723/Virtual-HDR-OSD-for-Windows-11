@@ -13,7 +13,7 @@ $script:fail = 0
 
 $colorDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vhdrosd-wd-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $colorDir | Out-Null
-foreach ($n in 'VOff.icm', 'VOn.icm', 'NewOff.icm', 'NewOn.icm') {
+foreach ($n in 'VOff.icm', 'VOn.icm', 'NewOff.icm', 'NewOn.icm', 'RealBase.icm', 'Vendor.icm') {
     Set-Content -LiteralPath (Join-Path $colorDir $n) -Value 'stub'
 }
 
@@ -154,6 +154,39 @@ Set-RuntimeMulti @(
 )
 Assert-Profile 'unparseable timestamps everywhere -> captured state' 'VOn.icm' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay (New-Saved $true $old))
+
+# --- Resolve-BaseExtendedProfile -------------------------------------------
+# The captured HDR fallback must never be one of the app's own working profiles.
+function New-Entry {
+    param($base, $basePath)
+    $o = [pscustomobject]@{ gdi_name = $script:TargetGdi }
+    if ($null -ne $base)     { $o | Add-Member -NotePropertyName base_profile      -NotePropertyValue $base }
+    if ($null -ne $basePath) { $o | Add-Member -NotePropertyName base_profile_path -NotePropertyValue $basePath }
+    return $o
+}
+
+Assert-Profile 'a usable base name is adopted' 'RealBase.icm' `
+    (Resolve-BaseExtendedProfile -GammaEntry (New-Entry 'RealBase.icm' $null) -CurrentExtended 'VOn.icm')
+
+# Older builds published the ICC description here; its slashes make it no path at all.
+Assert-Profile 'description in the name field falls back to the path' 'RealBase.icm' `
+    (Resolve-BaseExtendedProfile `
+        -GammaEntry (New-Entry 'HDR Calibrated Profile 8/14/2026 132247' (Join-Path $colorDir 'RealBase.icm')) `
+        -CurrentExtended 'Virtual_HDR_OSD_abc1234567_Off.icm')
+
+Assert-Profile 'an app-managed name is never adopted as the base' '' `
+    (Resolve-BaseExtendedProfile `
+        -GammaEntry (New-Entry 'Virtual_HDR_OSD_abc1234567_Off.icm' $null) `
+        -CurrentExtended 'Virtual_HDR_OSD_abc1234567_Off.icm')
+
+Assert-Profile 'no entry at all keeps a non-managed current association' 'Vendor.icm' `
+    (Resolve-BaseExtendedProfile -GammaEntry $null -CurrentExtended 'Vendor.icm')
+
+Assert-Profile 'no entry and a managed association reports none' '' `
+    (Resolve-BaseExtendedProfile -GammaEntry $null -CurrentExtended 'Virtual_HDR_OSD_abc1234567_On.icm')
+
+Assert-Profile 'an uninstalled base name is rejected' 'Vendor.icm' `
+    (Resolve-BaseExtendedProfile -GammaEntry (New-Entry 'Gone.icm' $null) -CurrentExtended 'Vendor.icm')
 
 Remove-Item -LiteralPath $script:GammaStatePath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $colorDir -Recurse -Force -ErrorAction SilentlyContinue

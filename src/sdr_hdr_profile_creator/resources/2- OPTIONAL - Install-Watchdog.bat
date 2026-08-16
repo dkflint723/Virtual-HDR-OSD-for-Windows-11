@@ -706,6 +706,41 @@ function Resolve-StableWorkingPair {
     }
 }
 
+function Resolve-BaseExtendedProfile {
+    param($GammaEntry, [string]$CurrentExtended)
+
+    # The captured HDR fallback must be the user's own profile, never one of Virtual
+    # HDR OSD's generated working profiles: adopting one makes the watchdog restore
+    # already-edited data as though it were the source.
+    #
+    # The GUI publishes both a name and a full path. Older builds wrote the ICC
+    # description into the name field, which is not a filename at all -- Windows HDR
+    # Calibration describes a profile with slashes in it -- so the path is tried as
+    # well before giving up.
+    $candidates = @()
+    if ($GammaEntry) {
+        if ($GammaEntry.PSObject.Properties.Name -contains 'base_profile') {
+            $candidates += [string]$GammaEntry.base_profile
+        }
+        if ($GammaEntry.PSObject.Properties.Name -contains 'base_profile_path') {
+            $raw = [string]$GammaEntry.base_profile_path
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                try { $candidates += [System.IO.Path]::GetFileName($raw) } catch {}
+            }
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($candidate -match '^Virtual_HDR_OSD_') { continue }
+        if (Test-InstalledColorProfile $candidate) { return $candidate }
+    }
+
+    # Nothing usable. Keep the current association only when it is not ours; an
+    # app-managed name here would be a circular fallback, so report none instead.
+    if ($CurrentExtended -match '^Virtual_HDR_OSD_') { return '' }
+    return $CurrentExtended
+}
+
 function Get-SavedProfileState {
     param($Display)
 
@@ -995,17 +1030,8 @@ if ($Install) {
     $saved = @()
     foreach ($display in $displays) {
         $item = Get-SavedProfileState -Display $display
-        # If the GUI has recorded the real HDR base profile, preserve that as the
-        # watchdog fallback instead of capturing an app-managed working profile.
         $gammaEntry = Get-GammaEntryForDisplay -CurrentDisplay $display
-        if ($gammaEntry -and $gammaEntry.base_profile) {
-            $baseCandidate = [string]$gammaEntry.base_profile
-            if ($baseCandidate -and
-                $baseCandidate -notmatch '^Virtual_HDR_OSD_' -and
-                (Test-InstalledColorProfile $baseCandidate)) {
-                $item.ExtendedProfile = $baseCandidate
-            }
-        }
+        $item.ExtendedProfile = Resolve-BaseExtendedProfile -GammaEntry $gammaEntry -CurrentExtended $item.ExtendedProfile
         $saved += $item
     }
 

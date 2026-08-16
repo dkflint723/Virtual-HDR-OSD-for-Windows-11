@@ -59,7 +59,8 @@ class PayloadIntegrityTests(unittest.TestCase):
     def test_the_gamma_decision_reads_both_sides(self):
         """Contract: the runtime file must be consulted, not just captured state."""
         text = payload()
-        for needle in ("ConvertTo-GammaTimestamp", "GammaUpdatedAt", "Get-GammaEntryForDisplay"):
+        for needle in ("ConvertTo-GammaTimestamp", "GammaUpdatedAt", "Get-GammaEntryForDisplay",
+                       "Resolve-BaseExtendedProfile", "base_profile_path"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
 
@@ -73,7 +74,7 @@ class GammaDecisionTests(unittest.TestCase):
         functions = "\n\n".join(
             extract_function(source, name)
             for name in ("ConvertTo-GammaTimestamp", "Get-GammaEntryForDisplay",
-                         "Get-DesiredExtendedProfile")
+                         "Get-DesiredExtendedProfile", "Resolve-BaseExtendedProfile")
         )
         with tempfile.TemporaryDirectory() as directory:
             functions_path = Path(directory) / "funcs.ps1"
