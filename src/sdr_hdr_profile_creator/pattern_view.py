@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QWidget
 from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
 from .patterns import (
+    MEASUREMENT_SEQUENCE,
     OVERLAY_NITS,
     PATTERNS,
     WINDOW_AREA_FRACTION,
@@ -92,6 +93,8 @@ def render_overlay(
     assumed_peak: bool = False,
     accepted: dict[str, float] | None = None,
     scale: float = 1.0,
+    step: int | None = None,
+    total: int = 0,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -114,6 +117,17 @@ def render_overlay(
 
         margin = spacing(18)
         y = margin
+
+        if step is not None:
+            # Where you are, before what you are looking at. A user who cannot tell how
+            # many steps remain has no way to know whether they are nearly done.
+            painter.setPen(QColor(120, 190, 255, 255))
+            small = QFont()
+            small.setPointSize(points(10))
+            small.setBold(True)
+            painter.setFont(small)
+            painter.drawText(margin, y + spacing(14), f"STEP {step} OF {total}")
+            y += spacing(30)
 
         heading = QFont()
         heading.setPointSize(points(15))
@@ -173,7 +187,8 @@ def render_overlay(
                 painter.drawText(margin, y, f"recorded {recorded:.4g}{unit}")
             else:
                 painter.setPen(QColor(150, 150, 150, 255))
-                painter.drawText(margin, y, "Enter records this level")
+                nxt = "Enter records it and moves on" if step is not None else "Enter records this level"
+                painter.drawText(margin, y, nxt)
             y += spacing(30)
         else:
             for index, control in enumerate(controls):
@@ -193,6 +208,8 @@ def render_overlay(
         lines += [adjust]
         if pattern.level_driven:
             lines.append("Enter  record it")
+        if step is not None and step >= total:
+            lines.append("then Apply Edits back in the app")
         lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
@@ -248,6 +265,7 @@ class PatternWindow(QWidget):
         controls: Sequence[ControlBinding] = (),
         parent: QWidget | None = None,
         measure: Callable[[str, float], None] | None = None,
+        guided: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
@@ -267,6 +285,10 @@ class PatternWindow(QWidget):
         self._surface: HdrSurface | None = None
         self._frame: bytes = b""
         self._measure = measure
+        # Guided by default. Nine patterns and a page of theory is not a procedure, and a
+        # user who has to work out what to do first will do nothing.
+        self._guided = bool(guided) and measure is not None
+        self._step = 0
         self.accepted: dict[str, float] = {}
         self.failure = ""
 
@@ -303,6 +325,8 @@ class PatternWindow(QWidget):
         except HdrDisplayError as exc:
             self.failure = str(exc)
             return False
+        if self._guided:
+            self._apply_guided_step()
         self.refresh()
         self._keepalive.start()
         return True
@@ -327,6 +351,9 @@ class PatternWindow(QWidget):
         return self._controls[self._active % len(self._controls)]
 
     def select_pattern(self, index: int) -> None:
+        # Choosing a pattern by hand means leaving the sequence; carrying on numbering the
+        # steps afterwards would be a lie about where the user is.
+        self._guided = False
         self._pattern_index = index % len(PATTERNS)
         self.refresh()
 
@@ -374,6 +401,40 @@ class PatternWindow(QWidget):
         self._context = replace(self._context, probe_nits=max(0.0, float(nits)))
         self.refresh()
 
+    @property
+    def guided_step(self) -> int | None:
+        """Which step of the guided run this is, or None when browsing freely."""
+        if not self._guided:
+            return None
+        return self._step + 1
+
+    def _apply_guided_step(self) -> None:
+        key = MEASUREMENT_SEQUENCE[self._step]
+        index = next((i for i, p in enumerate(PATTERNS) if p.key == key), 0)
+        self._pattern_index = index
+        # Each step starts near where its answer usually lies, so the first press moves
+        # towards the answer instead of away from it. Starting every step at the same
+        # level would mean holding an arrow for several seconds before anything happened.
+        start = {
+            "black-level": 0.05,
+            "peak-white": max(80.0, self._context.peak_nits * 0.6),
+            "full-frame-white": max(80.0, self._context.max_full_frame_nits * 0.6),
+        }.get(key, self._context.probe_nits)
+        self._context = replace(self._context, probe_nits=start)
+        self.refresh()
+
+    def advance(self) -> bool:
+        """Move to the next guided step. False when the run is finished."""
+        if not self._guided:
+            return False
+        if self._step + 1 >= len(MEASUREMENT_SEQUENCE):
+            self._guided = False
+            self.refresh()
+            return False
+        self._step += 1
+        self._apply_guided_step()
+        return True
+
     def accept_measurement(self) -> bool:
         """Record the current level as this step's answer.
 
@@ -386,6 +447,8 @@ class PatternWindow(QWidget):
             return False
         self.accepted[self.pattern.key] = self._context.probe_nits
         self._measure(self.pattern.key, self._context.probe_nits)
+        if self._guided and not self.advance():
+            return True
         self.refresh()
         return True
 
@@ -406,6 +469,7 @@ class PatternWindow(QWidget):
             overlay_width, min(int(height * 0.85), height),
             pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
+            step=self.guided_step, total=len(MEASUREMENT_SEQUENCE),
         )
         block_width, block_height = window_size(
             width, height,

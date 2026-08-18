@@ -32,7 +32,7 @@ try:
         context_for,
         render_overlay,
     )
-    from sdr_hdr_profile_creator.patterns import PATTERNS
+    from sdr_hdr_profile_creator.patterns import MEASUREMENT_SEQUENCE, PATTERNS
 
     GUI_AVAILABLE = True
     GUI_IMPORT_ERROR = ""
@@ -336,7 +336,8 @@ class OverlayScalingTests(PatternViewTestCase):
             raw, overlay_width, _height = pattern_view.render_overlay(
                 min(width, max(pattern_view.OVERLAY_MIN_WIDTH,
                                round(width * pattern_view.OVERLAY_WIDTH_FRACTION))),
-                400, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
+                round(width * 9 / 16 * 0.85),
+                PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
                 scale=max(1.0, min(3.0, width / pattern_view.OVERLAY_REFERENCE_WIDTH)),
             )
         return overlay_width, sum(1 for i in range(3, len(raw), 4) if raw[i] > 0)
@@ -474,3 +475,72 @@ class SurfaceFailureTests(PatternViewTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GuidedSequenceTests(PatternViewTestCase):
+    """Nine patterns and a page of theory is not a procedure. A user who has to work out
+    what to do first will do nothing, so the view opens on step 1 of 3 and says so."""
+
+    def build(self, guided=True):
+        recorded: list[tuple[str, float]] = []
+        win = PatternWindow(capability(), 240.0, self.controls, guided=guided,
+                            measure=lambda key, nits: recorded.append((key, nits)))
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step() if guided else None
+        return win, recorded
+
+    def test_it_opens_on_the_first_measurement_step(self):
+        win, _ = self.build()
+        self.assertEqual(win.guided_step, 1)
+        self.assertEqual(win.pattern.key, MEASUREMENT_SEQUENCE[0])
+
+    def test_recording_advances_to_the_next_step(self):
+        win, _ = self.build()
+        win.accept_measurement()
+        self.assertEqual(win.guided_step, 2)
+        self.assertEqual(win.pattern.key, MEASUREMENT_SEQUENCE[1])
+
+    def test_the_whole_sequence_records_every_figure_once(self):
+        win, recorded = self.build()
+        for _ in MEASUREMENT_SEQUENCE:
+            win.accept_measurement()
+        self.assertEqual([key for key, _ in recorded], list(MEASUREMENT_SEQUENCE))
+
+    def test_the_run_ends_rather_than_looping(self):
+        win, _ = self.build()
+        for _ in MEASUREMENT_SEQUENCE:
+            win.accept_measurement()
+        self.assertIsNone(win.guided_step)
+
+    def test_each_step_starts_near_where_its_answer_lives(self):
+        """Starting every step at the same level would mean holding an arrow for seconds
+        before anything happened."""
+        win, _ = self.build()
+        self.assertLess(win.probe_nits, 1.0, "black level should start near black")
+        win.accept_measurement()
+        self.assertGreater(win.probe_nits, 100.0, "peak should start high")
+
+    def test_choosing_a_pattern_by_hand_leaves_the_sequence(self):
+        """Continuing to number the steps afterwards would misreport where the user is."""
+        win, _ = self.build()
+        win.select_pattern(0)
+        self.assertIsNone(win.guided_step)
+
+    def test_free_mode_is_available_for_someone_who_knows_the_tool(self):
+        win, _ = self.build(guided=False)
+        self.assertIsNone(win.guided_step)
+
+    def test_a_view_that_cannot_record_is_never_guided(self):
+        """A guided run whose readings go nowhere would waste the user's time entirely."""
+        win = PatternWindow(capability(), 240.0, self.controls, guided=True, measure=None)
+        self.addCleanup(win.deleteLater)
+        self.assertIsNone(win.guided_step)
+
+    def test_the_step_number_reaches_the_overlay(self):
+        raw_plain, _, _ = render_overlay(
+            420, 700, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0)
+        raw_step, _, _ = render_overlay(
+            420, 700, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
+            step=2, total=3)
+        self.assertNotEqual(raw_plain, raw_step)
