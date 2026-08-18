@@ -152,3 +152,53 @@ class EntryPointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadmeAccuracyTests(unittest.TestCase):
+    """Documentation drifts silently. These check only claims that would become false if
+    the code moved -- not prose, which is the author's business."""
+
+    README = ROOT / "README.md"
+
+    def text(self) -> str:
+        return self.README.read_text(encoding="utf-8", errors="replace")
+
+    def test_every_offered_correction_option_is_documented(self):
+        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+
+        for option in CORRECTION_OPTIONS:
+            with self.subTest(option=option):
+                self.assertIn(option, self.text())
+
+    def test_retired_options_are_not_presented_as_choices(self):
+        """They still resolve for old profiles, but offering them would be a lie."""
+        for entry in ("- **Unspecified**", "- **SDR** —"):
+            with self.subTest(entry=entry):
+                self.assertNotIn(entry, self.text())
+
+    def test_every_guided_step_is_named(self):
+        from sdr_hdr_profile_creator.patterns import GUIDED_SEQUENCE, pattern_by_key
+
+        for key in GUIDED_SEQUENCE:
+            with self.subTest(step=key):
+                self.assertIn(pattern_by_key(key).title, self.text())
+
+    def test_the_documented_pattern_keys_match_the_pattern_count(self):
+        from sdr_hdr_profile_creator.patterns import PATTERNS
+
+        mentions_zero = "`1`–`9`, `0`" in self.text()
+        self.assertEqual(mentions_zero, len(PATTERNS) > 9,
+                         "the key hint and the pattern list disagree")
+
+    def test_it_does_not_still_describe_itself_as_only_an_editor(self):
+        """It measures luminance and writes it into profiles now."""
+        self.assertNotIn("lightweight Windows 11 HDR profile editor", self.text())
+
+    def test_it_no_longer_denies_doing_what_it_does(self):
+        """The old text ruled out a colorimeter workflow; a meter driver is planned and
+        the by-eye measurements already exist."""
+        self.assertNotIn("colorimeter/spectrophotometer workflow", self.text())
+
+    def test_the_by_eye_limitation_is_still_stated_plainly(self):
+        """Broadening the claims must not quietly drop the caveat that matters."""
+        self.assertIn("made by eye", self.text())

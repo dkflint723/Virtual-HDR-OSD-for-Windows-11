@@ -1,6 +1,6 @@
 # Virtual HDR OSD for Windows
 
-**Virtual HDR OSD for Windows** is a lightweight Windows 11 HDR profile editor designed as a software counterpart to the controls that many monitors disable when HDR mode is enabled.
+**Virtual HDR OSD for Windows** is an HDR calibration tool for Windows 11. It measures what a display actually does, adjusts the tone response by eye against calibration patterns, and writes the result into the MHC2 profile Windows applies to that display.
 
 <img src="assets/tab1.png">
 
@@ -8,12 +8,16 @@
 
 Most HDR monitors lock or substantially reduce access to their physical OSD controls after switching to HDR. White balance, gamma, per-channel RGB balance, saturation, brightness, contrast, and related adjustments may become unavailable or much more limited. Virtual HDR OSD provides a practical **software pseudo-calibration layer** for making small subjective corrections to an existing Windows HDR ICC/ICM profile.
 
-The application is intended for visual fine-tuning: correcting a slight warm/cool cast, reducing a green or magenta bias, matching HDR white balance more closely to a preferred SDR appearance, or making small tonal changes that the monitor's HDR OSD does not expose.
+It began as a replacement for those OSD controls, and still does that: correcting a warm or cool cast, reducing a green or magenta bias, or making tonal changes the monitor's HDR menu does not expose.
+
+It now also generates its own calibration patterns. A guided sequence measures black level, peak luminance and maximum full-frame luminance by the same disappearing-shape method Windows HDR Calibration uses, and writes those figures into the profile's MHC2 header. A further pattern sets the tone controls against a near-threshold target rather than by impression. Patterns are presented through a Direct3D swapchain in scRGB, so they address absolute luminance across the full ST.2084 range instead of being limited to the SDR white level.
 
 **In addition to the app, a watchdog has been integrated that fixes the bug causing incorrect switching between SDR and HDR profiles in Windows 11. This watchdog is standalone and can be distributed without the app. Feel free to use it. Below is a detailed explanation of how it works.**
 
 > [!NOTE]
-> Virtual HDR OSD is not a replacement for a colorimeter, spectrophotometer, reference display, or professional calibration software. Adjustments made by eye are inherently subjective. For an objective calibration workflow, use appropriate measurement hardware and color-management software.
+> Every measurement this tool takes is made by eye. That is the same basis Windows HDR Calibration works on, and it is genuinely useful, but it is not metrology: it depends on the room, on adaptation, and on the observer. Where a figure matters, verify it with a meter.
+>
+> Nothing here characterises a display's colour. Gamut, primaries and white point are read from the profile and the panel, never measured.
 
 ---
 
@@ -526,10 +530,17 @@ The dropdown contains:
 - **200 nits / Brightness 30** — upstream published mapping for Windows SDR Content Brightness 30.
 - **300 nits / Brightness 55** — upstream published mapping for Windows SDR Content Brightness 55.
 - **400 nits / Brightness 80** — upstream published mapping for Windows SDR Content Brightness 80.
-- **Unspecified** — compatibility entry matching the upstream download list; when an explicit Windows white level is unavailable, Virtual HDR OSD uses the upstream generator's 200-nit default basis.
-- **SDR** — compatibility entry matching the upstream download list, using the traditional 80-nit SDR reference basis.
 
 `Auto` is the recommended choice because it avoids manually duplicating the Windows setting and can use the actual current reference-white value while the GUI is running.
+
+Two entries from the upstream download list, `Unspecified` and `SDR`, are no longer offered.
+They were filenames rather than settings anyone would choose. A saved profile or state file
+naming one still resolves to the same basis it was built with — 200 and 80 nits
+respectively — so nothing already generated changes behaviour.
+
+The correction's target gamma comes from the **Gamma / Midtone Response** slider rather
+than being fixed at 2.2. Above diffuse SDR white the correction is exact identity at every
+setting.
 
 ## Important limitation: native HDR content
 
@@ -580,6 +591,90 @@ While the GUI is open, **Auto** reads the current Windows SDR white level and re
 
 ---
 
+# Calibration patterns
+
+**Test Patterns…** in row 3 fills the display with calibration patterns. The screen becomes
+a measuring instrument while it is open: black everywhere except a window covering a tenth
+of the screen area, with guidance held at 12 nits against one edge.
+
+The window matters. On an emissive panel a full-screen pattern engages the brightness
+limiter in proportion to how bright the pattern is, so a dark pattern and a bright one are
+measured under different conditions and two readings minutes apart are not comparable.
+Every pattern is confined to the same window area to hold that still. Maximum full-frame
+luminance is the sole exception, because filling the screen is what that figure means.
+
+Patterns are rendered in scRGB through a Direct3D 11 flip-model swapchain and specified in
+absolute nits. On an HDR output scRGB 1.0 is 80 nits, so a level maps directly and patterns
+reach the full ST.2084 range. On an SDR output 1.0 is that display's reference white,
+absolute luminance is not addressable, and levels are shown as a ratio instead — the view
+says which of the two applies rather than implying precision it does not have.
+
+Frames are built in device pixels. Qt reports logical units, so on a 125% display a
+fullscreen widget reports 3206x1803 for a 3840x2160 client area; presenting at the smaller
+figure makes the compositor stretch every frame, which resamples the gamma-match lines and
+destroys the property that pattern depends on.
+
+## The guided run
+
+The view opens on a four-step sequence and states which step it is on.
+
+| step | what it measures | how |
+| --- | --- | --- |
+| Black level | minimum luminance | lower a shape until it disappears |
+| Peak white | peak luminance | raise a shape until it stops separating from its surround |
+| Full-frame white | maximum full-frame luminance | the same, with the whole screen lit |
+| Tone tracking | nothing — sets Gamma, Midtone Brightness and Contrast | |
+
+The first three move the *pattern* rather than the display. Nobody can say what luminance a
+patch is, but anybody can say whether a shape is visible, so the level at which it
+disappears is the reading. This is how Windows HDR Calibration works, and it means the same
+patterns can later be driven by a meter.
+
+`Enter` records a reading and advances. On the last step it opens the results, where `Enter`
+writes all three into the profile's MHC2 header and `lumi` tag. Leaving without applying
+does not lose them: each is written into the editor as it is taken, and the next Apply Edits
+writes them out.
+
+## Reading a clipping point
+
+Peak and full-frame both find the level at which the display stops separating two adjacent
+values. That is a clipping point, not a photometric measurement, and on a display with
+fixed tone mapping the two land close together — the curve that clips does not move with
+window size. An emissive panel sustains far less than its peak across a whole screen, so
+readings that match indicate signal handling rather than brightness. A meter reads lower.
+An HGIG or tone-mapping-off mode in the monitor's own menu separates the two.
+
+## Controls
+
+| key | action |
+| --- | --- |
+| `1`–`9`, `0` | select a pattern directly |
+| `Tab` | next control |
+| `←` `→` | adjust the selected control, or move the level on a threshold pattern |
+| `↑` `↓` | walk the levels of a stepped pattern |
+| `E` | type an exact value |
+| `Enter` | record, advance, or apply on the results screen |
+| `S` | return to the results after browsing |
+| `H` | move the guidance panel to the other edge |
+| `Esc` | leave |
+
+Each control also draws a track showing where its value sits in range, draggable with the
+mouse. The probe track is positioned in PQ, not nits: a linear bar would spend almost its
+entire length on highlights and show no movement through the range where thresholds are
+found. The cursor is black with a grey outline so it adds no meaningful light to the screen.
+
+Live Apply is switched on for as long as the view is open and restored as it was on exit.
+Without it the tone controls would move sliders that rebuilt nothing.
+
+## The other patterns
+
+Grey staircase, shadow ladder, neutral ramp, colour patches and solid patch are reached by
+number key. Each states what correct looks like. Gamma match reads the transfer function
+directly by comparing a solid patch against interleaved single-pixel lines, but needs about
+two metres of viewing distance before the lines blend, so it is not part of the guided run.
+
+---
+
 # Tone & Brightness
 
 The tone controls are intentionally independent from the Windows **SDR content brightness** setting. Virtual HDR OSD does not expose or modify that Windows slider.
@@ -590,15 +685,27 @@ The controls operate on the generated HDR profile.
 
 **Default:** `2.200`  
 **Range:** `1.600 – 3.000`  
-**Step:** `0.005`
+**Step:** `0.005`  
+**Pattern:** Tone tracking, or Gamma match from a distance
 
-Adjusts the traditional power-law midtone response.
+Adjusts the power-law midtone response.
 
 - `2.200` is the neutral reference used by the editor.
 - Lower values brighten the midtone response.
 - Higher values darken the midtone response.
 
 Because the step is only `0.005`, subtle changes such as `2.200 → 2.205` are possible.
+
+**With the SDR-in-HDR correction on, this sets the correction's target gamma** rather than
+applying a second curve on top of it. That distinction is not cosmetic. The correction's
+defining property is that everything above diffuse SDR white is left at exact identity,
+because native HDR content lives there and does not want the correction; a separate power
+applied afterwards lifts that range too. At `2.000` it put diffuse white 32% high and
+1000-nit highlights 20% high, so moving one slider silently rebrightened HDR content the
+correction never touches. Folded in, identity holds at every slider position.
+
+With the correction off there is nothing to fold a target into, and it behaves as a plain
+independent power.
 
 ## Midtone Brightness
 
@@ -1106,31 +1213,34 @@ Virtual HDR OSD is intentionally narrow in scope.
 
 It is:
 
-- an HDR profile fine-adjustment tool;
-- a virtual replacement for some OSD adjustments unavailable in HDR;
-- a subjective SDR/HDR visual matching aid;
-- a convenient live ICC/ICM editor;
+- a by-eye HDR calibration tool with its own pattern generator;
+- a way to measure black level, peak and full-frame luminance and record them in a profile;
+- a virtual replacement for OSD adjustments unavailable in HDR;
+- a live ICC/ICM editor for the MHC2 block Windows applies;
 - a Windows 11 profile-association helper.
 
 It is not:
 
-- a hardware calibration instrument;
-- a replacement for Windows HDR Calibration;
-- a colorimeter/spectrophotometer workflow;
-- a display characterization laboratory;
-- a guarantee of reference-grade color accuracy;
-- a substitute for proper mastering/reference equipment.
+- a measurement instrument. No colorimeter or spectrophotometer is involved, and every
+  reading depends on the observer;
+- a colour characterisation. Primaries, gamut and white point are read, never measured;
+- a guarantee of reference-grade accuracy;
+- a substitute for mastering or reference equipment.
 
-The most reliable workflow remains:
+Its measurements overlap with Windows HDR Calibration rather than replacing it: the same
+three luminance figures, found the same way. What it adds is that the readings feed a
+profile you can keep adjusting, instead of one that has to be regenerated from scratch.
+
+A reasonable workflow:
 
 ```text
-Measurement / Windows HDR Calibration
+Windows HDR Calibration, a meter, or this tool's guided measurements
                 ↓
-        valid HDR base profile
+        an HDR base profile with real luminance data
                 ↓
-       Virtual HDR OSD fine trim
+   tone and white-balance adjustment against the patterns
                 ↓
-         subjective final result
+                result
 ```
 
 ---
