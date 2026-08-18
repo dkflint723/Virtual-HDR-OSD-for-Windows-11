@@ -48,6 +48,7 @@ from .hotkeys import GammaHotkeyListener
 from .hdr_display import capability_for_device_name
 from .pattern_view import ControlBinding, PatternWindow
 from .icc import (
+    _read_tags,
     build_profile,
     content_digest,
     import_profile,
@@ -2171,6 +2172,34 @@ class MainWindow(FluentWidget):
     # ----------------------------------------------------------------------------------
     # Import / export
 
+    def _active_profile_overrides_metadata(self, display: DisplayInfo) -> bool:
+        """Whether what DXGI reports is this app's own output coming back.
+
+        Windows reports the display's *effective* HDR metadata, and an applied MHC2
+        profile overrides it. Observed directly on one display: with a profile carrying
+        0/1080/1080 associated, DXGI reported 0/1080/1080; after a profile carrying
+        0.1956/1010.404 was applied, DXGI reported 0.1956/1010.404. Those are arbitrary
+        numbers and it tracked both.
+
+        So "what the panel reports" is only the panel while no MHC2 profile is in force.
+        Reading it otherwise closes a loop where a figure this tool wrote is read back as
+        an independent measurement and written again, each pass looking like corroboration.
+        """
+        try:
+            name = get_default_profile(display, "HDR")
+        except Exception:
+            return True   # unknown: assume the worst rather than trust a possible echo
+        if not name:
+            return False
+        try:
+            data = (get_color_directory() / Path(name).name).read_bytes()
+        except OSError:
+            return True
+        try:
+            return b"MHC2" in _read_tags(data)
+        except ValueError:
+            return True
+
     def _adopt_panel_luminance(self, imported) -> bool:
         """Fill in luminance the profile does not carry, from what the panel reports.
 
@@ -2187,6 +2216,8 @@ class MainWindow(FluentWidget):
             return False
         display = self._selected_display()
         if display is None:
+            return False
+        if self._active_profile_overrides_metadata(display):
             return False
         capability = capability_for_device_name(display.gdi_name)
         if capability is None or not capability.luminance_is_credible:

@@ -1632,6 +1632,10 @@ class PanelLuminanceFallbackTests(WindowTestCase):
         return path
 
     def test_a_profile_without_mhc2_takes_the_panels_luminance(self):
+        # Nothing with MHC2 applied, so what the panel reports is the panel and not this
+        # app's own output coming back. See MetadataEchoTests.
+        self.plain_profile("Applied.icm")
+        self.default_profiles["HDR"] = "Applied.icm"
         path = self.plain_profile()
         with mock.patch.object(app_module, "capability_for_device_name",
                                lambda _n: self.capability()):
@@ -1641,6 +1645,8 @@ class PanelLuminanceFallbackTests(WindowTestCase):
 
     def test_it_says_where_the_figures_came_from(self):
         """Silently adopting numbers from elsewhere would be worse than the bug."""
+        self.plain_profile("Applied.icm")
+        self.default_profiles["HDR"] = "Applied.icm"
         path = self.plain_profile()
         with mock.patch.object(app_module, "capability_for_device_name",
                                lambda _n: self.capability()):
@@ -1717,3 +1723,88 @@ class ClampedMeasurementTests(WindowTestCase):
         """Zero is a legitimate black level on an emissive panel, not a clamp."""
         self.window._record_measurement("black-level", 0.0)
         self.assertNotIn("outside the range", self.window.status_label.text())
+
+
+class MetadataEchoTests(WindowTestCase):
+    """Windows reports the display's effective HDR metadata, and an applied MHC2 profile
+    overrides it. Observed on a real display: a profile carrying 0/1080/1080 made DXGI
+    report 0/1080/1080; after one carrying 0.1956/1010.404 was applied, DXGI reported
+    0.1956/1010.404. Reading that back as the panel closes a loop where this tool's own
+    output returns as an independent measurement."""
+
+    def capability(self, **overrides):
+        from sdr_hdr_profile_creator.hdr_display import (
+            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            DisplayCapability,
+        )
+
+        base = dict(
+            device_name=self.display.gdi_name, left=0, top=0, right=3840, bottom=2160,
+            bits_per_color=10, color_space=DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            min_nits=0.0, max_nits=1080.0, max_full_frame_nits=1080.0,
+            red_primary=(0.67, 0.31), green_primary=(0.27, 0.69),
+            blue_primary=(0.15, 0.06), white_point=(0.313, 0.329),
+        )
+        base.update(overrides)
+        return DisplayCapability(**base)
+
+    def profile_without_mhc2(self, name):
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        data = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
+        count = int.from_bytes(data[128:132], "big")
+        for index in range(count):
+            offset = 132 + index * 12
+            if data[offset:offset + 4] in (b"MHC2", b"sdhs"):
+                data[offset:offset + 4] = b"targ"
+        path = self.color_dir / name
+        path.write_bytes(bytes(data))
+        return path
+
+    def profile_with_mhc2(self, name):
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        path = self.color_dir / name
+        path.write_bytes(build_profile("HDR", state, build_transform(state, hdr=True)))
+        return path
+
+    def test_an_applied_mhc2_profile_marks_the_metadata_as_an_echo(self):
+        self.profile_with_mhc2("Applied.icm")
+        self.default_profiles["HDR"] = "Applied.icm"
+        self.assertTrue(self.window._active_profile_overrides_metadata(self.display))
+
+    def test_a_plain_profile_leaves_the_metadata_trustworthy(self):
+        self.profile_without_mhc2("Plain.icm")
+        self.default_profiles["HDR"] = "Plain.icm"
+        self.assertFalse(self.window._active_profile_overrides_metadata(self.display))
+
+    def test_luminance_is_not_adopted_while_an_mhc2_profile_is_applied(self):
+        """Otherwise a figure this tool wrote returns as corroboration of itself."""
+        self.profile_with_mhc2("Applied.icm")
+        self.default_profiles["HDR"] = "Applied.icm"
+        base = self.profile_without_mhc2("Base.icm")
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability()):
+            self.window._load_profile_from_path(base)
+        self.assertNotIn("display's own figures", self.window.status_label.text())
+
+    def test_luminance_is_adopted_when_nothing_is_overriding(self):
+        self.profile_without_mhc2("Plain.icm")
+        self.default_profiles["HDR"] = "Plain.icm"
+        base = self.profile_without_mhc2("Base.icm")
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability()):
+            self.window._load_profile_from_path(base)
+        self.assertIn("display's own figures", self.window.status_label.text())
+
+    def test_an_unreadable_association_is_assumed_to_be_an_echo(self):
+        """Guessing wrong in this direction only forgoes a fallback; the other way
+        writes a fabricated figure into a profile."""
+        self.default_profiles["HDR"] = "gone-from-disk.icm"
+        self.assertTrue(self.window._active_profile_overrides_metadata(self.display))
