@@ -1515,3 +1515,51 @@ class ClippingPointReportingTests(WindowTestCase):
         """Only the pair is suspicious; a high peak on its own is just a bright panel."""
         self.window._record_measurement("peak-white", 1500.0)
         self.assertNotIn("clipping point", self.window.status_label.text())
+
+
+class PatternViewLiveApplyTests(WindowTestCase):
+    """Live Apply is forced off at startup, so without this the tone steps in the pattern
+    view moved sliders that rebuilt nothing and changed nothing on screen."""
+
+    class FakeWindow:
+        failure = ""
+
+        def __init__(self, *args, **kwargs):
+            PatternViewLiveApplyTests.last = self
+            self.on_close = kwargs.get("on_close")
+
+        def setGeometry(self, *_a):
+            pass
+
+        def showFullScreen(self):
+            pass
+
+        def begin(self):
+            return True
+
+        def setFocus(self, *_a):
+            pass
+
+        def close(self):
+            if self.on_close:
+                self.on_close()
+
+    def test_opening_the_patterns_turns_live_apply_on(self):
+        self.window.state.live_mode = False
+        with mock.patch.object(app_module, "PatternWindow", self.FakeWindow):
+            self.window._open_pattern_view()
+        self.assertTrue(self.window.state.live_mode)
+
+    def test_closing_puts_it_back_as_the_user_had_it(self):
+        self.window.state.live_mode = False
+        with mock.patch.object(app_module, "PatternWindow", self.FakeWindow):
+            self.window._open_pattern_view()
+            self.last.close()
+        self.assertFalse(self.window.state.live_mode)
+
+    def test_a_user_who_had_it_on_keeps_it_on(self):
+        self.window.state.live_mode = True
+        with mock.patch.object(app_module, "PatternWindow", self.FakeWindow):
+            self.window._open_pattern_view()
+            self.last.close()
+        self.assertTrue(self.window.state.live_mode)

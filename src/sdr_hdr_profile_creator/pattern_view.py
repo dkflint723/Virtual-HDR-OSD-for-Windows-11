@@ -273,6 +273,7 @@ class PatternWindow(QWidget):
         parent: QWidget | None = None,
         measure: Callable[[str, float], None] | None = None,
         guided: bool = True,
+        on_close: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
@@ -292,6 +293,7 @@ class PatternWindow(QWidget):
         self._surface: HdrSurface | None = None
         self._frame: bytes = b""
         self._measure = measure
+        self._on_close = on_close
         # Guided by default. Nine patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
@@ -340,6 +342,9 @@ class PatternWindow(QWidget):
         return True
 
     def closeEvent(self, event):
+        if self._on_close is not None:
+            self._on_close()
+            self._on_close = None
         self._keepalive.stop()
         if self._surface is not None:
             self._surface.close()
@@ -514,8 +519,17 @@ class PatternWindow(QWidget):
         """
         if not self.pattern.level_driven or self._measure is None:
             return False
-        self.accepted[self.pattern.key] = self._context.probe_nits
-        self._measure(self.pattern.key, self._context.probe_nits)
+        measured = self._context.probe_nits
+        self.accepted[self.pattern.key] = measured
+        self._measure(self.pattern.key, measured)
+        # What the user just measured outranks what the panel claims, for every pattern
+        # after this one. Continuing to show the EDID's figure would have the overlay
+        # contradicting the reading taken thirty seconds earlier on the same screen.
+        if self.pattern.key == "peak-white":
+            self._context = replace(self._context, peak_nits=max(80.0, measured))
+            self._assumed_peak = False
+        elif self.pattern.key == "full-frame-white":
+            self._context = replace(self._context, max_full_frame_nits=max(80.0, measured))
         if self._guided and not self.advance():
             return True
         self.refresh()

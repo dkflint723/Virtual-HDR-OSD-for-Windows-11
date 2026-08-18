@@ -689,3 +689,76 @@ class SummaryPlacementTests(PatternViewTestCase):
         if run:
             bands.append(run)
         self.assertGreaterEqual(len(bands), 5, f"only {len(bands)} lines; a reading is missing")
+
+
+class MeasuredPeakFeedbackTests(PatternViewTestCase):
+    """The overlay was still quoting the panel's EDID after the user had measured the real
+    figure on the same screen thirty seconds earlier."""
+
+    def build(self):
+        win = PatternWindow(capability(max_nits=1080.0), 240.0, self.controls,
+                            measure=lambda *_: None)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        return win
+
+    def test_a_measured_peak_replaces_the_panels_claim(self):
+        win = self.build()
+        self.assertEqual(win._context.peak_nits, 1080.0)
+        win.confirm_step()               # black level
+        win.set_probe(1127.0)
+        win.confirm_step()               # peak white
+        self.assertAlmostEqual(win._context.peak_nits, 1127.0)
+
+    def test_a_measured_full_frame_replaces_it_too(self):
+        win = self.build()
+        win.confirm_step()
+        win.set_probe(1127.0)
+        win.confirm_step()
+        win.set_probe(280.0)
+        win.confirm_step()               # full frame
+        self.assertAlmostEqual(win._context.max_full_frame_nits, 280.0)
+
+    def test_later_patterns_use_the_measured_ceiling(self):
+        """Otherwise the staircase and tracking cells would still be scaled to the claim."""
+        win = self.build()
+        win.confirm_step()
+        win.set_probe(600.0)
+        win.confirm_step()
+        self.assertAlmostEqual(win._context.ceiling_nits, 600.0)
+
+    def test_measuring_clears_an_assumed_peak_warning(self):
+        """Once it is measured it is no longer assumed, and must stop saying so."""
+        win = PatternWindow(capability(max_nits=0.0), 240.0, self.controls,
+                            measure=lambda *_: None)
+        self.addCleanup(win.deleteLater)
+        win.resize(800, 600)
+        win._apply_guided_step()
+        self.assertTrue(win._assumed_peak)
+        win.confirm_step()
+        win.set_probe(700.0)
+        win.confirm_step()
+        self.assertFalse(win._assumed_peak)
+
+
+class LiveApplyTests(PatternViewTestCase):
+    def test_the_window_reports_when_it_closes(self):
+        """The editor uses this to put Live Apply back as the user had it."""
+        closed: list[bool] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, on_close=lambda: closed.append(True))
+        win.resize(200, 200)
+        win.show()
+        win.close()
+        self.assertEqual(closed, [True])
+
+    def test_closing_twice_only_reports_once(self):
+        closed: list[bool] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, on_close=lambda: closed.append(True))
+        win.resize(200, 200)
+        win.show()
+        win.close()
+        win.close()
+        self.assertEqual(len(closed), 1)

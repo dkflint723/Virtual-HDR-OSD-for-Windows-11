@@ -1573,9 +1573,14 @@ class MainWindow(FluentWidget):
         except Exception:
             sdr_white = 240.0
 
+        # Adjusting a control that cannot change the display is pointless, and live mode
+        # is forced off at startup, so without this the tone steps silently did nothing.
+        previous_live = self.state.live_mode
+        self.state.live_mode = True
         window = PatternWindow(
             capability, sdr_white, self._pattern_view_bindings(),
             measure=self._record_measurement,
+            on_close=lambda: self._restore_live_mode(previous_live),
         )
         screen = self._screen_for(display)
         if screen is not None:
@@ -1599,6 +1604,13 @@ class MainWindow(FluentWidget):
             "control, arrows adjust, Esc exits.",
             "ok",
         )
+
+    def _restore_live_mode(self, previous: bool) -> None:
+        """Put Live Apply back as the user had it once the patterns are gone."""
+        self.state.live_mode = previous
+        if hasattr(self, "live_checkbox"):
+            with QSignalBlocker(self.live_checkbox):
+                self.live_checkbox.setChecked(previous)
 
     @staticmethod
     def _screen_for(display: DisplayInfo):
