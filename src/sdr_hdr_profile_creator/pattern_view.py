@@ -218,12 +218,17 @@ def render_overlay(
             lines.append(walk)
         if pattern.level_driven or step is not None:
             lines.append(confirm)
-        if step is not None and step >= total:
-            lines.append("then Apply Edits back in the app")
         lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
             y += spacing(20)
+
+        if step is not None and step >= total:
+            # Set apart from the key list rather than sitting in it: it is what happens
+            # after this screen, not another key to press on it.
+            y += spacing(16)
+            painter.setPen(QColor(200, 200, 200, 255))
+            painter.drawText(margin, y, "Last step. Esc, then Apply Edits in the app.")
     finally:
         painter.end()
 

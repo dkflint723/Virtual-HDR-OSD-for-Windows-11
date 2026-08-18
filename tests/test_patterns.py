@@ -512,3 +512,46 @@ class TrackingSensitivityTests(unittest.TestCase):
         changed = [abs(a - b) / (a - 1.0) for a, b in zip(neutral, altered)]
         self.assertGreater(max(changed), 0.05,
                            "the controls barely move the steps, so nothing can be judged")
+
+
+class ToneTrackingGuidanceTests(unittest.TestCase):
+    """The guidance has to describe the pattern that is actually on screen. Written for the
+    all-at-once layout, it asked the viewer to compare levels side by side -- the one thing
+    the eye cannot do here, and the reason that layout was abandoned."""
+
+    def instructions(self):
+        return pattern_by_key("tone-tracking").instructions
+
+    def test_it_asks_about_the_level_on_screen_first(self):
+        self.assertIn("Look at the bar now", self.instructions())
+
+    def test_it_says_how_to_reach_the_other_levels(self):
+        self.assertIn("Up and Down", self.instructions())
+
+    def test_it_never_asks_for_a_side_by_side_comparison(self):
+        """Only one level is visible, so nothing can be compared against anything."""
+        text = self.instructions().lower()
+        for phrase in ("squares stand out most", "than the middle", "all seven equally"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, text)
+
+    def test_each_outcome_names_one_control_and_a_direction(self):
+        for line in self.instructions().split("\n"):
+            if "->" not in line:
+                continue
+            with self.subTest(line=line.strip()):
+                symptom, action = line.split("->")
+                self.assertTrue(symptom.strip(), "an outcome with no symptom")
+                self.assertTrue(
+                    any(word in action for word in ("raise", "lower", "adjust")),
+                    "an outcome with no direction to move in",
+                )
+
+    def test_it_says_the_pattern_of_errors_is_what_matters(self):
+        """A single level says nothing on its own; that has to be stated or it will be
+        read as a per-level verdict."""
+        self.assertIn("pattern of errors", self.instructions())
+
+    def test_the_criterion_describes_this_level_not_a_row_of_them(self):
+        criterion = pattern_by_key("tone-tracking").criterion
+        self.assertIn("here", criterion)

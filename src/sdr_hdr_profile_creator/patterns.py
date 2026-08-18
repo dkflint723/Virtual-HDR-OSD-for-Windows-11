@@ -537,18 +537,22 @@ PATTERNS: tuple[Pattern, ...] = (
         key="tone-tracking",
         title="Tone tracking",
         purpose="Names which of the three tone controls is wrong, at normal viewing distance.",
-        criterion="Correct is the bar faintly visible at every level, dark through bright.",
+        criterion="Correct is the bar only just visible -- here, and at every other level.",
         instructions=(
-            "One level at a time, because a bright field anywhere on screen makes a dark "
-            "one impossible to judge.\n\n"
-            "1. Up and Down step through the levels. Pause a few seconds at each.\n"
-            "2. Note the levels where the bar vanishes, and where it is obvious.\n"
-            "3. Tab picks a control, Left and Right move it, then walk the levels again.\n\n"
-            "Gone at the dark levels -> raise Midtone Brightness\n"
-            "Gone at the bright levels -> lower it\n"
-            "Gone at both ends -> lower Contrast\n"
-            "Obvious at both ends -> raise Contrast\n"
-            "Wrong everywhere by the same amount -> adjust Gamma"
+            "There is a faint bar across the middle of this patch. One level is shown at a "
+            "time, because a bright field anywhere on screen makes a dark one impossible "
+            "to judge.\n\n"
+            "1. Look at the bar now. Is it too faint to find, about right, or obvious?\n"
+            "2. Up and Down move to the next level. Give your eyes a few seconds each time.\n"
+            "3. Walk all seven, then match what you saw against the list below.\n"
+            "4. Tab picks a control, Left and Right move it. Then walk the levels again.\n\n"
+            "too faint at the DARK levels only    -> raise Midtone Brightness\n"
+            "too faint at the BRIGHT levels only  -> lower Midtone Brightness\n"
+            "too faint at BOTH ends               -> lower Contrast\n"
+            "too obvious at BOTH ends             -> raise Contrast\n"
+            "wrong the same way at EVERY level    -> adjust Gamma\n\n"
+            "Only the pattern of errors matters, not any single level. Change one control "
+            "at a time."
         ),
         render=_render_tone_tracking,
         markers=_tone_tracking_markers,
