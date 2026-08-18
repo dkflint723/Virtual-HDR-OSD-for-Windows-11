@@ -16,8 +16,10 @@ from sdr_hdr_profile_creator.patterns import (
     PATTERNS,
     REFERENCE_WHITE_NITS,
     PatternContext,
+    compose,
     pattern_by_key,
     render,
+    window_size,
 )
 
 HDR = PatternContext(is_hdr=True, sdr_white_nits=240.0, peak_nits=1080.0, max_full_frame_nits=1080.0)
@@ -203,37 +205,86 @@ class ColourPatchTests(unittest.TestCase):
         self.assertEqual((green, blue), (0.0, 0.0))
 
 
-class PeakWindowTests(unittest.TestCase):
-    """Peak cannot be shown full-field: the panel dims itself to produce it."""
+class CompositionTests(unittest.TestCase):
+    """Every pattern is shown in one centred window on black, as display patches always
+    have been. On an emissive panel it is also the only way readings stay comparable: a
+    full-screen pattern engages the brightness limiter differently depending on how bright
+    the pattern is, so two measurements are not measuring the same thing."""
 
-    WIDTH, HEIGHT = 400, 300
+    WIDTH, HEIGHT = 800, 600
 
-    def setUp(self):
-        self.frame = render(pattern_by_key("peak-window"), self.WIDTH, self.HEIGHT, HDR)
+    def frame(self, key="solid-patch", **kwargs):
+        return compose(self.WIDTH, self.HEIGHT, pattern_by_key(key), HDR, **kwargs)
 
-    def test_the_window_covers_about_a_tenth_of_the_screen(self):
-        lit = sum(1 for value in channels(self.frame) if value > 0.0)
-        ratio = lit / (self.WIDTH * self.HEIGHT)
-        self.assertAlmostEqual(ratio, 0.10, delta=0.01)
+    def test_the_window_is_a_tenth_of_the_screen_area(self):
+        width, height = window_size(3840, 2160)
+        self.assertAlmostEqual((width * height) / (3840 * 2160), 0.10, places=3)
 
-    def test_the_surround_is_true_black(self):
-        """A lit surround is itself part of what engages the brightness limiter."""
-        for x, y in ((0, 0), (self.WIDTH - 1, 0), (0, self.HEIGHT - 1), (5, 5)):
-            with self.subTest(corner=(x, y)):
-                self.assertEqual(pixel_at(self.frame, self.WIDTH, x, y)[0], 0.0)
-
-    def test_the_window_is_at_the_panel_peak(self):
-        centre = pixel_at(self.frame, self.WIDTH, self.WIDTH // 2, self.HEIGHT // 2)[0]
-        self.assertAlmostEqual(centre, HDR.encode(1080.0), places=3)
+    def test_everything_outside_the_window_is_true_black(self):
+        """A lit surround is itself part of what engages the limiter."""
+        frame = self.frame()
+        for x, y in ((0, 0), (self.WIDTH - 1, 0), (0, self.HEIGHT - 1),
+                     (self.WIDTH - 1, self.HEIGHT - 1), (5, self.HEIGHT // 2)):
+            with self.subTest(point=(x, y)):
+                self.assertEqual(pixel_at(frame, self.WIDTH, x, y)[0], 0.0)
 
     def test_the_window_is_centred(self):
-        row = [pixel_at(self.frame, self.WIDTH, x, self.HEIGHT // 2)[0] for x in range(self.WIDTH)]
+        frame = self.frame()
+        row = [pixel_at(frame, self.WIDTH, x, self.HEIGHT // 2)[0] for x in range(self.WIDTH)]
         lit = [x for x, value in enumerate(row) if value > 0.0]
         self.assertTrue(lit)
         self.assertAlmostEqual((lit[0] + lit[-1]) / 2, (self.WIDTH - 1) / 2, delta=1.5)
 
-    def test_a_degenerate_surface_still_renders(self):
-        self.assertEqual(len(render(pattern_by_key("peak-window"), 1, 1, HDR)), 8)
+    def test_every_pattern_composes_to_the_exact_surface_size(self):
+        for pattern in PATTERNS:
+            for width, height in ((1, 1), (37, 11), (800, 600)):
+                with self.subTest(pattern=pattern.key, size=(width, height)):
+                    frame = compose(width, height, pattern, HDR)
+                    self.assertEqual(len(frame), width * height * 8)
+
+    def test_the_solid_patch_sits_at_the_panel_peak(self):
+        frame = self.frame()
+        centre = pixel_at(frame, self.WIDTH, self.WIDTH // 2, self.HEIGHT // 2)[0]
+        self.assertAlmostEqual(centre, HDR.encode(1080.0), places=3)
+
+
+class OverlayPlacementTests(unittest.TestCase):
+    """Controls go hard against one edge. Anything near the patch contaminates both the
+    reading and the viewer's dark adaptation."""
+
+    WIDTH, HEIGHT = 800, 600
+    OVERLAY = (bytes([255, 255, 255, 255]) * (60 * 200), 60, 200)
+
+    def test_the_overlay_lands_on_the_right_when_asked(self):
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("near-black"), HDR,
+                        overlay=self.OVERLAY, overlay_side="right")
+        self.assertGreater(pixel_at(frame, self.WIDTH, self.WIDTH - 2, self.HEIGHT // 2)[0], 0.0)
+        self.assertEqual(pixel_at(frame, self.WIDTH, 2, self.HEIGHT // 2)[0], 0.0)
+
+    def test_the_overlay_lands_on_the_left_when_asked(self):
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("near-black"), HDR,
+                        overlay=self.OVERLAY, overlay_side="left")
+        self.assertGreater(pixel_at(frame, self.WIDTH, 2, self.HEIGHT // 2)[0], 0.0)
+        self.assertEqual(pixel_at(frame, self.WIDTH, self.WIDTH - 2, self.HEIGHT // 2)[0], 0.0)
+
+    def test_the_overlay_is_held_far_below_diffuse_white(self):
+        """It shares the screen with the patch, so its light counts too."""
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("near-black"), HDR,
+                        overlay=self.OVERLAY, overlay_side="right")
+        nits = pixel_at(frame, self.WIDTH, self.WIDTH - 2, self.HEIGHT // 2)[0] * 80.0
+        self.assertLess(nits, 30.0, "an overlay this bright would engage the limiter")
+        self.assertGreater(nits, 1.0, "an overlay this dim would be unreadable")
+
+    def test_a_transparent_overlay_contributes_no_light(self):
+        clear = (bytes([255, 255, 255, 0]) * (60 * 200), 60, 200)
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("near-black"), HDR,
+                        overlay=clear, overlay_side="right")
+        self.assertEqual(pixel_at(frame, self.WIDTH, self.WIDTH - 2, self.HEIGHT // 2)[0], 0.0)
+
+    def test_an_oversized_overlay_does_not_corrupt_the_frame(self):
+        huge = (bytes([255, 255, 255, 255]) * (4000 * 4000), 4000, 4000)
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("near-black"), HDR, overlay=huge)
+        self.assertEqual(len(frame), self.WIDTH * self.HEIGHT * 8)
 
 
 class DeclaredMetadataTests(unittest.TestCase):

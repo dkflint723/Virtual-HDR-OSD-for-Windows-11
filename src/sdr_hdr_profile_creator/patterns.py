@@ -190,35 +190,9 @@ def _render_neutral_ramp(width: int, height: int, context: PatternContext) -> by
     return row * height
 
 
-def _render_peak_window(width: int, height: int, context: PatternContext) -> bytes:
-    """A small bright window on black, which is the only honest way to show peak.
-
-    Filling the screen with white does not measure peak luminance on any panel worth
-    calibrating. An OLED's automatic brightness limiter drops full-field output to a
-    fraction of what a small window sustains, and the reading also drifts for seconds
-    after the patch appears. A tenth of the screen area is the conventional compromise:
-    small enough that the limiter barely engages, large enough to fill a meter's aperture
-    and to judge by eye.
-
-    The surround is true black rather than dark grey, because on an emissive panel a lit
-    surround is itself part of what triggers the limiter.
-    """
-    fraction = 0.10
-    side = fraction ** 0.5
-    window_width = max(1, min(width, round(width * side)))
-    window_height = max(1, min(height, round(height * side)))
-    left = (width - window_width) // 2
-    top = (height - window_height) // 2
-
-    black = _row(width, 0.0)
-    lit = (
-        black[: left * 8]
-        + _pixel(context.encode(context.ceiling_nits)) * window_width
-        + black[(left + window_width) * 8:]
-    )
-    return b"".join(
-        lit if top <= y < top + window_height else black for y in range(height)
-    )
+def _render_solid_patch(width: int, height: int, context: PatternContext) -> bytes:
+    """A single flat level filling the window: the patch a meter reads."""
+    return _row(width, context.encode(context.ceiling_nits)) * height
 
 
 # Primaries, secondaries, and two memory colours the eye judges harshly.
@@ -306,16 +280,16 @@ PATTERNS: tuple[Pattern, ...] = (
         render=_render_neutral_ramp,
     ),
     Pattern(
-        key="peak-window",
-        title="Peak window",
-        purpose="Shows peak luminance without the panel dimming itself to produce it.",
+        key="solid-patch",
+        title="Solid patch",
+        purpose="One flat level, for reading peak by eye or with a meter.",
         instructions=(
-            "A tenth of the screen, on black. Give it several seconds to settle before "
-            "judging: emissive panels drift after a bright patch appears. If a filled "
-            "white screen looks dimmer than this window, that is automatic brightness "
-            "limiting, not a fault, and it is why peak is never measured full-field."
+            "Give it several seconds to settle: emissive panels drift after a bright "
+            "patch appears. If a filled white screen looks dimmer than this, that is "
+            "automatic brightness limiting rather than a fault, and it is why peak is "
+            "never judged full-field."
         ),
-        render=_render_peak_window,
+        render=_render_solid_patch,
     ),
     Pattern(
         key="colour-patches",
@@ -348,3 +322,106 @@ def render(pattern: Pattern, width: int, height: int, context: PatternContext) -
             f"for {width}x{height}"
         )
     return frame
+
+
+# ---------------------------------------------------------------------------------
+# Composition: a black field, a centred window, and controls pushed to one edge.
+
+# A tenth of the screen area is the long-standing convention for display patches. It is
+# small enough that an emissive panel's brightness limiter barely engages and large enough
+# to overfill a meter's aperture at a normal working distance.
+WINDOW_AREA_FRACTION = 0.10
+
+# The overlay is held far below diffuse white. It shares the screen with the patch, so its
+# light counts towards what the panel is being asked to produce, and a bright strip of text
+# beside a near-black patch would both engage the limiter and destroy dark adaptation.
+OVERLAY_NITS = 12.0
+
+
+def window_size(width: int, height: int, fraction: float = WINDOW_AREA_FRACTION) -> tuple[int, int]:
+    """Dimensions of a centred window covering ``fraction`` of the screen *area*."""
+    side = max(0.0, min(1.0, float(fraction))) ** 0.5
+    return (
+        max(1, min(int(width), round(int(width) * side))),
+        max(1, min(int(height), round(int(height) * side))),
+    )
+
+
+def _srgb_to_linear(value: float) -> float:
+    return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+
+def compose(
+    width: int,
+    height: int,
+    pattern: Pattern,
+    context: PatternContext,
+    *,
+    fraction: float = WINDOW_AREA_FRACTION,
+    overlay: tuple[bytes, int, int] | None = None,
+    overlay_side: str = "right",
+    overlay_nits: float = OVERLAY_NITS,
+) -> bytes:
+    """Build a full frame: black everywhere, the pattern in a centred window.
+
+    This is how display patches have always been presented, and on an emissive panel it
+    is the only way readings stay comparable. A pattern that fills the screen makes the
+    brightness limiter engage differently for a dark pattern than a bright one, so two
+    measurements taken minutes apart are not measuring the same thing. Confining every
+    pattern to the same window area holds that variable still.
+
+    ``overlay`` is straight RGBA8, as produced by a Qt paint into a QImage, and is pinned
+    to the far left or far right rather than floated over the middle: anything near the
+    patch contaminates both the reading and the viewer's adaptation.
+    """
+    width, height = max(1, int(width)), max(1, int(height))
+    block_width, block_height = window_size(width, height, fraction)
+    block = render(pattern, block_width, block_height, context)
+
+    left = (width - block_width) // 2
+    top = (height - block_height) // 2
+    black_row = _row(width, 0.0)
+
+    strips: dict[int, bytes] = {}
+    margin = overlay_width = 0
+    if overlay is not None:
+        pixels, source_width, source_height = overlay
+        overlay_width = max(0, min(int(source_width), width))
+        overlay_height = max(0, min(int(source_height), height))
+        if overlay_width and overlay_height:
+            margin = width - overlay_width if overlay_side == "right" else 0
+            start = (height - overlay_height) // 2
+            for row_index in range(overlay_height):
+                base = row_index * int(source_width) * 4
+                converted = bytearray()
+                for column in range(overlay_width):
+                    offset = base + column * 4
+                    red, green, blue, alpha = pixels[offset:offset + 4]
+                    scale = (alpha / 255.0) * overlay_nits
+                    converted += struct.pack(
+                        "<4e",
+                        context.encode(_srgb_to_linear(red / 255.0) * scale),
+                        context.encode(_srgb_to_linear(green / 255.0) * scale),
+                        context.encode(_srgb_to_linear(blue / 255.0) * scale),
+                        1.0,
+                    )
+                strips[start + row_index] = bytes(converted)
+
+    rows: list[bytes] = []
+    for y in range(height):
+        if top <= y < top + block_height:
+            offset = (y - top) * block_width * 8
+            row = (
+                black_row[: left * 8]
+                + block[offset:offset + block_width * 8]
+                + black_row[(left + block_width) * 8:]
+            )
+        else:
+            row = black_row
+        strip = strips.get(y)
+        if strip is not None:
+            # Painted over whatever is underneath, so a tall overlay beside a large
+            # window still appears rather than being silently dropped.
+            row = row[: margin * 8] + strip + row[(margin + overlay_width) * 8:]
+        rows.append(row)
+    return b"".join(rows)
