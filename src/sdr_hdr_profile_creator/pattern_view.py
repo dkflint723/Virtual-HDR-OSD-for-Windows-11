@@ -16,17 +16,31 @@ nothing about the editor's state model and can be driven by a test with no displ
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Sequence
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QImage, QPainter
 from PySide6.QtWidgets import QWidget
 
-from .hdr_display import DisplayCapability, HdrDisplayError, HdrSurface
-from .patterns import PATTERNS, OVERLAY_NITS, Pattern, PatternContext, compose
+from .gamma_correction import pq_eotf, pq_inverse_eotf
+from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
+from .patterns import (
+    OVERLAY_NITS,
+    PATTERNS,
+    WINDOW_AREA_FRACTION,
+    Pattern,
+    PatternContext,
+    compose,
+    window_size,
+)
 
 OVERLAY_WIDTH = 460
+
+# One arrow press moves the probe this far in PQ code. A fixed step in nits is hopeless at
+# both ends: far too coarse near black where a threshold actually sits, and so fine near
+# peak that crossing the range would take hundreds of presses.
+PROBE_STEP_PQ = 0.004
 
 
 @dataclass(frozen=True)
@@ -98,8 +112,22 @@ def render_overlay(
 
         body = QFont()
         body.setPointSize(10)
+        # The criterion goes first and brightest. It is the thing being checked against,
+        # and a target buried in a paragraph is a pattern that gets stared at, not read.
+        criterion_font = QFont()
+        criterion_font.setPointSize(11)
+        criterion_font.setBold(True)
+        painter.setFont(criterion_font)
+        painter.setPen(QColor(255, 255, 255, 255))
+        box = painter.boundingRect(
+            margin, y, width - margin * 2, 200,
+            int(Qt.TextFlag.TextWordWrap), pattern.criterion,
+        )
+        painter.drawText(box, int(Qt.TextFlag.TextWordWrap), pattern.criterion)
+        y = box.bottom() + 18
+
         painter.setFont(body)
-        painter.setPen(QColor(210, 210, 210, 255))
+        painter.setPen(QColor(200, 200, 200, 255))
         box = painter.boundingRect(
             margin, y, width - margin * 2, 400,
             int(Qt.TextFlag.TextWordWrap), pattern.instructions,
@@ -117,28 +145,71 @@ def render_overlay(
         painter.drawText(margin, y, scale)
         y += 30
 
-        for index, control in enumerate(controls):
-            selected = index == active
-            painter.setPen(QColor(255, 255, 255, 255) if selected else QColor(140, 140, 140, 255))
-            marker = "▸ " if selected else "  "
-            painter.drawText(margin, y, f"{marker}{control.label}")
-            painter.drawText(margin, y + 18, f"   {control.formatted()}")
-            y += 44
+        if pattern.level_driven:
+            # The display holds still and the pattern moves, so the sliders are not what
+            # the arrows touch here. Showing them would say the opposite.
+            painter.setPen(QColor(255, 255, 255, 255))
+            reading = (f"{context.probe_nits:.4g} nits" if context.absolute
+                       else f"{context.probe_nits:.4g} of white")
+            painter.drawText(margin, y, f"Level  {reading}")
+            y += 40
+        else:
+            for index, control in enumerate(controls):
+                selected = index == active
+                painter.setPen(QColor(255, 255, 255, 255) if selected
+                               else QColor(140, 140, 140, 255))
+                painter.drawText(margin, y, f"{'▸ ' if selected else '  '}{control.label}")
+                painter.drawText(margin, y + 18, f"   {control.formatted()}")
+                y += 44
 
         y += 10
         painter.setPen(QColor(130, 130, 130, 255))
-        for line in (
-            "1-6   pattern",
-            "Tab   next control",
-            "← →  adjust",
-            "H     move this panel",
-            "Esc   exit",
-        ):
+        adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
+        lines = [f"1-{len(PATTERNS)}   pattern"]
+        if not pattern.level_driven and controls:
+            lines.append("Tab   next control")
+        lines += [adjust, "H     move this panel", "Esc   exit"]
+        for line in lines:
             painter.drawText(margin, y, line)
             y += 20
     finally:
         painter.end()
 
+    return (bytes(image.constBits()), width, height)
+
+
+def render_markers(
+    width: int, height: int, pattern: Pattern, context: PatternContext
+) -> tuple[bytes, int, int] | None:
+    """Paint a pattern's target labels into a window-sized RGBA image.
+
+    Without these a pattern shows what the display is doing but never what it should be
+    doing, which leaves a viewer with nothing to aim at. The target label is drawn
+    brighter than the rest so the answer is findable at a glance in a dark room.
+    """
+    markers = pattern.markers(context)
+    if not markers:
+        return None
+
+    image = QImage(width, height, QImage.Format.Format_RGBA8888)
+    image.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(image)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        for marker in markers:
+            font = QFont()
+            font.setPointSize(11 if marker.target else 9)
+            font.setBold(marker.target)
+            painter.setFont(font)
+            painter.setPen(QColor(255, 255, 255, 255) if marker.target
+                           else QColor(190, 190, 190, 255))
+            metrics = painter.fontMetrics()
+            text = f"◀ {marker.text}" if marker.target else marker.text
+            x = int(marker.x * width) - metrics.horizontalAdvance(text) // 2
+            y = int(marker.y * height)
+            painter.drawText(max(0, min(width - 1, x)), max(0, min(height - 1, y)), text)
+    finally:
+        painter.end()
     return (bytes(image.constBits()), width, height)
 
 
@@ -224,10 +295,42 @@ class PatternWindow(QWidget):
             self.refresh()
 
     def adjust(self, direction: int) -> None:
+        """Move whatever this pattern is asking the user to move.
+
+        On a threshold pattern the pattern is the variable and the display holds still,
+        so the arrows drive the probe level; on the rest it is the other way round. Having
+        one key do both is not overloading: in each case it moves the only thing there is
+        to move, and a separate key would mean remembering which pattern you are on.
+        """
+        if self.pattern.level_driven:
+            self.step_probe(direction)
+            return
         control = self.active_control
         if control is None:
             return
         control.nudge(direction * control.step)
+        self.refresh()
+
+    def step_probe(self, direction: int) -> None:
+        """Move the probe level by one perceptual step.
+
+        Steps are taken in PQ rather than in nits. A fixed nit step is far too coarse near
+        black, where a threshold is found, and far too fine near peak, where it would take
+        hundreds of presses to cross the range.
+        """
+        code = pq_inverse_eotf(self._context.probe_nits) + direction * PROBE_STEP_PQ
+        code = max(0.0, min(1.0, code))
+        nits = min(pq_eotf(code), PQ_MAX_NITS)
+        self._context = replace(self._context, probe_nits=nits)
+        self.refresh()
+
+    @property
+    def probe_nits(self) -> float:
+        return self._context.probe_nits
+
+    def set_probe(self, nits: float) -> None:
+        """Place the probe at an exact level, for a meter loop to drive the sequence."""
+        self._context = replace(self._context, probe_nits=max(0.0, float(nits)))
         self.refresh()
 
     def toggle_side(self) -> None:
@@ -238,14 +341,20 @@ class PatternWindow(QWidget):
 
     def build_frame(self) -> bytes:
         width, height = max(1, self.width()), max(1, self.height())
+        pattern = self.pattern
         overlay = render_overlay(
             min(OVERLAY_WIDTH, width), min(int(height * 0.8), height),
-            self.pattern, self._context, self._controls, self._active,
+            pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak,
         )
+        block_width, block_height = window_size(
+            width, height,
+            pattern.window_fraction if pattern.window_fraction is not None else WINDOW_AREA_FRACTION,
+        )
         return compose(
-            width, height, self.pattern, self._context,
+            width, height, pattern, self._context,
             overlay=overlay, overlay_side=self._overlay_side, overlay_nits=OVERLAY_NITS,
+            window_overlay=render_markers(block_width, block_height, pattern, self._context),
         )
 
     def refresh(self) -> None:

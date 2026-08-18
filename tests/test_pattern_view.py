@@ -84,6 +84,9 @@ class PatternViewTestCase(unittest.TestCase):
         self.addCleanup(win.deleteLater)
         return win
 
+    def press(self, win, key):
+        win.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
+
 
 class ContextTests(PatternViewTestCase):
     def test_a_credible_panel_supplies_its_own_peak(self):
@@ -147,19 +150,26 @@ class FrameTests(PatternViewTestCase):
 
 
 class InputTests(PatternViewTestCase):
-    def press(self, win, key):
-        win.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
-
     def test_number_keys_select_patterns(self):
         win = self.window()
         self.press(win, Qt.Key.Key_3)
         self.assertEqual(win.pattern.key, PATTERNS[2].key)
 
-    def test_a_number_beyond_the_pattern_list_is_ignored(self):
+    def test_every_number_key_reaches_its_pattern(self):
         win = self.window()
-        before = win.pattern.key
-        self.press(win, Qt.Key.Key_9)
-        self.assertEqual(win.pattern.key, before)
+        for index in range(min(9, len(PATTERNS))):
+            with self.subTest(key=index + 1):
+                self.press(win, Qt.Key.Key_1 + index)
+                self.assertEqual(win.pattern.key, PATTERNS[index].key)
+
+    def test_a_number_beyond_the_pattern_list_is_ignored(self):
+        """Otherwise a shorter pattern list would index off the end."""
+        win = self.window()
+        with mock.patch.object(pattern_view, "PATTERNS", PATTERNS[:2]):
+            win.select_pattern(0)
+            before = win.pattern.key
+            self.press(win, Qt.Key.Key_5)
+            self.assertEqual(win.pattern.key, before)
 
     def test_tab_cycles_controls_and_wraps(self):
         win = self.window()
@@ -202,6 +212,126 @@ class InputTests(PatternViewTestCase):
         win.resize(200, 200)
         self.assertIsNone(win.active_control)
         self.press(win, Qt.Key.Key_Right)  # must not raise
+
+
+class ThresholdPatternTests(PatternViewTestCase):
+    """On these the pattern moves and the display holds still, which is the whole trick:
+    nobody can say what luminance a patch is, but anybody can say whether they can see a
+    shape."""
+
+    def select(self, win, key):
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == key))
+
+    def test_arrows_move_the_probe_not_the_sliders(self):
+        win = self.window()
+        self.select(win, "black-level")
+        before_probe, before_gamma = win.probe_nits, self.values["gamma"]
+        self.press(win, Qt.Key.Key_Right)
+        self.assertGreater(win.probe_nits, before_probe)
+        self.assertEqual(self.values["gamma"], before_gamma, "a slider moved instead")
+
+    def test_arrows_still_move_sliders_on_a_fixed_pattern(self):
+        win = self.window()
+        self.select(win, "gamma-match")
+        before = win.probe_nits
+        self.press(win, Qt.Key.Key_Right)
+        self.assertNotEqual(self.values["gamma"], 2.2)
+        self.assertEqual(win.probe_nits, before, "the probe moved on a fixed pattern")
+
+    def test_the_probe_steps_perceptually_not_in_fixed_nits(self):
+        """A fixed nit step is useless at both ends: far too coarse where a threshold
+        actually sits, and far too fine to ever cross the range."""
+        win = self.window()
+        self.select(win, "black-level")
+        win.set_probe(0.01)
+        win.step_probe(1)
+        small = win.probe_nits - 0.01
+
+        win.set_probe(500.0)
+        win.step_probe(1)
+        large = win.probe_nits - 500.0
+        self.assertGreater(large, small * 100, "steps are not perceptual")
+
+    def test_the_probe_never_goes_negative_or_past_st2084(self):
+        win = self.window()
+        self.select(win, "black-level")
+        win.set_probe(0.0)
+        for _ in range(20):
+            win.step_probe(-1)
+        self.assertGreaterEqual(win.probe_nits, 0.0)
+
+        win.set_probe(9999.0)
+        for _ in range(50):
+            win.step_probe(1)
+        self.assertLessEqual(win.probe_nits, 10000.0)
+
+    def test_a_meter_can_place_the_probe_exactly(self):
+        """The same pattern a person drives by eye is what a meter loop steps."""
+        win = self.window()
+        self.select(win, "solid-patch")
+        win.set_probe(203.0)
+        self.assertAlmostEqual(win.probe_nits, 203.0)
+
+    def test_full_frame_white_actually_fills_the_screen(self):
+        """It is defined as the whole screen lit, so measuring it in a tenth measures
+        nothing."""
+        win = self.window(width=400, height=300)
+        self.select(win, "full-frame-white")
+        win.set_probe(100.0)
+        frame = win.build_frame()
+        corner = struct.unpack_from("<4e", frame, 0)[0]
+        self.assertGreater(corner, 0.0, "the corner is black, so it is still windowed")
+
+    def test_the_other_patterns_stay_windowed(self):
+        win = self.window(width=400, height=300)
+        self.select(win, "peak-white")
+        win.set_probe(100.0)
+        frame = win.build_frame()
+        self.assertEqual(struct.unpack_from("<4e", frame, 0)[0], 0.0)
+
+
+class MarkerTests(PatternViewTestCase):
+    """A pattern with no visible target cannot be aimed at."""
+
+    def test_the_gamma_pattern_marks_which_patch_is_the_answer(self):
+        from sdr_hdr_profile_creator.patterns import pattern_by_key
+
+        markers = pattern_by_key("gamma-match").markers(context_for(capability(), 240.0))
+        self.assertTrue(any(marker.target for marker in markers))
+        self.assertIn("TARGET", [marker.text for marker in markers])
+
+    def test_markers_are_rendered_into_the_pattern(self):
+        from sdr_hdr_profile_creator.pattern_view import render_markers
+        from sdr_hdr_profile_creator.patterns import pattern_by_key
+
+        result = render_markers(400, 300, pattern_by_key("gamma-match"),
+                                context_for(capability(), 240.0))
+        self.assertIsNotNone(result)
+        raw, width, height = result
+        self.assertEqual(len(raw), width * height * 4)
+        self.assertGreater(sum(1 for i in range(3, len(raw), 4) if raw[i] > 0), 100)
+
+    def test_a_pattern_with_no_markers_renders_none(self):
+        from sdr_hdr_profile_creator.pattern_view import render_markers
+        from sdr_hdr_profile_creator.patterns import pattern_by_key
+
+        self.assertIsNone(render_markers(
+            400, 300, pattern_by_key("neutral-ramp"), context_for(capability(), 240.0)))
+
+    def test_the_probe_marker_reports_the_current_level(self):
+        from sdr_hdr_profile_creator.patterns import pattern_by_key
+
+        from dataclasses import replace
+
+        context = replace(context_for(capability(), 240.0), probe_nits=0.25)
+        markers = pattern_by_key("black-level").markers(context)
+        self.assertIn("0.25", markers[0].text)
+
+    def test_markers_stay_far_dimmer_than_the_patch(self):
+        """A bright label beside a near-black shape moves the threshold being measured."""
+        from sdr_hdr_profile_creator.patterns import MARKER_NITS, OVERLAY_NITS
+
+        self.assertLess(MARKER_NITS, OVERLAY_NITS)
 
 
 class SurfaceFailureTests(PatternViewTestCase):

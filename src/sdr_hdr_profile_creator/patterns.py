@@ -42,6 +42,12 @@ class PatternContext:
     sdr_white_nits: float = 240.0
     peak_nits: float = 1000.0
     max_full_frame_nits: float = 600.0
+    # The level a threshold pattern is currently probing at. Windows HDR Calibration
+    # works this way and it is the right way round: the eye cannot say what luminance a
+    # patch is, but it can say whether a shape is visible, so the pattern moves until the
+    # shape disappears and the level where that happens is the reading. It also means a
+    # meter can drive exactly the same pattern by stepping this value.
+    probe_nits: float = 0.05
 
     @property
     def absolute(self) -> bool:
@@ -92,18 +98,122 @@ def _spans(width: int, count: int) -> list[int]:
 
 
 @dataclass(frozen=True)
+class Marker:
+    """A label drawn into the pattern itself, positioned as a fraction of the window.
+
+    Patterns without these are unusable by eye. A grey ramp shows what the display is
+    doing but says nothing about what it should be doing, and a viewer with no target is
+    not calibrating, they are looking at grey.
+    """
+
+    text: str
+    x: float
+    y: float
+    target: bool = False
+
+
+@dataclass(frozen=True)
 class Pattern:
-    """One test pattern, plus the guidance needed to act on what it shows."""
+    """One test pattern, plus everything needed to act on what it shows.
+
+    ``criterion`` is the single sentence describing what correct looks like. It is
+    separate from ``instructions`` because it is the thing a user checks against, and
+    burying it in a paragraph is how a pattern ends up being stared at rather than read.
+
+    ``level_driven`` patterns are the ones where the *pattern* moves rather than the
+    display: the user drives ``PatternContext.probe_nits`` until a shape disappears, and
+    that level is the measurement. Fixed patterns are the ones where the display moves and
+    the pattern holds still.
+    """
 
     key: str
     title: str
     purpose: str
+    criterion: str
     instructions: str
     render: Callable[[int, int, PatternContext], bytes]
+    markers: Callable[[PatternContext], tuple[Marker, ...]] = lambda _context: ()
+    level_driven: bool = False
+    # Overrides the standard window. Only maximum full-frame luminance needs this: it is
+    # defined as the whole screen lit, so measuring it in a tenth of one measures nothing.
+    window_fraction: float | None = None
+
+
+# Relative sizes of the candidate patches in the gamma-match pattern. The middle entry is
+# the true half-luminance, so it is the answer; the others exist so a miss reads as a
+# direction rather than merely a failure.
+_NEAR_BLACK_LEVELS: tuple[float, ...] = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
+
+GAMMA_CANDIDATES: tuple[tuple[float, str], ...] = (
+    (0.70, "much darker"),
+    (0.85, "darker"),
+    (1.00, "TARGET"),
+    (1.18, "brighter"),
+    (1.40, "much brighter"),
+)
+
+
+def _disc_spans(width: int, height: int, diameter_fraction: float):
+    """Per-row (start, span) of a centred disc, or None for rows it does not touch.
+
+    A shape rather than a bar, because the question a threshold pattern asks is "can you
+    see it", and a recognisable outline is far easier to answer that about than an edge
+    which might be a gradient.
+    """
+    centre_x, centre_y = (width - 1) / 2.0, (height - 1) / 2.0
+    radius = min(width, height) * max(0.0, min(1.0, diameter_fraction)) / 2.0
+    for y in range(height):
+        offset = y - centre_y
+        if radius <= 0.0 or abs(offset) > radius:
+            yield None
+            continue
+        half = (radius * radius - offset * offset) ** 0.5
+        start = max(0, int(round(centre_x - half)))
+        end = min(width, int(round(centre_x + half)) + 1)
+        yield (start, end - start) if end > start else None
+
+
+def _shape_on_field(width: int, height: int, field: float, shape: float) -> bytes:
+    background = _row(width, field)
+    rows: list[bytes] = []
+    for span in _disc_spans(width, height, 0.55):
+        if span is None:
+            rows.append(background)
+            continue
+        start, count = span
+        rows.append(
+            background[: start * 8] + _pixel(shape) * count + background[(start + count) * 8:]
+        )
+    return b"".join(rows)
 
 
 # ---------------------------------------------------------------------------------
 # Individual patterns. Each returns width*height*8 bytes of scRGB half floats.
+
+
+def _render_black_level(width: int, height: int, context: PatternContext) -> bytes:
+    """A shape barely above black. The level where it vanishes is the black threshold.
+
+    This is the pattern that moves rather than the display. The eye cannot say what
+    luminance it is looking at, but it is very good at saying whether a shape is there,
+    so lowering the probe until the shape disappears converts a judgement nobody can make
+    into one everybody can.
+    """
+    return _shape_on_field(width, height, 0.0, context.encode(context.probe_nits))
+
+
+def _render_peak_clip(width: int, height: int, context: PatternContext) -> bytes:
+    """A shape slightly brighter than a bright surround, to find where the panel clips.
+
+    Raising both together, the shape separates from its surround until the display runs
+    out of range, at which point the two clip to the same output and the shape disappears.
+    That level is peak luminance, measured rather than taken from metadata that on this
+    kind of panel is a specification.
+    """
+    field = context.probe_nits
+    return _shape_on_field(
+        width, height, context.encode(field), context.encode(field * 1.20)
+    )
 
 
 def _render_gamma_match(width: int, height: int, context: PatternContext) -> bytes:
@@ -125,7 +235,7 @@ def _render_gamma_match(width: int, height: int, context: PatternContext) -> byt
     # Candidate patches bracket the true half-luminance so a mismatch reads as a
     # direction, not just a failure to match.
     ideal = line_nits / 2.0
-    candidates = [ideal * factor for factor in (0.70, 0.85, 1.00, 1.18, 1.40)]
+    candidates = [ideal * factor for factor, _label in GAMMA_CANDIDATES]
     patch_width = max(1, width // (len(candidates) * 2))
     band = max(1, height // (len(candidates) + 1))
 
@@ -166,8 +276,8 @@ def _render_near_black(width: int, height: int, context: PatternContext) -> byte
     The SDR-in-HDR correction takes 0.5 nits to roughly 0.1, so this is the range it
     changes most and the range where a wrong black level is most visible.
     """
-    levels = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0]
-    levels = [nits for nits in levels if nits <= context.ceiling_nits] or [context.ceiling_nits]
+    levels = [nits for nits in _NEAR_BLACK_LEVELS if nits <= context.ceiling_nits]
+    levels = levels or [context.ceiling_nits]
     spans = _spans(width, len(levels))
     margin = height // 4
 
@@ -192,7 +302,49 @@ def _render_neutral_ramp(width: int, height: int, context: PatternContext) -> by
 
 def _render_solid_patch(width: int, height: int, context: PatternContext) -> bytes:
     """A single flat level filling the window: the patch a meter reads."""
-    return _row(width, context.encode(context.ceiling_nits)) * height
+    return _row(width, context.encode(context.probe_nits)) * height
+
+
+# ---------------------------------------------------------------------------------
+# Markers. Positions are fractions of the window, so they follow it at any size.
+
+
+def _gamma_markers(_context: PatternContext) -> tuple[Marker, ...]:
+    """Name every candidate patch, and say plainly which one is the answer."""
+    count = len(GAMMA_CANDIDATES)
+    band = 1.0 / (count + 1)
+    return tuple(
+        Marker(
+            text=label,
+            x=0.30,
+            y=band * 0.5 + index * band + band * 0.33,
+            target=(label == "TARGET"),
+        )
+        for index, (_factor, label) in enumerate(GAMMA_CANDIDATES)
+    )
+
+
+def _near_black_markers(context: PatternContext) -> tuple[Marker, ...]:
+    levels = [nits for nits in _NEAR_BLACK_LEVELS if nits <= context.ceiling_nits]
+    levels = levels or [context.ceiling_nits]
+    step = 1.0 / len(levels)
+    return tuple(
+        Marker(text=f"{nits:g}", x=step * (index + 0.5), y=0.80)
+        for index, nits in enumerate(levels)
+    )
+
+
+def _probe_markers(context: PatternContext) -> tuple[Marker, ...]:
+    reading = f"{context.probe_nits:.4g} nits" if context.absolute else f"{context.probe_nits:.4g}"
+    return (Marker(text=reading, x=0.5, y=0.92, target=True),)
+
+
+def _staircase_markers(context: PatternContext) -> tuple[Marker, ...]:
+    top = f"{context.ceiling_nits:.0f} nits" if context.absolute else "white"
+    return (
+        Marker(text="black", x=0.03, y=0.90),
+        Marker(text=top, x=0.90, y=0.90),
+    )
 
 
 # Primaries, secondaries, and two memory colours the eye judges harshly.
@@ -240,38 +392,93 @@ PATTERNS: tuple[Pattern, ...] = (
         key="gamma-match",
         title="Gamma match",
         purpose="Reads the transfer function the display is actually producing.",
+        criterion="The patch labelled TARGET is the one that vanishes into the lines.",
         instructions=(
-            "Step back until the fine lines blend into a solid tone. The patch that "
-            "disappears into its surroundings is the one at true half luminance. If a "
-            "brighter patch matches, the display is dark in the midtones; lower Gamma. "
-            "If a darker patch matches, raise it."
+            "Step back until the fine lines blend into a solid tone. Exactly one patch "
+            "should disappear into them. If it is a patch above TARGET, the display is "
+            "dark in the midtones, so lower Gamma; if it is one below, raise it. Adjust "
+            "until TARGET is the one that vanishes."
         ),
         render=_render_gamma_match,
+        markers=_gamma_markers,
+    ),
+    Pattern(
+        key="black-level",
+        title="Black level",
+        purpose="Measures the darkest luminance this display can still show.",
+        criterion="Correct is the lowest level at which the shape is still just visible.",
+        instructions=(
+            "In a dark room, let your eyes settle for a minute first. Lower the level "
+            "until the shape disappears, then raise it one step, to the last level where "
+            "you can still make it out. That reading is the display's black threshold."
+        ),
+        render=_render_black_level,
+        markers=_probe_markers,
+        level_driven=True,
+    ),
+    Pattern(
+        key="peak-white",
+        title="Peak white",
+        purpose="Measures peak luminance instead of trusting the panel's own claim.",
+        criterion="Correct is the highest level at which the shape still separates.",
+        instructions=(
+            "The shape is a fifth brighter than its surround. Raise the level until the "
+            "two stop being distinguishable: past that point the display has run out of "
+            "range and is clipping both to the same output. The last level where they "
+            "still separate is peak. Let each step settle for a few seconds."
+        ),
+        render=_render_peak_clip,
+        markers=_probe_markers,
+        level_driven=True,
+    ),
+    Pattern(
+        key="full-frame-white",
+        title="Full-frame white",
+        purpose="Measures how bright the display sustains with the whole screen lit.",
+        criterion="Correct is the highest level the whole screen holds without dimming.",
+        instructions=(
+            "The only pattern here that fills the screen, because that is what this "
+            "figure means. Raise the level and watch: past a point the panel dims itself "
+            "rather than getting brighter, and that is the limit. Expect it to be far "
+            "below peak on any OLED -- that gap is the brightness limiter, not a fault, "
+            "and a panel claiming the same number for both is quoting a specification."
+        ),
+        render=_render_solid_patch,
+        markers=_probe_markers,
+        level_driven=True,
+        window_fraction=1.0,
     ),
     Pattern(
         key="grey-staircase",
         title="Grey staircase",
         purpose="Shows crush, clipping and banding across the whole range at once.",
+        criterion="Correct is every step distinguishable from both of its neighbours.",
         instructions=(
-            "Every step should be distinguishable from its neighbours. Steps merging at "
-            "the dark end is crush; merging at the bright end is clipping."
+            "Steps merging at the dark end is crush; merging at the bright end is "
+            "clipping. This is a check rather than an adjustment: fix it with Black level "
+            "and Peak white, then come back and confirm."
         ),
         render=_render_grey_staircase,
+        markers=_staircase_markers,
     ),
     Pattern(
         key="near-black",
-        title="Near black",
-        purpose="Finds where shadow detail stops being visible.",
+        title="Shadow ladder",
+        purpose="Shows how far into the shadows detail survives, in real luminance.",
+        criterion="Correct is being able to separate every labelled patch from the one beside it.",
         instructions=(
-            "In a dark room, note the darkest patch you can still separate from the "
-            "background. Everything below it is being crushed."
+            "Labels are nits. Note the darkest patch you can still separate from black; "
+            "everything below it is being crushed. Use this to see what the SDR-in-HDR "
+            "correction costs you: it takes 0.5 nits to roughly 0.1."
         ),
         render=_render_near_black,
+        markers=_near_black_markers,
     ),
     Pattern(
         key="neutral-ramp",
         title="Neutral ramp",
         purpose="Exposes tint that drifts across the luminance range.",
+        criterion="Correct is a sweep with no colour in it at any point.",
         instructions=(
             "Look for colour creeping in at one end and not the other. A uniform cast is "
             "hard to judge without a reference; a drifting one is not, and it is what the "
@@ -282,22 +489,26 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="solid-patch",
         title="Solid patch",
-        purpose="One flat level, for reading peak by eye or with a meter.",
+        purpose="One flat level, for a meter to read.",
+        criterion="Nothing to judge by eye: this is the patch a meter measures.",
         instructions=(
-            "Give it several seconds to settle: emissive panels drift after a bright "
-            "patch appears. If a filled white screen looks dimmer than this, that is "
-            "automatic brightness limiting rather than a fault, and it is why peak is "
-            "never judged full-field."
+            "Set the level, place the meter against the centre of the patch, and let it "
+            "settle. Emissive panels drift for several seconds after a bright patch "
+            "appears, and a reading taken too early is simply wrong."
         ),
         render=_render_solid_patch,
+        markers=_probe_markers,
+        level_driven=True,
     ),
     Pattern(
         key="colour-patches",
         title="Colour patches",
         purpose="Hue and saturation sanity, including memory colours.",
+        criterion="Correct is skin, sky and foliage all looking unremarkable.",
         instructions=(
-            "Skin, sky and foliage are the colours the eye judges hardest. Check these "
-            "after the greyscale is right, never before -- white balance moves them all."
+            "Those three are the colours the eye judges hardest, which is what makes them "
+            "useful. Check these after the greyscale is right, never before -- white "
+            "balance moves every one of them."
         ),
         render=_render_colour_patches,
     ),
@@ -337,6 +548,11 @@ WINDOW_AREA_FRACTION = 0.10
 # beside a near-black patch would both engage the limiter and destroy dark adaptation.
 OVERLAY_NITS = 12.0
 
+# Markers sit on the patch itself, so they are dimmer again than the edge strip. A bright
+# label beside a near-black shape raises local adaptation and moves the very threshold the
+# pattern exists to find.
+MARKER_NITS = 4.0
+
 
 def window_size(width: int, height: int, fraction: float = WINDOW_AREA_FRACTION) -> tuple[int, int]:
     """Dimensions of a centred window covering ``fraction`` of the screen *area*."""
@@ -351,6 +567,57 @@ def _srgb_to_linear(value: float) -> float:
     return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
 
 
+def _blend_over(
+    block: bytes,
+    width: int,
+    height: int,
+    overlay: tuple[bytes, int, int],
+    context: PatternContext,
+    nits: float,
+) -> bytes:
+    """Alpha-blend marker text into the pattern itself.
+
+    Markers sit on the patch, so they are held far dimmer than the guidance strip: a
+    bright label beside a near-black shape would raise the local adaptation level and
+    change the very threshold the pattern exists to find.
+
+    Most of a marker image is transparent, so rows and columns with no coverage are
+    skipped wholesale rather than walked pixel by pixel.
+    """
+    pixels, source_width, source_height = overlay
+    source_width, source_height = int(source_width), int(source_height)
+    if source_width <= 0 or source_height <= 0:
+        return block
+
+    result = bytearray(block)
+    alpha_plane = pixels[3::4]
+    for y in range(min(source_height, height)):
+        row_start = y * source_width
+        row_alpha = alpha_plane[row_start:row_start + source_width]
+        if row_alpha.count(0) == len(row_alpha):
+            continue
+        first = len(row_alpha) - len(row_alpha.lstrip(b"\x00"))
+        last = len(row_alpha.rstrip(b"\x00"))
+        for x in range(first, min(last, width)):
+            alpha = row_alpha[x]
+            if not alpha:
+                continue
+            weight = alpha / 255.0
+            source = (row_start + x) * 4
+            destination = (y * width + x) * 8
+            existing = struct.unpack_from("<4e", result, destination)
+            struct.pack_into(
+                "<4e", result, destination,
+                *(
+                    existing[channel] * (1.0 - weight)
+                    + context.encode(_srgb_to_linear(pixels[source + channel] / 255.0) * nits) * weight
+                    for channel in range(3)
+                ),
+                1.0,
+            )
+    return bytes(result)
+
+
 def compose(
     width: int,
     height: int,
@@ -361,6 +628,8 @@ def compose(
     overlay: tuple[bytes, int, int] | None = None,
     overlay_side: str = "right",
     overlay_nits: float = OVERLAY_NITS,
+    window_overlay: tuple[bytes, int, int] | None = None,
+    marker_nits: float = MARKER_NITS,
 ) -> bytes:
     """Build a full frame: black everywhere, the pattern in a centred window.
 
@@ -375,8 +644,12 @@ def compose(
     patch contaminates both the reading and the viewer's adaptation.
     """
     width, height = max(1, int(width)), max(1, int(height))
-    block_width, block_height = window_size(width, height, fraction)
+    block_width, block_height = window_size(
+        width, height, pattern.window_fraction if pattern.window_fraction is not None else fraction
+    )
     block = render(pattern, block_width, block_height, context)
+    if window_overlay is not None:
+        block = _blend_over(block, block_width, block_height, window_overlay, context, marker_nits)
 
     left = (width - block_width) // 2
     top = (height - block_height) // 2

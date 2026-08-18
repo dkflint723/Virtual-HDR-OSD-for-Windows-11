@@ -90,10 +90,14 @@ class CeilingTests(unittest.TestCase):
     """Asking for light above the panel's peak invites chasing a difference that the
     display physically cannot show."""
 
-    def test_no_pattern_exceeds_the_panels_peak(self):
+    def test_no_fixed_pattern_exceeds_the_panels_peak(self):
+        """Level-driven patterns are excluded: following the probe past peak is how they
+        find peak in the first place."""
         dim = PatternContext(is_hdr=True, peak_nits=400.0, max_full_frame_nits=400.0)
         allowed = dim.encode(400.0) + 1e-3
         for pattern in PATTERNS:
+            if pattern.level_driven:
+                continue
             with self.subTest(pattern=pattern.key):
                 brightest = max(channels(render(pattern, 200, 120, dim)))
                 self.assertLessEqual(brightest, allowed)
@@ -242,10 +246,14 @@ class CompositionTests(unittest.TestCase):
                     frame = compose(width, height, pattern, HDR)
                     self.assertEqual(len(frame), width * height * 8)
 
-    def test_the_solid_patch_sits_at_the_panel_peak(self):
-        frame = self.frame()
+    def test_the_solid_patch_sits_at_the_probe_level(self):
+        """It is the patch a meter reads, so it must be exactly where it was put."""
+        from dataclasses import replace
+
+        context = replace(HDR, probe_nits=137.0)
+        frame = compose(self.WIDTH, self.HEIGHT, pattern_by_key("solid-patch"), context)
         centre = pixel_at(frame, self.WIDTH, self.WIDTH // 2, self.HEIGHT // 2)[0]
-        self.assertAlmostEqual(centre, HDR.encode(1080.0), places=3)
+        self.assertAlmostEqual(centre, context.encode(137.0), places=3)
 
 
 class OverlayPlacementTests(unittest.TestCase):
@@ -322,6 +330,8 @@ class GuidanceTests(unittest.TestCase):
                 self.assertTrue(pattern.title.strip())
                 self.assertGreater(len(pattern.purpose), 20)
                 self.assertGreater(len(pattern.instructions), 40)
+                self.assertGreater(len(pattern.criterion), 20,
+                                   "a pattern with no stated target cannot be aimed at")
 
 
 class PqHelperSanityTests(unittest.TestCase):
