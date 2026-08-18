@@ -56,7 +56,13 @@ SUMMARY_NITS = 40.0
 
 @dataclass(frozen=True)
 class ControlBinding:
-    """One editor control the pattern view can drive without knowing what it is."""
+    """One editor control the pattern view can drive without knowing what it is.
+
+    ``minimum`` and ``maximum`` are what let the view draw a position rather than only a
+    number: a figure with no range around it says nothing about how far there is left to
+    go in either direction. ``write`` sets an absolute value, for typed entry -- stepping
+    from 2.200 to 1.700 an arrow at a time is not a control anyone would use.
+    """
 
     key: str
     label: str
@@ -64,9 +70,25 @@ class ControlBinding:
     nudge: Callable[[float], None]
     step: float = 0.01
     suffix: str = ""
+    minimum: float = 0.0
+    maximum: float = 1.0
+    write: Callable[[float], None] | None = None
 
     def formatted(self) -> str:
         return f"{self.read():.3f}{self.suffix}"
+
+    def fraction(self) -> float:
+        """Where the current value sits in its range, 0 to 1."""
+        span = self.maximum - self.minimum
+        if span <= 0:
+            return 0.0
+        return max(0.0, min(1.0, (self.read() - self.minimum) / span))
+
+    def set_value(self, value: float) -> bool:
+        if self.write is None:
+            return False
+        self.write(max(self.minimum, min(self.maximum, float(value))))
+        return True
 
 
 def context_for(capability: DisplayCapability | None, sdr_white_nits: float) -> PatternContext:
@@ -100,6 +122,7 @@ def render_overlay(
     scale: float = 1.0,
     step: int | None = None,
     total: int = 0,
+    editing: str | None = None,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -177,13 +200,36 @@ def render_overlay(
         painter.drawText(margin, y, scale_note)
         y += spacing(30)
 
+        def draw_track(top: int, fraction: float, active: bool) -> None:
+            """A bar showing where a value sits in its range.
+
+            A number on its own says nothing about how much travel is left in either
+            direction, which is most of what someone adjusting by eye wants to know.
+            """
+            track_width = width - margin * 2
+            height_px = spacing(6)
+            painter.fillRect(margin, top, track_width, height_px,
+                             QColor(70, 70, 70, 255) if active else QColor(45, 45, 45, 255))
+            filled = int(track_width * max(0.0, min(1.0, fraction)))
+            painter.fillRect(margin, top, filled, height_px,
+                             QColor(210, 210, 210, 255) if active else QColor(110, 110, 110, 255))
+            handle = spacing(3)
+            painter.fillRect(max(margin, margin + filled - handle), top - spacing(3),
+                             handle * 2, height_px + spacing(6),
+                             QColor(255, 255, 255, 255) if active else QColor(150, 150, 150, 255))
+
         if pattern.level_driven:
             # The display holds still and the pattern moves, so the sliders are not what
             # the arrows touch here. Showing them would say the opposite.
             painter.setPen(QColor(255, 255, 255, 255))
-            reading = (f"{context.probe_nits:.4g} nits" if context.absolute
-                       else f"{context.probe_nits:.4g} of white")
-            painter.drawText(margin, y, f"Level  {reading}")
+            shown = editing if editing is not None else (
+                f"{context.probe_nits:.4g} nits" if context.absolute
+                else f"{context.probe_nits:.4g} of white")
+            painter.drawText(margin, y, f"Level  {shown}" + ("_" if editing is not None else ""))
+            y += spacing(10)
+            # PQ, not nits: a linear bar would spend nearly all its length on highlights
+            # and show no movement at all through the range where thresholds are found.
+            draw_track(y, pq_inverse_eotf(context.probe_nits), True)
             y += spacing(22)
             recorded = accepted.get(pattern.key) if accepted else None
             if recorded is not None:
@@ -201,8 +247,10 @@ def render_overlay(
                 painter.setPen(QColor(255, 255, 255, 255) if selected
                                else QColor(140, 140, 140, 255))
                 painter.drawText(margin, y, f"{'▸ ' if selected else '  '}{control.label}")
-                painter.drawText(margin, y + spacing(18), f"   {control.formatted()}")
-                y += spacing(44)
+                shown = (editing + "_") if (selected and editing is not None) else control.formatted()
+                painter.drawText(margin, y + spacing(18), f"   {shown}")
+                draw_track(y + spacing(30), control.fraction(), selected)
+                y += spacing(56)
 
         y += spacing(10)
         painter.setPen(QColor(130, 130, 130, 255))
@@ -218,6 +266,8 @@ def render_overlay(
             lines.append(walk)
         if pattern.level_driven or step is not None:
             lines.append(confirm)
+        if any(control.write for control in controls) or pattern.level_driven:
+            lines.append("E     type a value")
         lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
@@ -233,6 +283,48 @@ def render_overlay(
         painter.end()
 
     return (bytes(image.constBits()), width, height)
+
+
+def _ink_extent(raw: bytes, width: int, height: int) -> int:
+    """Lowest row with anything drawn on it, or -1 for an empty image."""
+    alpha = raw[3::4]
+    for y in range(height - 1, -1, -1):
+        row = alpha[y * width:(y + 1) * width]
+        if row.count(0) != len(row):
+            return y
+    return -1
+
+
+def render_overlay_fitted(
+    width: int,
+    height: int,
+    pattern: Pattern,
+    context: PatternContext,
+    controls: Sequence[ControlBinding],
+    active: int,
+    *,
+    scale: float = 1.0,
+    **kwargs,
+) -> tuple[bytes, int, int]:
+    """Render the guidance strip at the largest scale whose content actually fits.
+
+    The text is not a fixed size: instructions differ per pattern, and the panel's own
+    dimensions come from the display. Picking a scale from resolution alone silently
+    clipped the controls off the bottom on a 1440p screen -- the sliders and key hints
+    simply were not on the panel, with nothing to indicate anything was missing.
+
+    Measured against a deliberately over-tall image first, so the extent is the content's
+    own rather than whatever survived the crop.
+    """
+    probe_height = height * 3
+    raw, _w, _h = render_overlay(width, probe_height, pattern, context, controls, active,
+                                 scale=scale, **kwargs)
+    needed = _ink_extent(raw, width, probe_height) + 1
+    if 0 < needed > height:
+        # A little under the exact ratio, since text does not shrink perfectly linearly.
+        scale = max(0.55, scale * (height / needed) * 0.97)
+    return render_overlay(width, height, pattern, context, controls, active,
+                          scale=scale, **kwargs)
 
 
 def render_markers(
@@ -305,6 +397,7 @@ class PatternWindow(QWidget):
         self._on_close = on_close
         self._apply = apply
         self.applied = False
+        self._editing: str | None = None
         # Guided by default. Nine patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
@@ -547,6 +640,67 @@ class PatternWindow(QWidget):
             painter.end()
         return (bytes(image.constBits()), width, height)
 
+    # -- typed entry -----------------------------------------------------------------
+
+    def begin_edit(self) -> bool:
+        """Start typing a value for whatever the arrows would otherwise move.
+
+        Stepping from 2.200 to 1.700 one arrow press at a time is not a control anyone
+        would use, and on a level-driven pattern the range spans four orders of magnitude.
+        """
+        if self._complete:
+            return False
+        if not self.pattern.level_driven:
+            control = self.active_control
+            if control is None or control.write is None:
+                return False
+        self._editing = ""
+        self.refresh()
+        return True
+
+    def cancel_edit(self) -> None:
+        self._editing = None
+        self.refresh()
+
+    def commit_edit(self) -> bool:
+        """Apply the typed value, or discard it if it was not a number."""
+        text = (self._editing or "").strip()
+        self._editing = None
+        try:
+            value = float(text)
+        except ValueError:
+            self.refresh()
+            return False
+        if self.pattern.level_driven:
+            self.set_probe(min(PQ_MAX_NITS, max(0.0, value)))
+            return True
+        control = self.active_control
+        if control is None or not control.set_value(value):
+            self.refresh()
+            return False
+        self.refresh()
+        return True
+
+    def _handle_edit_key(self, event) -> bool:
+        """Consume a keystroke while typing. Digits would otherwise switch pattern."""
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.commit_edit()
+            return True
+        if key == Qt.Key.Key_Escape:
+            self.cancel_edit()
+            return True
+        if key == Qt.Key.Key_Backspace:
+            self._editing = (self._editing or "")[:-1]
+            self.refresh()
+            return True
+        text = event.text()
+        if text and (text.isdigit() or text in ".-"):
+            self._editing = (self._editing or "") + text
+            self.refresh()
+            return True
+        return True   # swallow everything else; half-typed input must not switch pattern
+
     def apply_measurements(self) -> bool:
         """Write everything measured into the profile, without leaving the patterns.
 
@@ -625,11 +779,11 @@ class PatternWindow(QWidget):
         # Text is sized against a reference width so it stays the same physical size as
         # resolution grows, rather than shrinking into illegibility on a 4K panel.
         overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * OVERLAY_WIDTH_FRACTION)))
-        overlay = render_overlay(
+        overlay = render_overlay_fitted(
             overlay_width, min(int(height * 0.85), height),
             pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
-            step=self.guided_step, total=len(GUIDED_SEQUENCE),
+            step=self.guided_step, total=len(GUIDED_SEQUENCE), editing=self._editing,
         )
         block_width, block_height = window_size(
             width, height,
@@ -668,6 +822,9 @@ class PatternWindow(QWidget):
     # -- input -----------------------------------------------------------------------
 
     def keyPressEvent(self, event):
+        if self._editing is not None:
+            self._handle_edit_key(event)
+            return
         key = event.key()
         if key == Qt.Key.Key_Escape:
             self.close()
@@ -694,6 +851,9 @@ class PatternWindow(QWidget):
             return
         if key == Qt.Key.Key_H:
             self.toggle_side()
+            return
+        if key == Qt.Key.Key_E:
+            self.begin_edit()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             # On the finished screen there is no step left to confirm, so Enter is free

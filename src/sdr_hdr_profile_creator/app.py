@@ -1485,6 +1485,9 @@ class MainWindow(FluentWidget):
                 nudge=lambda delta, c=control: c.set_value(c.value() + delta, emit=True),
                 step=float(control.spec.step),
                 suffix=control.spec.suffix,
+                minimum=float(control.spec.minimum),
+                maximum=float(control.spec.maximum),
+                write=lambda value, c=control: c.set_value(value, emit=True),
             ))
         return bindings
 

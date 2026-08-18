@@ -884,3 +884,216 @@ class ApplyFromTheSummaryTests(PatternViewTestCase):
         win = self.finished(apply=None)
         self.press(win, Qt.Key.Key_Return)
         self.assertFalse(win.applied)
+
+
+class ControlRangeTests(PatternViewTestCase):
+    """A number with no range around it says nothing about how far there is left to go."""
+
+    def binding(self, value=2.2):
+        held = {"v": value}
+        return ControlBinding(
+            "gamma", "Gamma", lambda: held["v"],
+            lambda delta: held.__setitem__("v", held["v"] + delta),
+            step=0.005, minimum=1.6, maximum=3.0,
+            write=lambda new: held.__setitem__("v", new),
+        ), held
+
+    def test_the_fraction_places_the_value_in_its_range(self):
+        binding, _ = self.binding(2.3)
+        self.assertAlmostEqual(binding.fraction(), (2.3 - 1.6) / 1.4, places=4)
+
+    def test_the_fraction_is_bounded_even_if_the_value_is_not(self):
+        binding, held = self.binding(99.0)
+        self.assertEqual(binding.fraction(), 1.0)
+        held["v"] = -99.0
+        self.assertEqual(binding.fraction(), 0.0)
+
+    def test_a_zero_width_range_does_not_divide_by_zero(self):
+        binding = ControlBinding("x", "X", lambda: 1.0, lambda _d: None,
+                                 minimum=5.0, maximum=5.0)
+        self.assertEqual(binding.fraction(), 0.0)
+
+    def test_writing_clamps_to_the_range(self):
+        binding, held = self.binding()
+        self.assertTrue(binding.set_value(99.0))
+        self.assertEqual(held["v"], 3.0)
+        binding.set_value(-99.0)
+        self.assertEqual(held["v"], 1.6)
+
+    def test_a_binding_with_no_write_reports_it_rather_than_failing(self):
+        binding = ControlBinding("x", "X", lambda: 1.0, lambda _d: None)
+        self.assertFalse(binding.set_value(2.0))
+
+
+class TypedEntryTests(PatternViewTestCase):
+    """Stepping from 2.200 to 1.700 an arrow at a time is not a control anyone would use,
+    and a level-driven pattern spans four orders of magnitude."""
+
+    def setUp(self):
+        super().setUp()
+        self.controls = [
+            ControlBinding(
+                "gamma", "Gamma", lambda: self.values["gamma"],
+                lambda delta: self.values.__setitem__("gamma", self.values["gamma"] + delta),
+                step=0.005, minimum=1.6, maximum=3.0,
+                write=lambda v: self.values.__setitem__("gamma", v),
+            ),
+        ]
+
+    def typing(self, win, text):
+        self.press(win, Qt.Key.Key_E)
+        for character in text:
+            win.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_0,
+                                        Qt.KeyboardModifier.NoModifier, character))
+
+    def tracking(self):
+        win = self.window()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "tone-tracking"))
+        return win
+
+    def test_a_typed_value_is_applied_on_enter(self):
+        win = self.tracking()
+        self.typing(win, "1.85")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertAlmostEqual(self.values["gamma"], 1.85)
+
+    def test_digits_while_typing_do_not_switch_pattern(self):
+        """They are pattern keys everywhere else, which is exactly the trap."""
+        win = self.tracking()
+        before = win.pattern.key
+        self.typing(win, "2.5")
+        self.assertEqual(win.pattern.key, before)
+
+    def test_escape_while_typing_cancels_instead_of_leaving(self):
+        """Esc closes the view everywhere else; losing the session over a typo would be
+        an unpleasant surprise."""
+        win = self.tracking()
+        closed = []
+        win.close = lambda: closed.append(True)
+        self.typing(win, "2.5")
+        self.press(win, Qt.Key.Key_Escape)
+        self.assertEqual(closed, [], "the view closed instead of cancelling the edit")
+        self.assertAlmostEqual(self.values["gamma"], 2.2)
+
+    def test_backspace_corrects_a_mistake(self):
+        win = self.tracking()
+        self.typing(win, "1.855")
+        self.press(win, Qt.Key.Key_Backspace)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertAlmostEqual(self.values["gamma"], 1.85)
+
+    def test_nonsense_is_discarded_rather_than_applied(self):
+        win = self.tracking()
+        self.typing(win, "..")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertAlmostEqual(self.values["gamma"], 2.2)
+
+    def test_a_typed_value_out_of_range_is_clamped(self):
+        win = self.tracking()
+        self.typing(win, "99")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertAlmostEqual(self.values["gamma"], 3.0)
+
+    def test_a_level_driven_pattern_takes_a_typed_level(self):
+        win = self.window()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        self.typing(win, "812")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertAlmostEqual(win.probe_nits, 812.0)
+
+    def test_a_typed_level_cannot_exceed_st2084(self):
+        win = self.window()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        self.typing(win, "99999")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertLessEqual(win.probe_nits, 10000.0)
+
+    def test_the_finished_screen_is_not_editable(self):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=lambda: True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in range(len(GUIDED_SEQUENCE)):
+            win.confirm_step()
+        self.assertFalse(win.begin_edit())
+
+    def test_the_overlay_shows_what_is_being_typed(self):
+        win = self.tracking()
+        plain = win.build_frame()
+        self.typing(win, "1.8")
+        self.assertNotEqual(win.build_frame(), plain)
+
+
+class TrackRenderingTests(PatternViewTestCase):
+    def test_the_track_moves_with_the_value(self):
+        low = ControlBinding("g", "Gamma", lambda: 1.7, lambda _d: None,
+                             minimum=1.6, maximum=3.0)
+        high = ControlBinding("g", "Gamma", lambda: 2.9, lambda _d: None,
+                              minimum=1.6, maximum=3.0)
+        context = context_for(capability(), 240.0)
+        left, _, _ = pattern_view.render_overlay_fitted(
+            461, 918, pattern_view.pattern_by_key("tone-tracking"), context, [low], 0)
+        right, _, _ = pattern_view.render_overlay_fitted(
+            461, 918, pattern_view.pattern_by_key("tone-tracking"), context, [high], 0)
+        self.assertNotEqual(left, right, "the track did not move with the value")
+
+    def test_a_level_driven_pattern_draws_its_own_track(self):
+        from dataclasses import replace
+
+        context = context_for(capability(), 240.0)
+        dim, _, _ = render_overlay(420, 700, pattern_view.pattern_by_key("peak-white"),
+                                   replace(context, probe_nits=10.0), self.controls, 0)
+        bright, _, _ = render_overlay(420, 700, pattern_view.pattern_by_key("peak-white"),
+                                      replace(context, probe_nits=900.0), self.controls, 0)
+        self.assertNotEqual(dim, bright)
+
+
+class OverlayFittingTests(PatternViewTestCase):
+    """Scale picked from resolution alone clipped the controls off the bottom at 1440p --
+    the sliders and key hints were simply not on the panel, with nothing to say so."""
+
+    CONTROLS = None
+
+    def setUp(self):
+        super().setUp()
+        self.CONTROLS = [
+            ControlBinding(f"c{index}", label, lambda: 2.2, lambda _d: None,
+                           minimum=1.6, maximum=3.0)
+            for index, label in enumerate(
+                ("Gamma / Midtone Response", "Midtone Brightness", "Contrast / Tonal Separation"))
+        ]
+
+    def panel(self, screen_width, screen_height):
+        scale = max(1.0, min(3.0, screen_width / pattern_view.OVERLAY_REFERENCE_WIDTH))
+        width = min(screen_width, max(pattern_view.OVERLAY_MIN_WIDTH,
+                                      round(screen_width * pattern_view.OVERLAY_WIDTH_FRACTION)))
+        return width, round(screen_height * 0.85), scale
+
+    def test_every_pattern_fits_at_every_common_resolution(self):
+        context = context_for(capability(), 240.0)
+        for screen in ((1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)):
+            width, height, scale = self.panel(*screen)
+            for pattern in PATTERNS:
+                with self.subTest(screen=screen, pattern=pattern.key):
+                    raw, _w, _h = pattern_view.render_overlay_fitted(
+                        width, height, pattern, context, self.CONTROLS, 0, scale=scale)
+                    self.assertLess(pattern_view._ink_extent(raw, width, height), height - 2,
+                                    "content runs off the bottom of the panel")
+
+    def test_content_that_fits_is_not_shrunk_needlessly(self):
+        """Shrinking text nobody needed shrunk would make every panel harder to read."""
+        context = context_for(capability(), 240.0)
+        width, height, scale = self.panel(3840, 2160)
+        short = pattern_view.pattern_by_key("neutral-ramp")
+        fitted, _w, _h = pattern_view.render_overlay_fitted(
+            width, height, short, context, [], 0, scale=scale)
+        plain, _w2, _h2 = render_overlay(width, height, short, context, [], 0, scale=scale)
+        self.assertEqual(fitted, plain)
+
+    def test_the_extent_helper_finds_the_lowest_drawn_row(self):
+        blank = bytes(4 * 10 * 10)
+        self.assertEqual(pattern_view._ink_extent(blank, 10, 10), -1)
+        marked = bytearray(blank)
+        marked[(4 * 10 + 2) * 4 + 3] = 255
+        self.assertEqual(pattern_view._ink_extent(bytes(marked), 10, 10), 4)
