@@ -207,12 +207,15 @@ def render_overlay(
         y += spacing(10)
         painter.setPen(QColor(130, 130, 130, 255))
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
+        walk = "↑ ↓   next level" if pattern.levels is not None else ""
         confirm = "Enter  record it" if pattern.level_driven else "Enter  done, next step"
         keys = "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
         lines = [f"{keys}   pattern"]
         if not pattern.level_driven and controls:
             lines.append("Tab   next control")
         lines += [adjust]
+        if walk:
+            lines.append(walk)
         if pattern.level_driven or step is not None:
             lines.append(confirm)
         if step is not None and step >= total:
@@ -369,6 +372,36 @@ class PatternWindow(QWidget):
         self._guided = False
         self._complete = False
         self._pattern_index = index % len(PATTERNS)
+        self._start_level()
+        self.refresh()
+
+    def _start_level(self) -> None:
+        """Put a stepped pattern in the middle of its range.
+
+        Neither end is a sensible place to arrive: the top blinds the viewer for the next
+        minute and the bottom shows nothing until their eyes catch up. This runs for both
+        ways in, since a pattern reached by number key needs it as much as a guided step
+        and previously only the guided path did it.
+        """
+        levels = self.pattern.levels
+        if levels is None:
+            return
+        available = levels(self._context)
+        if available:
+            self._context = replace(self._context, probe_nits=available[len(available) // 2])
+
+    def step_level(self, direction: int) -> None:
+        """Walk a stepped pattern's levels, settling the eye at each one."""
+        levels = self.pattern.levels
+        if levels is None:
+            return
+        available = levels(self._context)
+        if not available:
+            return
+        current = min(range(len(available)),
+                      key=lambda i: abs(available[i] - self._context.probe_nits))
+        index = max(0, min(len(available) - 1, current + direction))
+        self._context = replace(self._context, probe_nits=available[index])
         self.refresh()
 
     def next_control(self) -> None:
@@ -429,6 +462,10 @@ class PatternWindow(QWidget):
         # Each step starts near where its answer usually lies, so the first press moves
         # towards the answer instead of away from it. Starting every step at the same
         # level would mean holding an arrow for several seconds before anything happened.
+        if self.pattern.levels is not None:
+            self._start_level()
+            self.refresh()
+            return
         start = {
             "black-level": 0.05,
             "peak-white": max(80.0, self._context.peak_nits * 0.6),
@@ -615,6 +652,11 @@ class PatternWindow(QWidget):
             return
         if key == Qt.Key.Key_Tab:
             self.next_control()
+            return
+        if self.pattern.levels is not None and key in (Qt.Key.Key_Up, Qt.Key.Key_Down):
+            # Up and Down walk the levels here; Left and Right keep driving the sliders,
+            # so both jobs the step needs are reachable without a mode.
+            self.step_level(1 if key == Qt.Key.Key_Up else -1)
             return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Down):
             self.adjust(-1)

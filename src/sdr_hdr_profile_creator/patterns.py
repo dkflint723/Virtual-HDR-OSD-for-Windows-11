@@ -137,6 +137,10 @@ class Pattern:
     # Overrides the standard window. Only maximum full-frame luminance needs this: it is
     # defined as the whole screen lit, so measuring it in a tenth of one measures nothing.
     window_fraction: float | None = None
+    # Levels this pattern is walked through one at a time, if any. Showing a whole range
+    # at once is not an option for anything judged near threshold: adaptation follows the
+    # brightest thing in view, so the dark end becomes unreadable regardless of the panel.
+    levels: Callable[[PatternContext], tuple[float, ...]] | None = None
 
 
 # Relative sizes of the candidate patches in the gamma-match pattern. The middle entry is
@@ -306,61 +310,74 @@ def _render_neutral_ramp(width: int, height: int, context: PatternContext) -> by
     return row * height
 
 
-# How far above its own background each tracking patch sits, in PQ code. PQ is roughly
-# perceptually uniform, so a fixed step should look equally faint at every level. That is
-# the entire test: any level where it does not is a level the display is not tracking.
-TONE_TRACKING_DELTA_PQ = 0.03
+# How far above its own background each tracking patch sits, in PQ code.
+#
+# This has to sit near the threshold of visibility to be worth anything. What the eye sees
+# is the transfer function's slope at that level -- the difference is roughly f'(c) times
+# this step -- so the patch reports how steep the curve is where it sits. A step well above
+# threshold produces an obvious block, and an obvious block stays obvious when the curve
+# moves, which makes the pattern useless for judging a change. The first version used 0.03,
+# roughly thirty times threshold, and patches 1.3x to 2.35x brighter than their surround:
+# unmistakable, and almost completely insensitive to the controls it exists to set.
+#
+# One just-noticeable step is about one to two ten-bit PQ codes. Four is faint but findable,
+# and near enough to threshold that a change in slope pushes a patch in or out of sight.
+TONE_TRACKING_DELTA_PQ = 0.004
 
 TONE_TRACKING_CELLS = 7
 
 
-def _render_tone_tracking(width: int, height: int, context: PatternContext) -> bytes:
-    """Equal perceptual steps at several levels, for the three tone controls at once.
-
-    Gamma, Midtone Brightness and Contrast all shape the same curve, and by eye none of
-    them has an absolute reference to judge against -- nobody can say what luminance a
-    patch ought to be. What the eye is good at is comparing two things side by side, so
-    every cell holds a patch a fixed PQ step above its own background. Correct tracking
-    makes all of them equally faint; the ways that fails are distinct enough to name which
-    control is wrong, which the gamma-match pattern cannot do and which this can do at a
-    desk rather than from two metres away.
-    """
-    spans = _spans(width, TONE_TRACKING_CELLS)
+def tone_tracking_levels(context: PatternContext) -> tuple[float, ...]:
+    """The background levels the tracking test walks through, dark to bright."""
     top = pq_inverse_eotf(context.ceiling_nits)
-    # Kept off both ends: a patch at the very bottom has nowhere to sit below it, and one
-    # at the very top would clip against the ceiling and read as a tracking error.
-    count = max(1, len(spans) - 1)
-    codes = [top * (0.10 + 0.80 * (index / count)) for index in range(len(spans))]
+    count = max(1, TONE_TRACKING_CELLS - 1)
+    # Kept off both ends: a patch at the very bottom has nothing to sit below it, and one
+    # at the top would clip against the ceiling and read as a tracking error.
+    return tuple(
+        pq_eotf(top * (0.10 + 0.80 * (index / count))) for index in range(TONE_TRACKING_CELLS)
+    )
 
-    inner_start, inner_end = height // 3, height * 2 // 3
-    rows: list[bytes] = []
-    for y in range(height):
-        inner = inner_start <= y < inner_end
-        pieces: list[bytes] = []
-        for code, span in zip(codes, spans):
-            background = _pixel(context.encode(pq_eotf(code)))
-            if not inner:
-                pieces.append(background * span)
-                continue
-            patch = _pixel(context.encode(pq_eotf(min(1.0, code + TONE_TRACKING_DELTA_PQ))))
-            pad = span // 4
-            middle = max(0, span - pad * 2)
-            pieces.append(background * pad + patch * middle + background * (span - pad - middle))
-        rows.append(b"".join(pieces))
-    return b"".join(rows)
+
+def _render_tone_tracking(width: int, height: int, context: PatternContext) -> bytes:
+    """One level at a time: a faint patch on a field, for setting the tone controls.
+
+    Gamma, Midtone Brightness and Contrast all shape the same curve, and by eye none has
+    an absolute reference to judge against. What the eye can do is say whether a patch is
+    visible, and the patch sits a near-threshold step above its background, so what it
+    reports is the steepness of the transfer function at that level.
+
+    Showing every level at once does not work, and the first version did. Adaptation is
+    set by the brightest thing in view, so a 536-nit field in the corner of the eye makes
+    a 0.16-nit patch unjudgeable no matter what the display is doing -- the reading is
+    then about the viewer, not the panel. One field at a time, stepped through, lets the
+    eye settle at each level.
+    """
+    field = context.probe_nits
+    patch = pq_eotf(min(1.0, pq_inverse_eotf(field) + TONE_TRACKING_DELTA_PQ))
+    background = _row(width, context.encode(field))
+
+    # A bar rather than a disc: an edge is easier to catch at threshold than a curve.
+    top = height // 3
+    bottom = height - top
+    left = width // 3
+    span = max(1, width - left * 2)
+    lit = (
+        background[: left * 8]
+        + _pixel(context.encode(patch)) * span
+        + background[(left + span) * 8:]
+    )
+    return b"".join(lit if top <= y < bottom else background for y in range(height))
 
 
 def _tone_tracking_markers(context: PatternContext) -> tuple[Marker, ...]:
-    spans = _spans(1000, TONE_TRACKING_CELLS)
-    top = pq_inverse_eotf(context.ceiling_nits)
-    count = max(1, len(spans) - 1)
-    step = 1.0 / len(spans)
-    labels = []
-    for index in range(len(spans)):
-        nits = pq_eotf(top * (0.10 + 0.80 * (index / count)))
-        text = f"{nits:.3g}" if context.absolute else f"{nits / max(1.0, context.ceiling_nits):.2f}"
-        labels.append(Marker(text=text, x=step * (index + 0.5), y=0.88))
-    return tuple(labels)
+    levels = tone_tracking_levels(context)
+    closest = min(range(len(levels)), key=lambda i: abs(levels[i] - context.probe_nits))
+    reading = (f"{context.probe_nits:.3g} nits" if context.absolute
+               else f"{context.probe_nits / max(1.0, context.ceiling_nits):.3f}")
+    return (
+        Marker(text=f"level {closest + 1} of {len(levels)}", x=0.5, y=0.12, target=True),
+        Marker(text=reading, x=0.5, y=0.92),
+    )
 
 
 def _render_solid_patch(width: int, height: int, context: PatternContext) -> bytes:
@@ -520,19 +537,22 @@ PATTERNS: tuple[Pattern, ...] = (
         key="tone-tracking",
         title="Tone tracking",
         purpose="Names which of the three tone controls is wrong, at normal viewing distance.",
-        criterion="Correct is every faint square equally hard to see -- none obvious, none gone.",
+        criterion="Correct is the bar faintly visible at every level, dark through bright.",
         instructions=(
-            "Each square sits the same perceptual step above its own background, so on a "
-            "display that tracks properly they all look equally faint.\n\n"
-            "Left squares stand out most -> lower Midtone Brightness\n"
-            "Right squares stand out most -> raise Midtone Brightness\n"
-            "Both ends fainter than the middle -> lower Contrast\n"
-            "Both ends clearer than the middle -> raise Contrast\n"
-            "All uniformly too faint or too obvious -> adjust Gamma\n\n"
-            "Tab picks the control, arrows move it. Change one at a time and look again."
+            "One level at a time, because a bright field anywhere on screen makes a dark "
+            "one impossible to judge.\n\n"
+            "1. Up and Down step through the levels. Pause a few seconds at each.\n"
+            "2. Note the levels where the bar vanishes, and where it is obvious.\n"
+            "3. Tab picks a control, Left and Right move it, then walk the levels again.\n\n"
+            "Gone at the dark levels -> raise Midtone Brightness\n"
+            "Gone at the bright levels -> lower it\n"
+            "Gone at both ends -> lower Contrast\n"
+            "Obvious at both ends -> raise Contrast\n"
+            "Wrong everywhere by the same amount -> adjust Gamma"
         ),
         render=_render_tone_tracking,
         markers=_tone_tracking_markers,
+        levels=tone_tracking_levels,
     ),
     Pattern(
         key="grey-staircase",

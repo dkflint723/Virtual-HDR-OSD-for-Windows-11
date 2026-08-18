@@ -15,6 +15,7 @@ from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
 from sdr_hdr_profile_creator.patterns import (
     PATTERNS,
     REFERENCE_WHITE_NITS,
+    TONE_TRACKING_DELTA_PQ,
     PatternContext,
     compose,
     pattern_by_key,
@@ -374,58 +375,68 @@ class ShapeSensitivityTests(unittest.TestCase):
 
 
 class ToneTrackingTests(unittest.TestCase):
-    """Gamma, Midtone Brightness and Contrast all shape the same curve, and none of them
-    has an absolute reference the eye can judge. What the eye does well is compare two
-    things side by side, so every cell holds a patch a fixed perceptual step above its own
-    background: correct tracking makes them all equally faint, and the ways that fails are
-    distinct enough to name which control is wrong."""
+    """One level at a time. Adaptation follows the brightest thing in view, so a bright
+    field anywhere on screen makes a near-threshold patch at the dark end unjudgeable no
+    matter what the display is doing -- the reading then describes the viewer, not the
+    panel. The first version showed all seven at once and was unusable for exactly that."""
 
-    WIDTH, HEIGHT = 700, 300
+    WIDTH, HEIGHT = 400, 300
 
-    def cells(self, context=HDR):
+    def sample(self, level):
+        from dataclasses import replace
+
+        context = replace(HDR, probe_nits=level)
         frame = render(pattern_by_key("tone-tracking"), self.WIDTH, self.HEIGHT, context)
-        found = []
-        for index in range(7):
-            x = int((index + 0.5) * self.WIDTH / 7)
-            background = pixel_at(frame, self.WIDTH, x, 8)[0] * 80.0
-            patch = pixel_at(frame, self.WIDTH, x, self.HEIGHT // 2)[0] * 80.0
-            found.append((background, patch))
-        return found
+        field = pixel_at(frame, self.WIDTH, self.WIDTH // 2, 8)[0] * 80.0
+        bar = pixel_at(frame, self.WIDTH, self.WIDTH // 2, self.HEIGHT // 2)[0] * 80.0
+        return field, bar
 
-    def test_every_cell_uses_the_same_perceptual_step(self):
-        """An unequal step would make the display look wrong where the pattern was."""
-        from sdr_hdr_profile_creator.patterns import TONE_TRACKING_DELTA_PQ
+    def levels(self):
+        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
 
-        deltas = [pq_inverse_eotf(patch) - pq_inverse_eotf(background)
-                  for background, patch in self.cells()]
-        for delta in deltas:
-            self.assertAlmostEqual(delta, TONE_TRACKING_DELTA_PQ, places=3)
-        self.assertLess(max(deltas) - min(deltas), 0.001)
+        return tone_tracking_levels(HDR)
 
-    def test_the_patch_is_always_brighter_than_its_background(self):
-        for background, patch in self.cells():
-            self.assertGreater(patch, background)
+    def test_only_one_level_is_ever_on_screen(self):
+        """The whole point: nothing else in view to drag the eye's adaptation."""
+        from dataclasses import replace
 
-    def test_the_cells_climb_across_the_range(self):
-        backgrounds = [background for background, _ in self.cells()]
-        self.assertEqual(backgrounds, sorted(backgrounds))
-        self.assertLess(backgrounds[0], 1.0, "no cell down in the shadows")
-        self.assertGreater(backgrounds[-1], 100.0, "no cell up in the highlights")
+        context = replace(HDR, probe_nits=self.levels()[0])
+        frame = render(pattern_by_key("tone-tracking"), self.WIDTH, self.HEIGHT, context)
+        distinct = {round(value, 5) for value in channels(frame)}
+        self.assertLessEqual(len(distinct), 2, f"more than a field and a bar: {distinct}")
+
+    def test_the_darkest_level_has_no_bright_field_beside_it(self):
+        field, bar = self.sample(self.levels()[0])
+        self.assertLess(max(field, bar), 1.0, "something bright is sharing the screen")
+
+    def test_the_bar_is_a_near_threshold_lift_at_every_level(self):
+        for level in self.levels():
+            field, bar = self.sample(level)
+            with self.subTest(level=round(level, 3)):
+                self.assertGreater(bar, field)
+                self.assertLess(bar / field, 1.20, "too obvious to register a change")
+
+    def test_the_step_is_the_same_perceptual_size_at_every_level(self):
+        for level in self.levels():
+            field, bar = self.sample(level)
+            with self.subTest(level=round(level, 3)):
+                self.assertAlmostEqual(
+                    pq_inverse_eotf(bar) - pq_inverse_eotf(field),
+                    TONE_TRACKING_DELTA_PQ, places=3)
+
+    def test_the_levels_span_shadows_to_highlights(self):
+        levels = self.levels()
+        self.assertEqual(list(levels), sorted(levels))
+        self.assertLess(levels[0], 1.0)
+        self.assertGreater(levels[-1], 100.0)
 
     def test_nothing_clips_against_the_ceiling(self):
-        """A patch clipped at the top would read as a tracking error that is not there."""
-        for background, patch in self.cells():
-            self.assertLess(patch, HDR.ceiling_nits)
+        for level in self.levels():
+            _field, bar = self.sample(level)
+            self.assertLess(bar, HDR.ceiling_nits)
 
-    def test_it_works_on_a_dim_panel_too(self):
-        dim = PatternContext(is_hdr=True, peak_nits=350.0, max_full_frame_nits=250.0)
-        for background, patch in self.cells(dim):
-            self.assertGreater(patch, background)
-            self.assertLess(patch, dim.ceiling_nits)
-
-    def test_every_cell_is_labelled(self):
-        markers = pattern_by_key("tone-tracking").markers(HDR)
-        self.assertEqual(len(markers), 7)
+    def test_the_pattern_declares_its_levels_so_the_view_can_walk_them(self):
+        self.assertIsNotNone(pattern_by_key("tone-tracking").levels)
 
     def test_the_guidance_names_all_three_controls(self):
         """A pattern that says something is wrong without saying what to move is a riddle."""
@@ -434,6 +445,70 @@ class ToneTrackingTests(unittest.TestCase):
             with self.subTest(control=control):
                 self.assertIn(control, text)
 
-    def test_it_is_judged_at_the_display_not_from_across_the_room(self):
-        """The point of this over gamma-match: large patches, so no viewing distance."""
-        self.assertNotIn("metres", pattern_by_key("tone-tracking").instructions)
+    def test_the_guidance_says_to_walk_the_levels(self):
+        text = pattern_by_key("tone-tracking").instructions
+        self.assertIn("Up and Down", text)
+
+
+class TrackingSensitivityTests(unittest.TestCase):
+    """The step has to sit near the threshold of visibility or the pattern cannot report a
+    change. What the eye sees is the transfer function's slope -- roughly f'(c) times the
+    step -- so an obvious block stays obvious when the curve moves, and reports nothing."""
+
+    def test_the_step_is_within_a_few_just_noticeable_differences(self):
+        from sdr_hdr_profile_creator.patterns import TONE_TRACKING_DELTA_PQ
+
+        # One JND is about one to two ten-bit PQ codes.
+        codes = TONE_TRACKING_DELTA_PQ * 1023
+        self.assertLess(codes, 8, "far above threshold: an obvious block, insensitive to the curve")
+        self.assertGreater(codes, 1.5, "below threshold: nothing to see at all")
+
+    def test_no_patch_is_more_than_a_slight_lift_on_its_background(self):
+        """At 0.03 PQ the darkest patch was 2.35x its surround. That is not a faint patch."""
+        from dataclasses import replace
+
+        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+
+        for level in tone_tracking_levels(HDR):
+            context = replace(HDR, probe_nits=level)
+            frame = render(pattern_by_key("tone-tracking"), 400, 300, context)
+            field = pixel_at(frame, 400, 200, 8)[0]
+            bar = pixel_at(frame, 400, 200, 150)[0]
+            with self.subTest(level=round(level, 3)):
+                self.assertLess(bar / field, 1.20,
+                                "too obvious to register a change in the curve")
+                self.assertGreater(bar / field, 1.01, "too faint to find at all")
+
+    def test_moving_a_control_measurably_changes_the_steps(self):
+        """If the controls did not move these, the pattern could not be used to set them."""
+        from dataclasses import replace
+
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.model import ModeState
+        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+
+        def lifts(contrast):
+            state = ModeState.neutral("HDR")
+            state.contrast = contrast
+            transform = build_transform(state, hdr=True)
+
+            def through(nits):
+                position = pq_inverse_eotf(nits) * (len(transform.red) - 1)
+                low = int(position)
+                high = min(len(transform.red) - 1, low + 1)
+                return pq_eotf(transform.red[low]
+                               + (transform.red[high] - transform.red[low]) * (position - low))
+
+            found = []
+            for level in tone_tracking_levels(HDR):
+                context = replace(HDR, probe_nits=level)
+                frame = render(pattern_by_key("tone-tracking"), 400, 300, context)
+                field = pixel_at(frame, 400, 200, 8)[0] * 80.0
+                bar = pixel_at(frame, 400, 200, 150)[0] * 80.0
+                found.append(through(bar) / through(field))
+            return found
+
+        neutral, altered = lifts(0.0), lifts(-10.0)
+        changed = [abs(a - b) / (a - 1.0) for a, b in zip(neutral, altered)]
+        self.assertGreater(max(changed), 0.05,
+                           "the controls barely move the steps, so nothing can be judged")

@@ -762,3 +762,65 @@ class LiveApplyTests(PatternViewTestCase):
         win.close()
         win.close()
         self.assertEqual(len(closed), 1)
+
+
+class LevelWalkingTests(PatternViewTestCase):
+    """Adaptation follows the brightest thing in view, so a near-threshold judgement has to
+    be made with one level on screen and nothing else competing for the eye."""
+
+    def tracking(self):
+        win = self.window()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "tone-tracking"))
+        return win
+
+    def test_it_starts_in_the_middle_of_the_range(self):
+        """Neither end is a good place to begin: one blinds, the other shows nothing."""
+        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+
+        win = self.tracking()
+        levels = tone_tracking_levels(win._context)
+        self.assertAlmostEqual(win.probe_nits, levels[len(levels) // 2], places=3)
+
+    def test_up_and_down_walk_the_levels(self):
+        win = self.tracking()
+        start = win.probe_nits
+        self.press(win, Qt.Key.Key_Up)
+        self.assertGreater(win.probe_nits, start)
+        self.press(win, Qt.Key.Key_Down)
+        self.assertAlmostEqual(win.probe_nits, start, places=3)
+
+    def test_the_walk_stops_at_both_ends_rather_than_wrapping(self):
+        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+
+        win = self.tracking()
+        levels = tone_tracking_levels(win._context)
+        for _ in range(len(levels) + 5):
+            self.press(win, Qt.Key.Key_Down)
+        self.assertAlmostEqual(win.probe_nits, levels[0], places=3)
+        for _ in range(len(levels) + 5):
+            self.press(win, Qt.Key.Key_Up)
+        self.assertAlmostEqual(win.probe_nits, levels[-1], places=3)
+
+    def test_left_and_right_still_drive_the_sliders(self):
+        """Both jobs the step needs, without a mode to remember."""
+        win = self.tracking()
+        level = win.probe_nits
+        self.press(win, Qt.Key.Key_Right)
+        self.assertNotEqual(self.values["gamma"], 2.2)
+        self.assertAlmostEqual(win.probe_nits, level, places=3)
+
+    def test_a_pattern_with_no_levels_ignores_up_and_down_as_a_walk(self):
+        win = self.window()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "colour-patches"))
+        before = win.probe_nits
+        self.press(win, Qt.Key.Key_Up)
+        self.assertAlmostEqual(win.probe_nits, before, places=6)
+
+    def test_the_overlay_offers_the_walk_only_where_it_exists(self):
+        plain, _, _ = render_overlay(
+            420, 700, pattern_view.pattern_by_key("colour-patches"),
+            context_for(capability(), 240.0), self.controls, 0)
+        stepped, _, _ = render_overlay(
+            420, 700, pattern_view.pattern_by_key("tone-tracking"),
+            context_for(capability(), 240.0), self.controls, 0)
+        self.assertNotEqual(plain, stepped)
