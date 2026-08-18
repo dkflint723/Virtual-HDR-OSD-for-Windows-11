@@ -1510,12 +1510,25 @@ class MainWindow(FluentWidget):
         field = self.MEASUREMENT_FIELDS.get(pattern_key)
         if field is None:
             return
-        value = float(nits)
+        measured = float(nits)
         if field == "minimum_luminance_nits":
-            value = max(0.0, min(100.0, value))
+            value = max(0.0, min(100.0, measured))
         else:
-            value = max(80.0, min(10000.0, value))
+            value = max(80.0, min(10000.0, measured))
         setattr(self.state.hdr, field, value)
+        # The bounds keep the ICC fields sane, but a reading that hits one is no longer
+        # the reading that was taken. Silently storing a different number than the user
+        # measured is the one thing a measurement step must never do.
+        if abs(value - measured) > 1e-6:
+            self._save_state_soon()
+            self._update_activity_bar()
+            self._set_status(
+                f"Measured {measured:g} nits, which is outside the range a profile can "
+                f"carry for {field.replace('_', ' ')}. Stored as {value:g}. Check the "
+                "reading before applying.",
+                "warning",
+            )
+            return
         # Full frame cannot exceed peak; a panel that did that would be reporting fiction.
         if self.state.hdr.full_frame_luminance_nits > self.state.hdr.peak_luminance_nits:
             self.state.hdr.full_frame_luminance_nits = self.state.hdr.peak_luminance_nits

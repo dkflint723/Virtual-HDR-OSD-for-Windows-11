@@ -1684,3 +1684,36 @@ class PanelLuminanceFallbackTests(WindowTestCase):
         path = self.plain_profile()
         with mock.patch.object(self.window, "_selected_display", lambda: None):
             self.window._load_profile_from_path(path)  # must not raise
+
+
+class ClampedMeasurementTests(WindowTestCase):
+    """A reading that hits a bound is no longer the reading that was taken. Storing a
+    different number than the user measured, without saying so, is the one thing a
+    measurement step must never do."""
+
+    def test_a_reading_below_the_floor_is_reported(self):
+        """60 nits full-frame is plausible on a dim panel and became 80 in silence."""
+        self.window._record_measurement("full-frame-white", 60.0)
+        text = self.window.status_label.text()
+        self.assertIn("60", text)
+        self.assertIn("80", text)
+
+    def test_a_reading_above_the_ceiling_is_reported(self):
+        self.window._record_measurement("peak-white", 50000.0)
+        self.assertIn("outside the range", self.window.status_label.text())
+
+    def test_the_stored_value_is_still_bounded(self):
+        """The ICC fields have limits; saying so is the fix, not removing them."""
+        self.window._record_measurement("peak-white", 50000.0)
+        self.assertLessEqual(self.window.state.hdr.peak_luminance_nits, 10000.0)
+
+    def test_a_reading_inside_the_range_is_not_flagged(self):
+        self.window._record_measurement("peak-white", 940.0)
+        text = self.window.status_label.text()
+        self.assertNotIn("outside the range", text)
+        self.assertIn("Recorded", text)
+
+    def test_black_level_uses_its_own_bounds(self):
+        """Zero is a legitimate black level on an emissive panel, not a clamp."""
+        self.window._record_measurement("black-level", 0.0)
+        self.assertNotIn("outside the range", self.window.status_label.text())
