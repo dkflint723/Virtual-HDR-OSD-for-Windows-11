@@ -343,3 +343,31 @@ class PqHelperSanityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ShapeSensitivityTests(unittest.TestCase):
+    """How much brighter the shape is than its surround IS the sensitivity of the
+    measurement: the two merge only once the display can no longer keep them apart, so a
+    large gap merges long after the real limit and reports a threshold that is too high."""
+
+    def test_the_gap_is_small_enough_to_find_a_real_limit(self):
+        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+
+        self.assertLessEqual(SHAPE_CONTRAST, 1.10,
+                             "a coarse gap puts the threshold well above where a panel clips")
+        self.assertGreater(SHAPE_CONTRAST, 1.02,
+                           "too fine to see means no threshold can be found at all")
+
+    def test_both_clipping_patterns_use_the_same_gap(self):
+        """They ask the same question, so they must ask it with the same sensitivity."""
+        from dataclasses import replace
+
+        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+
+        context = replace(HDR, probe_nits=300.0)
+        for key in ("peak-white", "full-frame-white"):
+            with self.subTest(pattern=key):
+                frame = render(pattern_by_key(key), 200, 200, context)
+                surround = pixel_at(frame, 200, 2, 2)[0]
+                shape = pixel_at(frame, 200, 100, 100)[0]
+                self.assertAlmostEqual(shape / surround, SHAPE_CONTRAST, places=2)

@@ -1483,3 +1483,35 @@ class SliderControlTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClippingPointReportingTests(WindowTestCase):
+    """These steps find where the display stops separating two values -- a clipping point,
+    which is what Windows HDR Calibration records too. It is not the same quantity as
+    sustained full-field luminance, and equal readings are a real result about the
+    display's tone-mapping curve rather than a failed measurement."""
+
+    def test_a_full_frame_reading_near_peak_is_explained_not_doubted(self):
+        self.window._record_measurement("peak-white", 1080.0)
+        self.window._record_measurement("full-frame-white", 1050.0)
+        text = self.window.status_label.text()
+        self.assertIn("genuine clipping point", text)
+        self.assertNotIn("guess", text.lower())
+
+    def test_a_plausible_reading_is_not_flagged(self):
+        """QD-OLED full-field really is a fraction of peak; that must read as success."""
+        self.window._record_measurement("peak-white", 1080.0)
+        self.window._record_measurement("full-frame-white", 250.0)
+        self.assertNotIn("clipping point", self.window.status_label.text())
+        self.assertIn("Recorded", self.window.status_label.text())
+
+    def test_the_reading_is_still_stored_rather_than_discarded(self):
+        """It is the user's measurement; the app says it is doubtful, not that it is void."""
+        self.window._record_measurement("peak-white", 1080.0)
+        self.window._record_measurement("full-frame-white", 1050.0)
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 1050.0)
+
+    def test_peak_alone_is_never_flagged(self):
+        """Only the pair is suspicious; a high peak on its own is just a bright panel."""
+        self.window._record_measurement("peak-white", 1500.0)
+        self.assertNotIn("clipping point", self.window.status_label.text())

@@ -99,6 +99,12 @@ class Pattern:
 # direction rather than merely a failure.
 _NEAR_BLACK_LEVELS: tuple[float, ...] = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
 
+# How much brighter the shape is than its surround in the clipping tests. This is the
+# sensitivity of the measurement: the two merge once the display can no longer keep them
+# apart, so a large gap only merges long after the real limit. 20% was far too coarse and
+# put the threshold well above where a panel actually runs out.
+SHAPE_CONTRAST = 1.08
+
 GAMMA_CANDIDATES: tuple[tuple[float, str], ...] = (
     (0.70, "much darker"),
     (0.85, "darker"),
@@ -151,7 +157,7 @@ def _render_peak_clip(width: int, height: int, context: PatternContext) -> bytes
     """A shape slightly brighter than a bright surround, to find where the panel clips.\n\nRaising both together, the shape separates from its surround until the display runs\nout of range, at which point the two clip to the same output and the shape disappears.\nThat level is peak luminance, measured rather than taken from metadata that on this\nkind of panel is a specification.\n"""
     field = context.probe_nits
     return _shape_on_field(
-        width, height, context.encode(field), context.encode(field * 1.20)
+        width, height, context.encode(field), context.encode(field * SHAPE_CONTRAST)
     )
 
 

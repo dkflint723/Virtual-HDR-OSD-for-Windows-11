@@ -604,7 +604,10 @@ class FullFrameCriterionTests(PatternViewTestCase):
         width, height = win.device_size()
         corner = struct.unpack_from("<4e", frame, 0)[0]
         centre = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)[0]
-        self.assertGreater(centre, corner * 1.1, "nothing to separate, so nothing to judge")
+        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+
+        self.assertAlmostEqual(centre / corner, SHAPE_CONTRAST, places=2,
+                               msg="nothing to separate, so nothing to judge")
 
     def test_it_matches_the_criterion_of_the_step_before_it(self):
         """Two steps that ask the same question should ask it the same way."""
