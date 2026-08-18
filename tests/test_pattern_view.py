@@ -1097,3 +1097,84 @@ class OverlayFittingTests(PatternViewTestCase):
         marked = bytearray(blank)
         marked[(4 * 10 + 2) * 4 + 3] = 255
         self.assertEqual(pattern_view._ink_extent(bytes(marked), 10, 10), 4)
+
+
+class MouseDraggingTests(PatternViewTestCase):
+    """A cursor was hidden here because of the light it adds. A black pointer with a grey
+    edge, drawn by the compositor at SDR white, works out around nine nits over a few
+    hundred pixels -- against a patch that can be five hundred across a million."""
+
+    def setUp(self):
+        super().setUp()
+        self.held = {"gamma": 2.2}
+        self.controls = [
+            ControlBinding(
+                "gamma", "Gamma", lambda: self.held["gamma"],
+                lambda delta: self.held.__setitem__("gamma", self.held["gamma"] + delta),
+                minimum=1.6, maximum=3.0,
+                write=lambda value: self.held.__setitem__("gamma", value),
+            ),
+        ]
+
+    def tracking(self):
+        win = self.window(width=1600, height=900)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "tone-tracking"))
+        win.build_frame()
+        return win
+
+    def test_the_cursor_is_dark_rather_than_hidden(self):
+        cursor = pattern_view.dim_cursor()
+        self.assertFalse(cursor.pixmap().isNull())
+        image = cursor.pixmap().toImage()
+        lit = [image.pixelColor(x, y) for x in range(image.width())
+               for y in range(image.height()) if image.pixelColor(x, y).alpha() > 0]
+        self.assertTrue(lit, "the cursor is empty")
+        self.assertLess(max(colour.red() for colour in lit), 140,
+                        "a bright cursor is exactly what was being avoided")
+
+    def test_tracks_report_where_they_were_drawn(self):
+        """Recomputing this layout in the view would drift from the one that drew it."""
+        win = self.tracking()
+        self.assertTrue(win._tracks)
+        key, _x, _y, width, _h = win._tracks[0]
+        self.assertEqual(key, "gamma")
+        self.assertGreater(width, 0)
+
+    def test_dragging_sets_the_value_from_the_position(self):
+        win = self.tracking()
+        key, track_x, _y, track_width, _h = win._tracks[0]
+        origin_x, _origin_y = win._overlay_origin
+        win._set_from_track(key, origin_x + track_x + track_width * 0.75)
+        self.assertAlmostEqual(self.held["gamma"], 1.6 + 0.75 * 1.4, places=2)
+
+    def test_dragging_past_either_end_clamps(self):
+        win = self.tracking()
+        key, track_x, _y, track_width, _h = win._tracks[0]
+        origin_x, _origin_y = win._overlay_origin
+        win._set_from_track(key, origin_x + track_x + track_width * 5)
+        self.assertAlmostEqual(self.held["gamma"], 3.0, places=3)
+        win._set_from_track(key, origin_x + track_x - track_width * 5)
+        self.assertAlmostEqual(self.held["gamma"], 1.6, places=3)
+
+    def test_a_point_away_from_every_track_hits_nothing(self):
+        win = self.tracking()
+        self.assertIsNone(win._track_at(5, 5))
+
+    def test_a_level_driven_pattern_offers_its_probe_track(self):
+        win = self.window(width=1600, height=900)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        win.build_frame()
+        self.assertTrue(any(key == pattern_view.PROBE_TRACK_KEY for key, *_ in win._tracks))
+
+    def test_the_probe_track_moves_in_pq_not_nits(self):
+        """A linear bar would spend nearly its whole length on highlights."""
+        win = self.window(width=1600, height=900)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        win.build_frame()
+        entry = next(t for t in win._tracks if t[0] == pattern_view.PROBE_TRACK_KEY)
+        _key, track_x, _y, track_width, _h = entry
+        origin_x, _origin_y = win._overlay_origin
+        win._set_from_track(pattern_view.PROBE_TRACK_KEY, origin_x + track_x + track_width * 0.5)
+        midpoint = win.probe_nits
+        self.assertLess(midpoint, 500.0, "halfway is nowhere near halfway in nits")
+        self.assertGreater(midpoint, 10.0)

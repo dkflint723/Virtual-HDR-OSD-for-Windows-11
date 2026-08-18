@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from typing import Callable, Sequence
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QImage, QPainter
+from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
 from .gamma_correction import pq_eotf, pq_inverse_eotf
@@ -52,6 +52,9 @@ PROBE_STEP_PQ = 0.004
 
 # The finished screen is read, not measured against, so it does not need to hide at 12 nits.
 SUMMARY_NITS = 40.0
+
+# Identifies the probe-level track among the control tracks when hit-testing.
+PROBE_TRACK_KEY = "probe-level"
 
 
 @dataclass(frozen=True)
@@ -123,6 +126,7 @@ def render_overlay(
     step: int | None = None,
     total: int = 0,
     editing: str | None = None,
+    tracks: list[tuple[str, int, int, int, int]] | None = None,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -200,7 +204,7 @@ def render_overlay(
         painter.drawText(margin, y, scale_note)
         y += spacing(30)
 
-        def draw_track(top: int, fraction: float, active: bool) -> None:
+        def draw_track(top: int, fraction: float, active: bool, key: str = "") -> None:
             """A bar showing where a value sits in its range.
 
             A number on its own says nothing about how much travel is left in either
@@ -217,6 +221,10 @@ def render_overlay(
             painter.fillRect(max(margin, margin + filled - handle), top - spacing(3),
                              handle * 2, height_px + spacing(6),
                              QColor(255, 255, 255, 255) if active else QColor(150, 150, 150, 255))
+            if tracks is not None and key:
+                # Reported rather than recomputed by the caller: two copies of this layout
+                # would drift the moment either side changed.
+                tracks.append((key, margin, top - spacing(8), track_width, height_px + spacing(16)))
 
         if pattern.level_driven:
             # The display holds still and the pattern moves, so the sliders are not what
@@ -229,7 +237,7 @@ def render_overlay(
             y += spacing(10)
             # PQ, not nits: a linear bar would spend nearly all its length on highlights
             # and show no movement at all through the range where thresholds are found.
-            draw_track(y, pq_inverse_eotf(context.probe_nits), True)
+            draw_track(y, pq_inverse_eotf(context.probe_nits), True, key=PROBE_TRACK_KEY)
             y += spacing(22)
             recorded = accepted.get(pattern.key) if accepted else None
             if recorded is not None:
@@ -249,7 +257,7 @@ def render_overlay(
                 painter.drawText(margin, y, f"{'▸ ' if selected else '  '}{control.label}")
                 shown = (editing + "_") if (selected and editing is not None) else control.formatted()
                 painter.drawText(margin, y + spacing(18), f"   {shown}")
-                draw_track(y + spacing(30), control.fraction(), selected)
+                draw_track(y + spacing(30), control.fraction(), selected, key=control.key)
                 y += spacing(56)
 
         y += spacing(10)
@@ -285,6 +293,38 @@ def render_overlay(
     return (bytes(image.constBits()), width, height)
 
 
+def dim_cursor(size: int = 20) -> QCursor:
+    """A black pointer with a faint outline, for a screen being measured.
+
+    The usual objection to a cursor here is the light it adds. This one is black with a
+    grey edge, and the compositor draws it at the SDR white level, so the outline works
+    out around nine nits over a few hundred pixels -- against a patch that can be five
+    hundred nits across a million, which is nothing. It also lives over the guidance strip
+    rather than the patch. Hiding the cursor entirely was the safer default while there
+    was nothing to point at; now there is.
+    """
+    pixmap = QPixmap(size, size)
+    pixmap.fill(QColor(0, 0, 0, 0))
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        arrow = [
+            (1, 1), (1, size - 6), (int(size * 0.30), int(size * 0.68)),
+            (int(size * 0.46), size - 2), (int(size * 0.62), int(size * 0.86)),
+            (int(size * 0.46), int(size * 0.60)), (size - 6, int(size * 0.58)),
+        ]
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QPolygon
+
+        polygon = QPolygon([QPoint(x, y) for x, y in arrow])
+        painter.setBrush(QColor(0, 0, 0, 255))
+        painter.setPen(QPen(QColor(90, 90, 90, 255), 1))
+        painter.drawPolygon(polygon)
+    finally:
+        painter.end()
+    return QCursor(pixmap, 1, 1)
+
+
 def _ink_extent(raw: bytes, width: int, height: int) -> int:
     """Lowest row with anything drawn on it, or -1 for an empty image."""
     alpha = raw[3::4]
@@ -304,6 +344,7 @@ def render_overlay_fitted(
     active: int,
     *,
     scale: float = 1.0,
+    tracks: list[tuple[str, int, int, int, int]] | None = None,
     **kwargs,
 ) -> tuple[bytes, int, int]:
     """Render the guidance strip at the largest scale whose content actually fits.
@@ -323,8 +364,10 @@ def render_overlay_fitted(
     if 0 < needed > height:
         # A little under the exact ratio, since text does not shrink perfectly linearly.
         scale = max(0.55, scale * (height / needed) * 0.97)
+    if tracks is not None:
+        tracks.clear()
     return render_overlay(width, height, pattern, context, controls, active,
-                          scale=scale, **kwargs)
+                          scale=scale, tracks=tracks, **kwargs)
 
 
 def render_markers(
@@ -382,7 +425,7 @@ class PatternWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)
         self.setWindowTitle("Virtual HDR OSD - calibration patterns")
-        self.setCursor(Qt.CursorShape.BlankCursor)
+        self.setCursor(dim_cursor())
 
         self._capability = capability
         self._assumed_peak = capability is not None and not capability.luminance_is_credible
@@ -398,6 +441,9 @@ class PatternWindow(QWidget):
         self._apply = apply
         self.applied = False
         self._editing: str | None = None
+        self._tracks: list[tuple[str, int, int, int, int]] = []
+        self._overlay_origin = (0, 0)
+        self._dragging: str | None = None
         # Guided by default. Nine patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
@@ -779,11 +825,18 @@ class PatternWindow(QWidget):
         # Text is sized against a reference width so it stays the same physical size as
         # resolution grows, rather than shrinking into illegibility on a 4K panel.
         overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * OVERLAY_WIDTH_FRACTION)))
+        overlay_height = min(int(height * 0.85), height)
         overlay = render_overlay_fitted(
-            overlay_width, min(int(height * 0.85), height),
+            overlay_width, overlay_height,
             pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
             step=self.guided_step, total=len(GUIDED_SEQUENCE), editing=self._editing,
+            tracks=self._tracks,
+        )
+        # Where compose will put the strip, so a click can be matched to a track.
+        self._overlay_origin = (
+            (width - overlay_width) if self._overlay_side == "right" else 0,
+            max(0, (height - overlay_height) // 2),
         )
         block_width, block_height = window_size(
             width, height,
@@ -820,6 +873,56 @@ class PatternWindow(QWidget):
             self.refresh()
 
     # -- input -----------------------------------------------------------------------
+
+    # -- mouse ------------------------------------------------------------------------
+
+    def _track_at(self, x: float, y: float) -> str | None:
+        """Which slider, if any, sits under a point given in Qt's logical coordinates."""
+        ratio = self.devicePixelRatioF() or 1.0
+        left, top = self._overlay_origin
+        device_x, device_y = x * ratio - left, y * ratio - top
+        for key, tx, ty, tw, th in self._tracks:
+            if tx <= device_x <= tx + tw and ty <= device_y <= ty + th:
+                return key
+        return None
+
+    def _set_from_track(self, key: str, x: float) -> None:
+        ratio = self.devicePixelRatioF() or 1.0
+        left, _top = self._overlay_origin
+        for entry, tx, _ty, tw, _th in self._tracks:
+            if entry != key or tw <= 0:
+                continue
+            fraction = max(0.0, min(1.0, ((x * ratio - left) - tx) / tw))
+            if key == PROBE_TRACK_KEY:
+                self.set_probe(min(PQ_MAX_NITS, pq_eotf(fraction)))
+            else:
+                control = next((c for c in self._controls if c.key == key), None)
+                if control is not None:
+                    control.set_value(control.minimum
+                                      + fraction * (control.maximum - control.minimum))
+                    self.refresh()
+            return
+
+    def mousePressEvent(self, event):
+        position = event.position()
+        key = self._track_at(position.x(), position.y())
+        if key is None:
+            return
+        # Clicking a control's track also selects it, so the arrows and Enter that follow
+        # act on the one just touched rather than whatever was selected before.
+        for index, control in enumerate(self._controls):
+            if control.key == key:
+                self._active = index
+                break
+        self._dragging = key
+        self._set_from_track(key, position.x())
+
+    def mouseMoveEvent(self, event):
+        if self._dragging is not None:
+            self._set_from_track(self._dragging, event.position().x())
+
+    def mouseReleaseEvent(self, _event):
+        self._dragging = None
 
     def keyPressEvent(self, event):
         if self._editing is not None:
