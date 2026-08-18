@@ -190,6 +190,37 @@ def _render_neutral_ramp(width: int, height: int, context: PatternContext) -> by
     return row * height
 
 
+def _render_peak_window(width: int, height: int, context: PatternContext) -> bytes:
+    """A small bright window on black, which is the only honest way to show peak.
+
+    Filling the screen with white does not measure peak luminance on any panel worth
+    calibrating. An OLED's automatic brightness limiter drops full-field output to a
+    fraction of what a small window sustains, and the reading also drifts for seconds
+    after the patch appears. A tenth of the screen area is the conventional compromise:
+    small enough that the limiter barely engages, large enough to fill a meter's aperture
+    and to judge by eye.
+
+    The surround is true black rather than dark grey, because on an emissive panel a lit
+    surround is itself part of what triggers the limiter.
+    """
+    fraction = 0.10
+    side = fraction ** 0.5
+    window_width = max(1, min(width, round(width * side)))
+    window_height = max(1, min(height, round(height * side)))
+    left = (width - window_width) // 2
+    top = (height - window_height) // 2
+
+    black = _row(width, 0.0)
+    lit = (
+        black[: left * 8]
+        + _pixel(context.encode(context.ceiling_nits)) * window_width
+        + black[(left + window_width) * 8:]
+    )
+    return b"".join(
+        lit if top <= y < top + window_height else black for y in range(height)
+    )
+
+
 # Primaries, secondaries, and two memory colours the eye judges harshly.
 _COLOUR_PATCHES: Sequence[tuple[str, tuple[float, float, float]]] = (
     ("red", (1.0, 0.0, 0.0)),
@@ -273,6 +304,18 @@ PATTERNS: tuple[Pattern, ...] = (
             "per-channel Fine Balance trims correct."
         ),
         render=_render_neutral_ramp,
+    ),
+    Pattern(
+        key="peak-window",
+        title="Peak window",
+        purpose="Shows peak luminance without the panel dimming itself to produce it.",
+        instructions=(
+            "A tenth of the screen, on black. Give it several seconds to settle before "
+            "judging: emissive panels drift after a bright patch appears. If a filled "
+            "white screen looks dimmer than this window, that is automatic brightness "
+            "limiting, not a fault, and it is why peak is never measured full-field."
+        ),
+        render=_render_peak_window,
     ),
     Pattern(
         key="colour-patches",

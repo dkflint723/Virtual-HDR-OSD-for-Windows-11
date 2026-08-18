@@ -203,6 +203,65 @@ class ColourPatchTests(unittest.TestCase):
         self.assertEqual((green, blue), (0.0, 0.0))
 
 
+class PeakWindowTests(unittest.TestCase):
+    """Peak cannot be shown full-field: the panel dims itself to produce it."""
+
+    WIDTH, HEIGHT = 400, 300
+
+    def setUp(self):
+        self.frame = render(pattern_by_key("peak-window"), self.WIDTH, self.HEIGHT, HDR)
+
+    def test_the_window_covers_about_a_tenth_of_the_screen(self):
+        lit = sum(1 for value in channels(self.frame) if value > 0.0)
+        ratio = lit / (self.WIDTH * self.HEIGHT)
+        self.assertAlmostEqual(ratio, 0.10, delta=0.01)
+
+    def test_the_surround_is_true_black(self):
+        """A lit surround is itself part of what engages the brightness limiter."""
+        for x, y in ((0, 0), (self.WIDTH - 1, 0), (0, self.HEIGHT - 1), (5, 5)):
+            with self.subTest(corner=(x, y)):
+                self.assertEqual(pixel_at(self.frame, self.WIDTH, x, y)[0], 0.0)
+
+    def test_the_window_is_at_the_panel_peak(self):
+        centre = pixel_at(self.frame, self.WIDTH, self.WIDTH // 2, self.HEIGHT // 2)[0]
+        self.assertAlmostEqual(centre, HDR.encode(1080.0), places=3)
+
+    def test_the_window_is_centred(self):
+        row = [pixel_at(self.frame, self.WIDTH, x, self.HEIGHT // 2)[0] for x in range(self.WIDTH)]
+        lit = [x for x, value in enumerate(row) if value > 0.0]
+        self.assertTrue(lit)
+        self.assertAlmostEqual((lit[0] + lit[-1]) / 2, (self.WIDTH - 1) / 2, delta=1.5)
+
+    def test_a_degenerate_surface_still_renders(self):
+        self.assertEqual(len(render(pattern_by_key("peak-window"), 1, 1, HDR)), 8)
+
+
+class DeclaredMetadataTests(unittest.TestCase):
+    """A panel quoting the same number for peak and full frame is quoting a spec."""
+
+    def test_equal_peak_and_full_frame_is_flagged(self):
+        from sdr_hdr_profile_creator.hdr_display import DisplayCapability
+
+        from tests.test_hdr_display import capability
+
+        panel = capability(max_nits=1080.0, max_full_frame_nits=1080.0)
+        self.assertIsInstance(panel, DisplayCapability)
+        self.assertTrue(panel.luminance_looks_declared)
+
+    def test_a_panel_reporting_a_real_full_frame_figure_is_not_flagged(self):
+        from tests.test_hdr_display import capability
+
+        self.assertFalse(capability(max_nits=1080.0, max_full_frame_nits=250.0)
+                         .luminance_looks_declared)
+
+    def test_a_dim_panel_is_not_flagged(self):
+        """Equal figures are plausible when there is no headroom to throttle."""
+        from tests.test_hdr_display import capability
+
+        self.assertFalse(capability(max_nits=350.0, max_full_frame_nits=350.0)
+                         .luminance_looks_declared)
+
+
 class GuidanceTests(unittest.TestCase):
     """A pattern nobody can act on is decoration."""
 
