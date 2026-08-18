@@ -203,7 +203,8 @@ def render_overlay(
         y += spacing(10)
         painter.setPen(QColor(130, 130, 130, 255))
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
-        lines = [f"1-{len(PATTERNS)}   pattern"]
+        keys = "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
+        lines = [f"{keys}   pattern"]
         if not pattern.level_driven and controls:
             lines.append("Tab   next control")
         lines += [adjust]
@@ -571,8 +572,9 @@ class PatternWindow(QWidget):
         if key == Qt.Key.Key_Escape:
             self.close()
             return
-        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9:
-            index = key - Qt.Key.Key_1
+        if Qt.Key.Key_1 <= key <= Qt.Key.Key_9 or key == Qt.Key.Key_0:
+            # 0 is the tenth, so a list longer than nine is still fully reachable.
+            index = 9 if key == Qt.Key.Key_0 else key - Qt.Key.Key_1
             if index < len(PATTERNS):
                 self.select_pattern(index)
             return

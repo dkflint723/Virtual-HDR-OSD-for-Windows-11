@@ -371,3 +371,69 @@ class ShapeSensitivityTests(unittest.TestCase):
                 surround = pixel_at(frame, 200, 2, 2)[0]
                 shape = pixel_at(frame, 200, 100, 100)[0]
                 self.assertAlmostEqual(shape / surround, SHAPE_CONTRAST, places=2)
+
+
+class ToneTrackingTests(unittest.TestCase):
+    """Gamma, Midtone Brightness and Contrast all shape the same curve, and none of them
+    has an absolute reference the eye can judge. What the eye does well is compare two
+    things side by side, so every cell holds a patch a fixed perceptual step above its own
+    background: correct tracking makes them all equally faint, and the ways that fails are
+    distinct enough to name which control is wrong."""
+
+    WIDTH, HEIGHT = 700, 300
+
+    def cells(self, context=HDR):
+        frame = render(pattern_by_key("tone-tracking"), self.WIDTH, self.HEIGHT, context)
+        found = []
+        for index in range(7):
+            x = int((index + 0.5) * self.WIDTH / 7)
+            background = pixel_at(frame, self.WIDTH, x, 8)[0] * 80.0
+            patch = pixel_at(frame, self.WIDTH, x, self.HEIGHT // 2)[0] * 80.0
+            found.append((background, patch))
+        return found
+
+    def test_every_cell_uses_the_same_perceptual_step(self):
+        """An unequal step would make the display look wrong where the pattern was."""
+        from sdr_hdr_profile_creator.patterns import TONE_TRACKING_DELTA_PQ
+
+        deltas = [pq_inverse_eotf(patch) - pq_inverse_eotf(background)
+                  for background, patch in self.cells()]
+        for delta in deltas:
+            self.assertAlmostEqual(delta, TONE_TRACKING_DELTA_PQ, places=3)
+        self.assertLess(max(deltas) - min(deltas), 0.001)
+
+    def test_the_patch_is_always_brighter_than_its_background(self):
+        for background, patch in self.cells():
+            self.assertGreater(patch, background)
+
+    def test_the_cells_climb_across_the_range(self):
+        backgrounds = [background for background, _ in self.cells()]
+        self.assertEqual(backgrounds, sorted(backgrounds))
+        self.assertLess(backgrounds[0], 1.0, "no cell down in the shadows")
+        self.assertGreater(backgrounds[-1], 100.0, "no cell up in the highlights")
+
+    def test_nothing_clips_against_the_ceiling(self):
+        """A patch clipped at the top would read as a tracking error that is not there."""
+        for background, patch in self.cells():
+            self.assertLess(patch, HDR.ceiling_nits)
+
+    def test_it_works_on_a_dim_panel_too(self):
+        dim = PatternContext(is_hdr=True, peak_nits=350.0, max_full_frame_nits=250.0)
+        for background, patch in self.cells(dim):
+            self.assertGreater(patch, background)
+            self.assertLess(patch, dim.ceiling_nits)
+
+    def test_every_cell_is_labelled(self):
+        markers = pattern_by_key("tone-tracking").markers(HDR)
+        self.assertEqual(len(markers), 7)
+
+    def test_the_guidance_names_all_three_controls(self):
+        """A pattern that says something is wrong without saying what to move is a riddle."""
+        text = pattern_by_key("tone-tracking").instructions
+        for control in ("Midtone Brightness", "Contrast", "Gamma"):
+            with self.subTest(control=control):
+                self.assertIn(control, text)
+
+    def test_it_is_judged_at_the_display_not_from_across_the_room(self):
+        """The point of this over gamma-match: large patches, so no viewing distance."""
+        self.assertNotIn("metres", pattern_by_key("tone-tracking").instructions)
