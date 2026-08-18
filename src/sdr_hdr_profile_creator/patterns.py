@@ -1,4 +1,24 @@
-"""Calibration test patterns, rendered as scRGB frames for :mod:`hdr_display`.\n\nEvery pattern is specified in **absolute nits** and encoded at render time, because what\na value means depends on the display:\n\n* On an HDR output, scRGB is scene-referred and 1.0 is 80 nits, so a luminance maps\ndirectly and patterns can address the full ST.2084 range.\n* On an SDR output, scRGB is display-referred and 1.0 is that display's reference white.\nAbsolute luminance is simply not addressable, so the same pattern is rendered relative\nto reference white and anything above it clips. :attr:`PatternContext.absolute` says\nwhich of the two happened, so the UI can label a reading as real nits or as a ratio\nrather than quietly implying precision it does not have.\n\nscRGB is linear light, which matters for more than encoding: the gamma-match pattern\nbelow relies on two interleaved lines averaging optically to their arithmetic mean, and\nthat is only true in a linear signal.\n\nRendering happens straight into a swapchain buffer sized in *device* pixels. That is not\nan incidental detail -- a display at 125% scaling would resample a one-pixel line drawn\nthrough Qt, and a resampled gamma-match pattern reports a gamma that is simply wrong.\n"""
+"""Calibration test patterns, rendered as scRGB frames for :mod:`hdr_display`.
+
+Every pattern is specified in **absolute nits** and encoded at render time, because what
+a value means depends on the display:
+
+* On an HDR output, scRGB is scene-referred and 1.0 is 80 nits, so a luminance maps
+directly and patterns can address the full ST.2084 range.
+* On an SDR output, scRGB is display-referred and 1.0 is that display's reference white.
+Absolute luminance is simply not addressable, so the same pattern is rendered relative
+to reference white and anything above it clips. :attr:`PatternContext.absolute` says
+which of the two happened, so the UI can label a reading as real nits or as a ratio
+rather than quietly implying precision it does not have.
+
+scRGB is linear light, which matters for more than encoding: the gamma-match pattern
+below relies on two interleaved lines averaging optically to their arithmetic mean, and
+that is only true in a linear signal.
+
+Rendering happens straight into a swapchain buffer sized in *device* pixels. That is not
+an incidental detail -- a display at 125% scaling would resample a one-pixel line drawn
+through Qt, and a resampled gamma-match pattern reports a gamma that is simply wrong.
+"""
 
 from __future__ import annotations
 
@@ -36,7 +56,11 @@ class PatternContext:
 
     @property
     def ceiling_nits(self) -> float:
-        """The brightest luminance worth asking for on this display.\n\nAbove the panel's peak everything is rolled off or clipped, so a pattern that\nkeeps climbing past it invites chasing a difference that cannot exist.\n"""
+        """The brightest luminance worth asking for on this display.
+
+        Above the panel's peak everything is rolled off or clipped, so a pattern that
+        keeps climbing past it invites chasing a difference that cannot exist.
+        """
         return self.peak_nits if self.is_hdr else self.sdr_white_nits
 
     def encode(self, nits: float) -> float:
@@ -61,7 +85,13 @@ def _row(width: int, value: float) -> bytes:
 
 
 def _spans(width: int, count: int) -> list[int]:
-    """Split ``width`` into ``count`` spans summing to exactly ``width``.\n\nGiving the remainder to the last cell looks fine until the surface is narrower than\nthe cell count, at which point that cell gets a negative width, silently renders as\nnothing, and the frame comes out the wrong size. Cells are dropped instead, and the\nremainder is spread over the leading cells so no single one is visibly wider.\n"""
+    """Split ``width`` into ``count`` spans summing to exactly ``width``.
+
+    Giving the remainder to the last cell looks fine until the surface is narrower than
+    the cell count, at which point that cell gets a negative width, silently renders as
+    nothing, and the frame comes out the wrong size. Cells are dropped instead, and the
+    remainder is spread over the leading cells so no single one is visibly wider.
+    """
     count = max(1, min(int(count), max(1, int(width))))
     base, remainder = divmod(int(width), count)
     return [base + (1 if index < remainder else 0) for index in range(count)]
@@ -69,7 +99,12 @@ def _spans(width: int, count: int) -> list[int]:
 
 @dataclass(frozen=True)
 class Marker:
-    """A label drawn into the pattern itself, positioned as a fraction of the window.\n\nPatterns without these are unusable by eye. A grey ramp shows what the display is\ndoing but says nothing about what it should be doing, and a viewer with no target is\nnot calibrating, they are looking at grey.\n"""
+    """A label drawn into the pattern itself, positioned as a fraction of the window.
+
+    Patterns without these are unusable by eye. A grey ramp shows what the display is
+    doing but says nothing about what it should be doing, and a viewer with no target is
+    not calibrating, they are looking at grey.
+    """
 
     text: str
     x: float
@@ -79,7 +114,17 @@ class Marker:
 
 @dataclass(frozen=True)
 class Pattern:
-    """One test pattern, plus everything needed to act on what it shows.\n\n``criterion`` is the single sentence describing what correct looks like. It is\nseparate from ``instructions`` because it is the thing a user checks against, and\nburying it in a paragraph is how a pattern ends up being stared at rather than read.\n\n``level_driven`` patterns are the ones where the *pattern* moves rather than the\ndisplay: the user drives ``PatternContext.probe_nits`` until a shape disappears, and\nthat level is the measurement. Fixed patterns are the ones where the display moves and\nthe pattern holds still.\n"""
+    """One test pattern, plus everything needed to act on what it shows.
+
+    ``criterion`` is the single sentence describing what correct looks like. It is
+    separate from ``instructions`` because it is the thing a user checks against, and
+    burying it in a paragraph is how a pattern ends up being stared at rather than read.
+
+    ``level_driven`` patterns are the ones where the *pattern* moves rather than the
+    display: the user drives ``PatternContext.probe_nits`` until a shape disappears, and
+    that level is the measurement. Fixed patterns are the ones where the display moves and
+    the pattern holds still.
+    """
 
     key: str
     title: str
@@ -115,8 +160,12 @@ GAMMA_CANDIDATES: tuple[tuple[float, str], ...] = (
 
 
 def _disc_spans(width: int, height: int, diameter_fraction: float):
-    """Per-row (start, span) of a centred disc, or None for rows it does not touch.\n\nA shape rather than a bar, because the question a threshold pattern asks is "can you
-    see it", and a recognisable outline is far easier to answer that about than an edge\nwhich might be a gradient.\n"""
+    """Per-row (start, span) of a centred disc, or None for rows it does not touch.
+
+    A shape rather than a bar, because the question a threshold pattern asks is "can you
+    see it", and a recognisable outline is far easier to answer that about than an edge
+    which might be a gradient.
+    """
     centre_x, centre_y = (width - 1) / 2.0, (height - 1) / 2.0
     radius = min(width, height) * max(0.0, min(1.0, diameter_fraction)) / 2.0
     for y in range(height):
@@ -149,12 +198,24 @@ def _shape_on_field(width: int, height: int, field: float, shape: float) -> byte
 
 
 def _render_black_level(width: int, height: int, context: PatternContext) -> bytes:
-    """A shape barely above black. The level where it vanishes is the black threshold.\n\nThis is the pattern that moves rather than the display. The eye cannot say what\nluminance it is looking at, but it is very good at saying whether a shape is there,\nso lowering the probe until the shape disappears converts a judgement nobody can make\ninto one everybody can.\n"""
+    """A shape barely above black. The level where it vanishes is the black threshold.
+
+    This is the pattern that moves rather than the display. The eye cannot say what
+    luminance it is looking at, but it is very good at saying whether a shape is there,
+    so lowering the probe until the shape disappears converts a judgement nobody can make
+    into one everybody can.
+    """
     return _shape_on_field(width, height, 0.0, context.encode(context.probe_nits))
 
 
 def _render_peak_clip(width: int, height: int, context: PatternContext) -> bytes:
-    """A shape slightly brighter than a bright surround, to find where the panel clips.\n\nRaising both together, the shape separates from its surround until the display runs\nout of range, at which point the two clip to the same output and the shape disappears.\nThat level is peak luminance, measured rather than taken from metadata that on this\nkind of panel is a specification.\n"""
+    """A shape slightly brighter than a bright surround, to find where the panel clips.
+
+    Raising both together, the shape separates from its surround until the display runs
+    out of range, at which point the two clip to the same output and the shape disappears.
+    That level is peak luminance, measured rather than taken from metadata that on this
+    kind of panel is a specification.
+    """
     field = context.probe_nits
     return _shape_on_field(
         width, height, context.encode(field), context.encode(field * SHAPE_CONTRAST)
@@ -162,7 +223,17 @@ def _render_peak_clip(width: int, height: int, context: PatternContext) -> bytes
 
 
 def _render_gamma_match(width: int, height: int, context: PatternContext) -> bytes:
-    """Interleaved lines beside solid patches: the honest way to read actual gamma.\n\nAlternating full and black device-pixel lines average optically to half the line\nluminance, and because scRGB is linear that average is exactly arithmetic. Whichever\nsolid patch blends into the surrounding lines identifies the luminance the display is\nreally producing for that signal, which is a measurement of the transfer function\nrather than an impression of it.\n\nThe lines must land on real device pixels. Any resampling averages them together and\nthe pattern then reports a gamma that was never on screen.\n"""
+    """Interleaved lines beside solid patches: the honest way to read actual gamma.
+
+    Alternating full and black device-pixel lines average optically to half the line
+    luminance, and because scRGB is linear that average is exactly arithmetic. Whichever
+    solid patch blends into the surrounding lines identifies the luminance the display is
+    really producing for that signal, which is a measurement of the transfer function
+    rather than an impression of it.
+
+    The lines must land on real device pixels. Any resampling averages them together and
+    the pattern then reports a gamma that was never on screen.
+    """
     line_nits = min(context.ceiling_nits, REFERENCE_WHITE_NITS)
     lit = _row(width, context.encode(line_nits))
     dark = _row(width, 0.0)
@@ -188,7 +259,12 @@ def _render_gamma_match(width: int, height: int, context: PatternContext) -> byt
 
 
 def _render_grey_staircase(width: int, height: int, context: PatternContext) -> bytes:
-    """Even perceptual steps from black to peak: crush, clipping and banding at a glance.\n\nSteps are spaced evenly in PQ rather than in luminance, because PQ is roughly\nperceptually uniform; evenly spaced *nits* would waste almost every step on\nhighlights and show nothing where the eye is sensitive.\n"""
+    """Even perceptual steps from black to peak: crush, clipping and banding at a glance.
+
+    Steps are spaced evenly in PQ rather than in luminance, because PQ is roughly
+    perceptually uniform; evenly spaced *nits* would waste almost every step on
+    highlights and show nothing where the eye is sensitive.
+    """
     steps = 16
     spans = _spans(width, steps)
     top = pq_inverse_eotf(context.ceiling_nits)
@@ -201,7 +277,11 @@ def _render_grey_staircase(width: int, height: int, context: PatternContext) -> 
 
 
 def _render_near_black(width: int, height: int, context: PatternContext) -> bytes:
-    """Shadow patches on black, to find where detail stops being distinguishable.\n\nThe SDR-in-HDR correction takes 0.5 nits to roughly 0.1, so this is the range it\nchanges most and the range where a wrong black level is most visible.\n"""
+    """Shadow patches on black, to find where detail stops being distinguishable.
+
+    The SDR-in-HDR correction takes 0.5 nits to roughly 0.1, so this is the range it
+    changes most and the range where a wrong black level is most visible.
+    """
     levels = [nits for nits in _NEAR_BLACK_LEVELS if nits <= context.ceiling_nits]
     levels = levels or [context.ceiling_nits]
     spans = _spans(width, len(levels))
@@ -215,7 +295,9 @@ def _render_near_black(width: int, height: int, context: PatternContext) -> byte
 
 
 def _render_neutral_ramp(width: int, height: int, context: PatternContext) -> bytes:
-    """A smooth grey sweep. Absolute white balance cannot be judged by eye, but a tint\nthat *drifts* across the range -- green shadows into magenta highlights -- is obvious,\nand that is exactly what the per-channel trims exist to correct."""
+    """A smooth grey sweep. Absolute white balance cannot be judged by eye, but a tint
+    that *drifts* across the range -- green shadows into magenta highlights -- is obvious,
+    and that is exactly what the per-channel trims exist to correct."""
     top = pq_inverse_eotf(context.ceiling_nits)
     row = b"".join(
         _pixel(context.encode(pq_eotf(top * (x / max(1, width - 1)))))
@@ -344,7 +426,11 @@ _COLOUR_PATCHES: Sequence[tuple[str, tuple[float, float, float]]] = (
 
 
 def _render_colour_patches(width: int, height: int, context: PatternContext) -> bytes:
-    """Saturation and hue sanity, held at diffuse white rather than at peak.\n\nJudging colour at peak luminance mostly measures the panel's highlight rolloff; at\nreference white it measures the colour itself.\n"""
+    """Saturation and hue sanity, held at diffuse white rather than at peak.
+
+    Judging colour at peak luminance mostly measures the panel's highlight rolloff; at
+    reference white it measures the colour itself.
+    """
     level = context.encode(min(context.ceiling_nits, REFERENCE_WHITE_NITS))
     column_spans = _spans(width, 5)
     band_count = (len(_COLOUR_PATCHES) + len(column_spans) - 1) // len(column_spans)
@@ -520,6 +606,11 @@ PATTERNS: tuple[Pattern, ...] = (
 # the only one that floods the screen and wrecks dark adaptation for anything after it.
 MEASUREMENT_SEQUENCE: tuple[str, ...] = ("black-level", "peak-white", "full-frame-white")
 
+# The whole guided run. The three measurements establish what the panel does; tone tracking
+# is where the user then sets the curve, so leaving it out ended the run halfway through
+# the job with the tone controls never touched.
+GUIDED_SEQUENCE: tuple[str, ...] = MEASUREMENT_SEQUENCE + ("tone-tracking",)
+
 
 def pattern_by_key(key: str) -> Pattern | None:
     for pattern in PATTERNS:
@@ -590,7 +681,13 @@ def _blend_over(
     left: int = 0,
     top: int = 0,
 ) -> None:
-    """Alpha-blend RGBA8 text into a frame in place.\n\nText is overwhelmingly transparent, so rows with no coverage are skipped wholesale and\neach remaining row is walked only between its first and last opaque pixel. Converting\nthe empty space as well was costing 7 million pointless conversions per frame, which is\nhalf a second of lag on every keypress at 4K.\n"""
+    """Alpha-blend RGBA8 text into a frame in place.
+
+    Text is overwhelmingly transparent, so rows with no coverage are skipped wholesale and
+    each remaining row is walked only between its first and last opaque pixel. Converting
+    the empty space as well was costing 7 million pointless conversions per frame, which is
+    half a second of lag on every keypress at 4K.
+    """
     pixels, source_width, source_height = overlay
     source_width, source_height = int(source_width), int(source_height)
     if source_width <= 0 or source_height <= 0:
@@ -643,7 +740,18 @@ def compose(
     window_overlay: tuple[bytes, int, int] | None = None,
     marker_nits: float = MARKER_NITS,
 ) -> bytes:
-    """Build a full frame: black everywhere, the pattern in a centred window.\n\nThis is how display patches have always been presented, and on an emissive panel it\nis the only way readings stay comparable. A pattern that fills the screen makes the\nbrightness limiter engage differently for a dark pattern than a bright one, so two\nmeasurements taken minutes apart are not measuring the same thing. Confining every\npattern to the same window area holds that variable still.\n\n``overlay`` is straight RGBA8, as produced by a Qt paint into a QImage, and is pinned\nto the far left or far right rather than floated over the middle: anything near the\npatch contaminates both the reading and the viewer's adaptation.\n"""
+    """Build a full frame: black everywhere, the pattern in a centred window.
+
+    This is how display patches have always been presented, and on an emissive panel it
+    is the only way readings stay comparable. A pattern that fills the screen makes the
+    brightness limiter engage differently for a dark pattern than a bright one, so two
+    measurements taken minutes apart are not measuring the same thing. Confining every
+    pattern to the same window area holds that variable still.
+
+    ``overlay`` is straight RGBA8, as produced by a Qt paint into a QImage, and is pinned
+    to the far left or far right rather than floated over the middle: anything near the
+    patch contaminates both the reading and the viewer's adaptation.
+    """
     width, height = max(1, int(width)), max(1, int(height))
     block_width, block_height = window_size(
         width, height, pattern.window_fraction if pattern.window_fraction is not None else fraction
@@ -678,7 +786,10 @@ def compose(
         overlay_height = min(int(overlay[2]), height)
         _blend_over(
             frame, width, height, overlay, context, overlay_nits,
-            left=(width - overlay_width) if overlay_side == "right" else 0,
+            # "centre" is for a screen with no patch on it: nothing to keep stray light
+            # away from, so nothing to gain by hiding the text against an edge.
+            left=((width - overlay_width) // 2 if overlay_side == "centre"
+                  else (width - overlay_width) if overlay_side == "right" else 0),
             top=max(0, (height - overlay_height) // 2),
         )
     return bytes(frame)

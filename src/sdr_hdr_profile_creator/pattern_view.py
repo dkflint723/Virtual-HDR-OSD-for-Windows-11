@@ -26,6 +26,7 @@ from PySide6.QtWidgets import QWidget
 from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
 from .patterns import (
+    GUIDED_SEQUENCE,
     MEASUREMENT_SEQUENCE,
     pattern_by_key,
     OVERLAY_NITS,
@@ -48,6 +49,9 @@ OVERLAY_MIN_WIDTH = 460
 # both ends: far too coarse near black where a threshold actually sits, and so fine near
 # peak that crossing the range would take hundreds of presses.
 PROBE_STEP_PQ = 0.004
+
+# The finished screen is read, not measured against, so it does not need to hide at 12 nits.
+SUMMARY_NITS = 40.0
 
 
 @dataclass(frozen=True)
@@ -203,13 +207,14 @@ def render_overlay(
         y += spacing(10)
         painter.setPen(QColor(130, 130, 130, 255))
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
+        confirm = "Enter  record it" if pattern.level_driven else "Enter  done, next step"
         keys = "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
         lines = [f"{keys}   pattern"]
         if not pattern.level_driven and controls:
             lines.append("Tab   next control")
         lines += [adjust]
-        if pattern.level_driven:
-            lines.append("Enter  record it")
+        if pattern.level_driven or step is not None:
+            lines.append(confirm)
         if step is not None and step >= total:
             lines.append("then Apply Edits back in the app")
         lines += ["H     move this panel", "Esc   exit"]
@@ -413,7 +418,7 @@ class PatternWindow(QWidget):
         return self._step + 1
 
     def _apply_guided_step(self) -> None:
-        key = MEASUREMENT_SEQUENCE[self._step]
+        key = GUIDED_SEQUENCE[self._step]
         index = next((i for i, p in enumerate(PATTERNS) if p.key == key), 0)
         self._pattern_index = index
         # Each step starts near where its answer usually lies, so the first press moves
@@ -431,7 +436,7 @@ class PatternWindow(QWidget):
         """Move to the next guided step. False when the run is finished."""
         if not self._guided:
             return False
-        if self._step + 1 >= len(MEASUREMENT_SEQUENCE):
+        if self._step + 1 >= len(GUIDED_SEQUENCE):
             self._guided = False
             # Ending the run by quietly dropping the step counter left the last pattern on
             # screen looking exactly as it did a moment earlier, so there was no way to
@@ -485,6 +490,20 @@ class PatternWindow(QWidget):
             painter.end()
         return (bytes(image.constBits()), width, height)
 
+    def confirm_step(self) -> bool:
+        """Enter: record if this step measures something, then move on either way.
+
+        A guided step that adjusts sliders has nothing to record, but Enter still has to
+        mean "done, next" there or the run would stall on it with no way forward that the
+        overlay mentions.
+        """
+        if self.pattern.level_driven:
+            return self.accept_measurement()
+        if self._guided:
+            self.advance()
+            return True
+        return False
+
     def accept_measurement(self) -> bool:
         """Record the current level as this step's answer.
 
@@ -519,7 +538,9 @@ class PatternWindow(QWidget):
                 replace(self._context, probe_nits=0.0),
                 fraction=0.0001,
                 overlay=self.render_summary(overlay_width, min(height, round(height * 0.6)), scale),
-                overlay_side=self._overlay_side, overlay_nits=OVERLAY_NITS,
+                # Centred, and brighter than the measuring overlay: there is no patch left
+                # to contaminate and no dark adaptation left to preserve.
+                overlay_side="centre", overlay_nits=SUMMARY_NITS,
             )
         pattern = self.pattern
         # Text is sized against a reference width so it stays the same physical size as
@@ -529,7 +550,7 @@ class PatternWindow(QWidget):
             overlay_width, min(int(height * 0.85), height),
             pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
-            step=self.guided_step, total=len(MEASUREMENT_SEQUENCE),
+            step=self.guided_step, total=len(GUIDED_SEQUENCE),
         )
         block_width, block_height = window_size(
             width, height,
@@ -591,6 +612,6 @@ class PatternWindow(QWidget):
             self.toggle_side()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.accept_measurement()
+            self.confirm_step()
             return
         super().keyPressEvent(event)

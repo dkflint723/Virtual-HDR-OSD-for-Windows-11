@@ -32,7 +32,11 @@ try:
         context_for,
         render_overlay,
     )
-    from sdr_hdr_profile_creator.patterns import MEASUREMENT_SEQUENCE, PATTERNS
+    from sdr_hdr_profile_creator.patterns import (
+        GUIDED_SEQUENCE,
+        MEASUREMENT_SEQUENCE,
+        PATTERNS,
+    )
 
     GUI_AVAILABLE = True
     GUI_IMPORT_ERROR = ""
@@ -503,14 +507,30 @@ class GuidedSequenceTests(PatternViewTestCase):
 
     def test_the_whole_sequence_records_every_figure_once(self):
         win, recorded = self.build()
-        for _ in MEASUREMENT_SEQUENCE:
-            win.accept_measurement()
+        for _ in GUIDED_SEQUENCE:
+            win.confirm_step()
         self.assertEqual([key for key, _ in recorded], list(MEASUREMENT_SEQUENCE))
 
     def test_the_run_ends_rather_than_looping(self):
         win, _ = self.build()
+        for _ in GUIDED_SEQUENCE:
+            win.confirm_step()
+        self.assertIsNone(win.guided_step)
+
+    def test_the_last_step_sets_the_tone_controls(self):
+        """Three measurements and no adjustment ends the run halfway through the job."""
+        win, _ = self.build()
         for _ in MEASUREMENT_SEQUENCE:
-            win.accept_measurement()
+            win.confirm_step()
+        self.assertEqual(win.pattern.key, "tone-tracking")
+        self.assertEqual(win.guided_step, len(GUIDED_SEQUENCE))
+
+    def test_enter_advances_a_step_that_measures_nothing(self):
+        """Otherwise the run stalls on it with no way forward the overlay mentions."""
+        win, _ = self.build()
+        for _ in MEASUREMENT_SEQUENCE:
+            win.confirm_step()
+        self.assertTrue(win.confirm_step())
         self.assertIsNone(win.guided_step)
 
     def test_each_step_starts_near_where_its_answer_lives(self):
@@ -556,8 +576,8 @@ class CompletionTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in MEASUREMENT_SEQUENCE:
-            win.accept_measurement()
+        for _ in GUIDED_SEQUENCE:
+            win.confirm_step()
         return win
 
     def test_the_run_ends_in_a_stated_finished_state(self):
@@ -617,3 +637,55 @@ class FullFrameCriterionTests(PatternViewTestCase):
         full = pattern_by_key("full-frame-white").criterion
         self.assertIn("separates", peak)
         self.assertIn("separates", full)
+
+
+class SummaryPlacementTests(PatternViewTestCase):
+    """Edge placement exists to keep stray light away from the patch being measured. A
+    finished screen has no patch, so hiding the results in a corner serves nothing."""
+
+    def finished(self, width=1200, height=800):
+        win = PatternWindow(capability(), 240.0, self.controls, measure=lambda *_: None)
+        win.resize(width, height)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for value in (0.004, 940.0, 612.0):
+            win.set_probe(value)
+            win.confirm_step()
+        win.confirm_step()   # the tone-tracking step records nothing
+        return win
+
+    def ink_columns(self, win):
+        frame = win.build_frame()
+        width, height = win.device_size()
+        return [x for x in range(0, width, 8)
+                if any(struct.unpack_from("<4e", frame, (y * width + x) * 8)[0] > 0
+                       for y in range(0, height, 8))]
+
+    def test_the_results_are_centred_not_pushed_to_an_edge(self):
+        win = self.finished()
+        columns = self.ink_columns(win)
+        self.assertTrue(columns)
+        width, _ = win.device_size()
+        centre = (columns[0] + columns[-1]) / 2
+        self.assertAlmostEqual(centre / width, 0.5, delta=0.08)
+
+    def test_the_finished_text_is_brighter_than_the_measuring_overlay(self):
+        from sdr_hdr_profile_creator.pattern_view import SUMMARY_NITS
+        from sdr_hdr_profile_creator.patterns import OVERLAY_NITS
+
+        self.assertGreater(SUMMARY_NITS, OVERLAY_NITS)
+
+    def test_all_three_readings_appear(self):
+        win = self.finished()
+        raw, pw, ph = win.render_summary(600, 500, 1.0)
+        rows = [any(raw[(y * pw + x) * 4 + 3] for x in range(pw)) for y in range(ph)]
+        bands, run = [], 0
+        for filled in rows:
+            if filled:
+                run += 1
+            elif run:
+                bands.append(run)
+                run = 0
+        if run:
+            bands.append(run)
+        self.assertGreaterEqual(len(bands), 5, f"only {len(bands)} lines; a reading is missing")
