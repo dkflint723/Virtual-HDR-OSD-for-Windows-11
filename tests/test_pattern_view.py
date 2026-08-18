@@ -824,3 +824,63 @@ class LevelWalkingTests(PatternViewTestCase):
             420, 700, pattern_view.pattern_by_key("tone-tracking"),
             context_for(capability(), 240.0), self.controls, 0)
         self.assertNotEqual(plain, stepped)
+
+
+class ApplyFromTheSummaryTests(PatternViewTestCase):
+    """Live Apply covers the sliders, but a measurement only reaches the editor state, so
+    leaving without applying quietly threw all three readings away."""
+
+    def finished(self, apply=None):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=apply)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for value in (0.004, 940.0, 612.0):
+            win.set_probe(value)
+            win.confirm_step()
+        win.confirm_step()
+        return win
+
+    def test_enter_on_the_finished_screen_applies(self):
+        calls: list[bool] = []
+        win = self.finished(apply=lambda: calls.append(True) or True)
+        self.assertTrue(win._complete)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(win.applied)
+
+    def test_applying_twice_does_nothing_the_second_time(self):
+        calls: list[bool] = []
+        win = self.finished(apply=lambda: calls.append(True) or True)
+        self.press(win, Qt.Key.Key_Return)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(len(calls), 1)
+
+    def test_a_failed_apply_is_not_reported_as_applied(self):
+        win = self.finished(apply=lambda: False)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertFalse(win.applied)
+
+    def test_the_summary_changes_once_applied(self):
+        win = self.finished(apply=lambda: True)
+        before, _, _ = win.render_summary(600, 500, 1.0)
+        self.press(win, Qt.Key.Key_Return)
+        after, _, _ = win.render_summary(600, 500, 1.0)
+        self.assertNotEqual(before, after, "nothing told the user it had been written")
+
+    def test_enter_mid_run_still_confirms_the_step_rather_than_applying(self):
+        calls: list[bool] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=lambda: calls.append(True) or True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(calls, [], "Enter applied instead of advancing the run")
+        self.assertEqual(win.guided_step, 2)
+
+    def test_a_view_with_no_apply_callback_does_not_crash(self):
+        win = self.finished(apply=None)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertFalse(win.applied)

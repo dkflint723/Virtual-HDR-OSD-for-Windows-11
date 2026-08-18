@@ -1563,3 +1563,31 @@ class PatternViewLiveApplyTests(WindowTestCase):
             self.window._open_pattern_view()
             self.last.close()
         self.assertTrue(self.window.state.live_mode)
+
+
+class ApplyFromPatternViewTests(WindowTestCase):
+    """The measurements only reach the editor state; something has to write them out."""
+
+    def test_it_applies_and_reports_success(self):
+        self.window._record_measurement("peak-white", 940.0)
+        self.installed.clear()
+        self.assertTrue(self.window._apply_from_pattern_view())
+        self.assertTrue(self.installed, "nothing was written")
+
+    def test_it_reports_failure_rather_than_raising(self):
+        with mock.patch.object(self.window, "_apply_mode_profile", side_effect=RuntimeError("no")):
+            self.assertFalse(self.window._apply_from_pattern_view())
+
+    def test_the_measured_values_reach_the_installed_profile(self):
+        import struct
+
+        from sdr_hdr_profile_creator.icc import _read_tags
+
+        self.window._record_measurement("black-level", 0.0012)
+        self.window._record_measurement("peak-white", 1043.0)
+        self.window._apply_from_pattern_view()
+        written = sorted(self.color_dir.glob("Virtual_HDR_OSD_*_On.icm"))
+        self.assertTrue(written, "no working profile was installed")
+        tags = _read_tags(written[0].read_bytes())
+        self.assertAlmostEqual(
+            struct.unpack_from(">i", tags[b"MHC2"], 16)[0] / 65536.0, 1043.0, places=1)

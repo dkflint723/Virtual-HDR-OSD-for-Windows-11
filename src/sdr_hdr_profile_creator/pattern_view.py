@@ -282,6 +282,7 @@ class PatternWindow(QWidget):
         measure: Callable[[str, float], None] | None = None,
         guided: bool = True,
         on_close: Callable[[], None] | None = None,
+        apply: Callable[[], bool] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
@@ -302,6 +303,8 @@ class PatternWindow(QWidget):
         self._frame: bytes = b""
         self._measure = measure
         self._on_close = on_close
+        self._apply = apply
+        self.applied = False
         # Guided by default. Nine patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
@@ -528,14 +531,34 @@ class PatternWindow(QWidget):
                 y += round(34 * scale)
 
             y += round(24 * scale)
-            painter.setPen(QColor(210, 210, 210, 255))
-            painter.drawText(margin, y, "Press Esc, then Apply Edits in the app")
-            y += round(30 * scale)
+            if self.applied:
+                painter.setPen(QColor(150, 220, 150, 255))
+                painter.drawText(margin, y, "Written into the profile. Esc to finish.")
+            else:
+                painter.setPen(QColor(255, 255, 255, 255))
+                painter.drawText(margin, y, "Enter   write these into the profile")
+                y += round(30 * scale)
+                painter.setPen(QColor(160, 160, 160, 255))
+                painter.drawText(margin, y, "Esc     discard them and leave")
+            y += round(34 * scale)
             painter.setPen(QColor(130, 130, 130, 255))
             painter.drawText(margin, y, "1-9 to look at any pattern instead")
         finally:
             painter.end()
         return (bytes(image.constBits()), width, height)
+
+    def apply_measurements(self) -> bool:
+        """Write everything measured into the profile, without leaving the patterns.
+
+        Live Apply covers the sliders, but a measurement only reaches the editor state, so
+        closing the view without this quietly threw the three readings away. Telling the
+        user to go and do it themselves was asking them to finish the job by hand.
+        """
+        if self._apply is None or self.applied:
+            return False
+        self.applied = bool(self._apply())
+        self.refresh()
+        return self.applied
 
     def confirm_step(self) -> bool:
         """Enter: record if this step measures something, then move on either way.
@@ -673,6 +696,11 @@ class PatternWindow(QWidget):
             self.toggle_side()
             return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
-            self.confirm_step()
+            # On the finished screen there is no step left to confirm, so Enter is free
+            # for the one thing still outstanding.
+            if self._complete:
+                self.apply_measurements()
+            else:
+                self.confirm_step()
             return
         super().keyPressEvent(event)

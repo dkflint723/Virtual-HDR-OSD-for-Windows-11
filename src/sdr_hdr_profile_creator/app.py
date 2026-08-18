@@ -1581,6 +1581,7 @@ class MainWindow(FluentWidget):
             capability, sdr_white, self._pattern_view_bindings(),
             measure=self._record_measurement,
             on_close=lambda: self._restore_live_mode(previous_live),
+            apply=self._apply_from_pattern_view,
         )
         screen = self._screen_for(display)
         if screen is not None:
@@ -1604,6 +1605,17 @@ class MainWindow(FluentWidget):
             "control, arrows adjust, Esc exits.",
             "ok",
         )
+
+    def _apply_from_pattern_view(self) -> bool:
+        """Apply without leaving the patterns, so the readings are not lost on exit."""
+        display = self._selected_display()
+        if display is None:
+            return False
+        try:
+            self._apply_mode_profile("Calibration measurements", force=True)
+        except Exception:
+            return False
+        return True
 
     def _restore_live_mode(self, previous: bool) -> None:
         """Put Live Apply back as the user had it once the patterns are gone."""
