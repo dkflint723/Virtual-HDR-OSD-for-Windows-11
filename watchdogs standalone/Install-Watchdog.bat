@@ -20,11 +20,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem The write is verified by reading it back and comparing, not by trusting an exit code.
+rem A failed Set-Content is a non-terminating error, so powershell.exe still exits 0 and
+rem "if errorlevel 1" never fires. The old check then read the file back and confirmed it
+rem looked like a watchdog -- which a stale copy from a previous install does. The result
+rem was an installer that reported success while leaving the previous version in place,
+rem silently, every time something blocked the write.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$raw = Get-Content -Raw -LiteralPath $env:INSTALL_BAT; $marker=':__WATCHDOG_POWERSHELL_PAYLOAD__'; $i=$raw.LastIndexOf($marker); if($i -lt 0){throw 'Embedded watchdog payload was not found.'}; $payload=$raw.Substring($i+$marker.Length).TrimStart([char]13,[char]10); Set-Content -LiteralPath $env:WATCHDOG_PATH -Value $payload -Encoding UTF8" ^
+  "$ErrorActionPreference='Stop'; try { $raw = Get-Content -Raw -LiteralPath $env:INSTALL_BAT; $marker=':__WATCHDOG_POWERSHELL_PAYLOAD__'; $i=$raw.LastIndexOf($marker); if($i -lt 0){throw 'Embedded watchdog payload was not found.'}; $payload=$raw.Substring($i+$marker.Length).TrimStart([char]13,[char]10); Set-Content -LiteralPath $env:WATCHDOG_PATH -Value $payload -Encoding UTF8; $back = Get-Content -Raw -LiteralPath $env:WATCHDOG_PATH; if($back.Trim() -ne $payload.Trim()){ throw ('Wrote ' + $env:WATCHDOG_PATH + ' but read back different content.') } } catch { Write-Host ''; Write-Host ('  ' + $_.Exception.Message); exit 1 }" ^
   1>nul
 if errorlevel 1 (
-    echo ERROR: Could not extract the standalone watchdog.
+    echo.
+    echo ERROR: Could not write the watchdog to:
+    echo   %WATCHDOG%
+    echo.
+    echo The previous version, if any, has been left untouched.
+    echo A security product blocking writes to AppData is the usual cause:
+    echo check Controlled Folder Access under Windows Security, Ransomware protection.
     pause
     exit /b 1
 )

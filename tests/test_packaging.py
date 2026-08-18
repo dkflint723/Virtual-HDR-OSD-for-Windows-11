@@ -202,3 +202,39 @@ class ReadmeAccuracyTests(unittest.TestCase):
     def test_the_by_eye_limitation_is_still_stated_plainly(self):
         """Broadening the claims must not quietly drop the caveat that matters."""
         self.assertIn("made by eye", self.text())
+
+
+class InstallerWriteVerificationTests(unittest.TestCase):
+    """A failed Set-Content is a non-terminating error, so powershell.exe still exits 0.
+    The installer's only check was that exit code, and its follow-up validation read the
+    file back and confirmed it looked like a watchdog -- which a stale copy from a previous
+    install does. Together those reported success while leaving the old version in place."""
+
+    def script(self) -> str:
+        return (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace")
+
+    def batch_part(self) -> str:
+        """Everything before the embedded payload.
+
+        Split on the LAST occurrence of the marker, as the installer itself does: the
+        literal also appears in the extraction command, so splitting on the first cuts the
+        batch section in half.
+        """
+        script = self.script()
+        return script[: script.rindex(":__WATCHDOG_POWERSHELL_PAYLOAD__")]
+
+    def test_the_extraction_stops_on_error_rather_than_exiting_zero(self):
+        self.assertIn("$ErrorActionPreference='Stop'", self.batch_part())
+
+    def test_the_write_is_verified_by_reading_it_back(self):
+        """Checking the file looks like a watchdog passes on the previous version."""
+        self.assertIn("read back different content", self.batch_part())
+
+    def test_a_blocked_write_names_the_usual_cause(self):
+        """AppData write blocking is nearly always ransomware protection, and a user with
+        no lead spends the next hour on the wrong thing."""
+        self.assertIn("Controlled Folder Access", self.script())
+
+    def test_a_failed_write_leaves_the_previous_version_alone(self):
+        self.assertIn("previous version, if any, has been left untouched", self.script())
