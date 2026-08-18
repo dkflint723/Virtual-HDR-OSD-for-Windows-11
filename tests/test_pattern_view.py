@@ -1178,3 +1178,48 @@ class MouseDraggingTests(PatternViewTestCase):
         midpoint = win.probe_nits
         self.assertLess(midpoint, 500.0, "halfway is nowhere near halfway in nits")
         self.assertGreater(midpoint, 10.0)
+
+
+class LastStepGuidanceTests(PatternViewTestCase):
+    """The final step told the user to press Esc, which discards every measurement and
+    skips the screen offering to save them. They pressed it, because it said to."""
+
+    def overlay_for(self, step, total):
+        return render_overlay(
+            600, 1400, pattern_view.pattern_by_key("tone-tracking"),
+            context_for(capability(), 240.0), self.controls, 0, step=step, total=total)
+
+    def rendered_text_differs(self, a, b):
+        return a[0] != b[0]
+
+    def test_the_last_step_says_enter_rather_than_next_step(self):
+        middle = self.overlay_for(2, 4)
+        final = self.overlay_for(4, 4)
+        self.assertTrue(self.rendered_text_differs(middle, final),
+                        "the last step reads the same as a middle one")
+
+    def test_the_source_no_longer_tells_the_user_to_press_escape(self):
+        """A direct check on the text, since it is the instruction that caused the loss."""
+        from pathlib import Path
+
+        source = Path(pattern_view.__file__).read_text(encoding="utf-8")
+        self.assertNotIn("Esc, then Apply Edits in the app", source)
+
+    def test_escape_is_still_described_as_destructive(self):
+        """Removing the bad instruction must not leave Esc looking harmless."""
+        from pathlib import Path
+
+        source = Path(pattern_view.__file__).read_text(encoding="utf-8")
+        self.assertIn("discards the measurements", source)
+
+    def test_pressing_enter_on_the_last_step_reaches_the_summary(self):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=lambda: True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in range(len(GUIDED_SEQUENCE)):
+            self.press(win, Qt.Key.Key_Return)
+        self.assertTrue(win._complete, "Enter did not finish the run")
+        raw, width, height = win.render_summary(600, 500, 1.0)
+        self.assertGreater(pattern_view._ink_extent(raw, width, height), 0)

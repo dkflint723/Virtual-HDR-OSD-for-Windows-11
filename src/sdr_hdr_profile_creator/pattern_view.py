@@ -264,7 +264,11 @@ def render_overlay(
         painter.setPen(QColor(130, 130, 130, 255))
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
         walk = "↑ ↓   next level" if pattern.levels is not None else ""
-        confirm = "Enter  record it" if pattern.level_driven else "Enter  done, next step"
+        last = step is not None and step >= total
+        if pattern.level_driven:
+            confirm = "Enter  record it and finish" if last else "Enter  record it"
+        else:
+            confirm = "Enter  finish" if last else "Enter  done, next step"
         keys = "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
         lines = [f"{keys}   pattern"]
         if not pattern.level_driven and controls:
@@ -281,12 +285,17 @@ def render_overlay(
             painter.drawText(margin, y, line)
             y += spacing(20)
 
-        if step is not None and step >= total:
-            # Set apart from the key list rather than sitting in it: it is what happens
-            # after this screen, not another key to press on it.
+        if last:
+            # This line used to send the user out of the view to apply by hand, written
+            # before the finished screen could apply anything itself. Left in place
+            # afterwards, it named the one key that discards every measurement and skips
+            # the screen offering to save them -- and it was followed, because it said to.
             y += spacing(16)
-            painter.setPen(QColor(200, 200, 200, 255))
-            painter.drawText(margin, y, "Last step. Esc, then Apply Edits in the app.")
+            painter.setPen(QColor(255, 255, 255, 255))
+            painter.drawText(margin, y, "Last step. Enter shows your results.")
+            y += spacing(22)
+            painter.setPen(QColor(170, 140, 140, 255))
+            painter.drawText(margin, y, "Esc here discards the measurements.")
     finally:
         painter.end()
 
