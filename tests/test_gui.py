@@ -1047,6 +1047,62 @@ class PatternViewWiringTests(WindowTestCase):
         self.assertIsNone(self.window._pattern_window)
 
 
+class MeasurementRecordingTests(WindowTestCase):
+    """A threshold found and then lost is the whole calibration wasted, so every reading
+    has to reach the profile."""
+
+    def test_each_pattern_answers_its_own_luminance_figure(self):
+        for key, field, value in (
+            ("black-level", "minimum_luminance_nits", 0.004),
+            ("peak-white", "peak_luminance_nits", 1043.0),
+            ("full-frame-white", "full_frame_luminance_nits", 248.0),
+        ):
+            with self.subTest(pattern=key):
+                self.window._record_measurement(key, value)
+                self.assertAlmostEqual(getattr(self.window.state.hdr, field), value)
+
+    def test_a_pattern_that_measures_nothing_changes_nothing(self):
+        before = self.window.state.hdr.to_dict()
+        self.window._record_measurement("colour-patches", 500.0)
+        self.assertEqual(self.window.state.hdr.to_dict(), before)
+
+    def test_readings_are_bounded_like_imported_ones(self):
+        self.window._record_measurement("black-level", -5.0)
+        self.assertGreaterEqual(self.window.state.hdr.minimum_luminance_nits, 0.0)
+        self.window._record_measurement("peak-white", 99999.0)
+        self.assertLessEqual(self.window.state.hdr.peak_luminance_nits, 10000.0)
+
+    def test_full_frame_can_never_exceed_peak(self):
+        """A panel reporting otherwise is reporting fiction; ours must not write it."""
+        self.window._record_measurement("peak-white", 1000.0)
+        self.window._record_measurement("full-frame-white", 4000.0)
+        self.assertLessEqual(
+            self.window.state.hdr.full_frame_luminance_nits,
+            self.window.state.hdr.peak_luminance_nits,
+        )
+
+    def test_a_measurement_reaches_the_generated_profile(self):
+        """The point of measuring: MHC2 carries min and peak, lumi carries full frame."""
+        import struct
+
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import _read_tags, build_profile
+
+        self.window._record_measurement("black-level", 0.0012)
+        self.window._record_measurement("peak-white", 1043.0)
+        self.window._record_measurement("full-frame-white", 248.0)
+
+        state = self.window.state.hdr
+        data = build_profile("HDR", state, build_transform(state, hdr=True))
+        tags = _read_tags(data)
+        self.assertAlmostEqual(
+            struct.unpack_from(">i", tags[b"MHC2"], 12)[0] / 65536.0, 0.0012, places=4)
+        self.assertAlmostEqual(
+            struct.unpack_from(">i", tags[b"MHC2"], 16)[0] / 65536.0, 1043.0, places=1)
+        self.assertAlmostEqual(
+            struct.unpack_from(">i", tags[b"lumi"], 12)[0] / 65536.0, 248.0, places=1)
+
+
 class PanelGamutWarningTests(WindowTestCase):
     """A monitor's colour-space mode changes in its own OSD, unobservable from the PC."""
 

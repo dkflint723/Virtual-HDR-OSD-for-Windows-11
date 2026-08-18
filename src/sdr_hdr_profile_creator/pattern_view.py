@@ -85,6 +85,7 @@ def render_overlay(
     active: int,
     *,
     assumed_peak: bool = False,
+    accepted: dict[str, float] | None = None,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -152,7 +153,16 @@ def render_overlay(
             reading = (f"{context.probe_nits:.4g} nits" if context.absolute
                        else f"{context.probe_nits:.4g} of white")
             painter.drawText(margin, y, f"Level  {reading}")
-            y += 40
+            y += 22
+            recorded = accepted.get(pattern.key) if accepted else None
+            if recorded is not None:
+                painter.setPen(QColor(150, 220, 150, 255))
+                unit = " nits" if context.absolute else ""
+                painter.drawText(margin, y, f"recorded {recorded:.4g}{unit}")
+            else:
+                painter.setPen(QColor(150, 150, 150, 255))
+                painter.drawText(margin, y, "Enter records this level")
+            y += 30
         else:
             for index, control in enumerate(controls):
                 selected = index == active
@@ -168,7 +178,10 @@ def render_overlay(
         lines = [f"1-{len(PATTERNS)}   pattern"]
         if not pattern.level_driven and controls:
             lines.append("Tab   next control")
-        lines += [adjust, "H     move this panel", "Esc   exit"]
+        lines += [adjust]
+        if pattern.level_driven:
+            lines.append("Enter  record it")
+        lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
             y += 20
@@ -222,6 +235,7 @@ class PatternWindow(QWidget):
         sdr_white_nits: float,
         controls: Sequence[ControlBinding] = (),
         parent: QWidget | None = None,
+        measure: Callable[[str, float], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_PaintOnScreen, True)
@@ -240,6 +254,8 @@ class PatternWindow(QWidget):
         self._overlay_side = "right"
         self._surface: HdrSurface | None = None
         self._frame: bytes = b""
+        self._measure = measure
+        self.accepted: dict[str, float] = {}
         self.failure = ""
 
         # Re-presenting costs nothing next to composing, so a slow tick keeps the surface
@@ -333,6 +349,21 @@ class PatternWindow(QWidget):
         self._context = replace(self._context, probe_nits=max(0.0, float(nits)))
         self.refresh()
 
+    def accept_measurement(self) -> bool:
+        """Record the current level as this step's answer.
+
+        Finding a threshold and then losing it is the whole calibration wasted, so the
+        reading goes straight into the editor state and from there into the MHC2 header
+        and lumi tag of the next generated profile. Nothing is measured that the profile
+        does not then carry.
+        """
+        if not self.pattern.level_driven or self._measure is None:
+            return False
+        self.accepted[self.pattern.key] = self._context.probe_nits
+        self._measure(self.pattern.key, self._context.probe_nits)
+        self.refresh()
+        return True
+
     def toggle_side(self) -> None:
         self._overlay_side = "left" if self._overlay_side == "right" else "right"
         self.refresh()
@@ -345,7 +376,7 @@ class PatternWindow(QWidget):
         overlay = render_overlay(
             min(OVERLAY_WIDTH, width), min(int(height * 0.8), height),
             pattern, self._context, self._controls, self._active,
-            assumed_peak=self._assumed_peak,
+            assumed_peak=self._assumed_peak, accepted=self.accepted,
         )
         block_width, block_height = window_size(
             width, height,
@@ -403,5 +434,8 @@ class PatternWindow(QWidget):
             return
         if key == Qt.Key.Key_H:
             self.toggle_side()
+            return
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.accept_measurement()
             return
         super().keyPressEvent(event)

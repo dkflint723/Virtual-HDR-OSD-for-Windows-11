@@ -1488,6 +1488,42 @@ class MainWindow(FluentWidget):
             ))
         return bindings
 
+    # Each threshold pattern answers exactly one of the three luminance figures a
+    # generated profile carries: minimum and peak go into the MHC2 header, full frame into
+    # the lumi tag. Measuring something the profile does not then record would be pointless.
+    MEASUREMENT_FIELDS = {
+        "black-level": "minimum_luminance_nits",
+        "peak-white": "peak_luminance_nits",
+        "full-frame-white": "full_frame_luminance_nits",
+    }
+
+    def _record_measurement(self, pattern_key: str, nits: float) -> None:
+        """Store a reading taken in the pattern view, so Apply writes it into the profile.
+
+        These are exactly the numbers Windows HDR Calibration produces, and until now the
+        app could only inherit them from whatever profile it was handed. Bounds match
+        import_profile's, so a measured value and an imported one are constrained alike.
+        """
+        field = self.MEASUREMENT_FIELDS.get(pattern_key)
+        if field is None:
+            return
+        value = float(nits)
+        if field == "minimum_luminance_nits":
+            value = max(0.0, min(100.0, value))
+        else:
+            value = max(80.0, min(10000.0, value))
+        setattr(self.state.hdr, field, value)
+        # Full frame cannot exceed peak; a panel that did that would be reporting fiction.
+        if self.state.hdr.full_frame_luminance_nits > self.state.hdr.peak_luminance_nits:
+            self.state.hdr.full_frame_luminance_nits = self.state.hdr.peak_luminance_nits
+        self._save_state_soon()
+        self._update_activity_bar()
+        self._set_status(
+            f"Recorded {value:g} nits as {field.replace('_', ' ')}. Apply Edits writes it "
+            "into the profile.",
+            "ok",
+        )
+
     def _open_pattern_view(self) -> None:
         display = self._selected_display()
         if display is None:
@@ -1499,7 +1535,10 @@ class MainWindow(FluentWidget):
         except Exception:
             sdr_white = 240.0
 
-        window = PatternWindow(capability, sdr_white, self._pattern_view_bindings())
+        window = PatternWindow(
+            capability, sdr_white, self._pattern_view_bindings(),
+            measure=self._record_measurement,
+        )
         screen = self._screen_for(display)
         if screen is not None:
             window.setGeometry(screen.geometry())

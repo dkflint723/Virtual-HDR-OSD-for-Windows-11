@@ -290,6 +290,54 @@ class ThresholdPatternTests(PatternViewTestCase):
         self.assertEqual(struct.unpack_from("<4e", frame, 0)[0], 0.0)
 
 
+class AcceptMeasurementTests(PatternViewTestCase):
+    def build(self):
+        recorded: list[tuple[str, float]] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda key, nits: recorded.append((key, nits)))
+        win.resize(400, 300)
+        self.addCleanup(win.deleteLater)
+        return win, recorded
+
+    def select(self, win, key):
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == key))
+
+    def test_enter_records_the_current_level(self):
+        win, recorded = self.build()
+        self.select(win, "peak-white")
+        win.set_probe(812.0)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(recorded, [("peak-white", 812.0)])
+
+    def test_enter_does_nothing_on_a_pattern_that_measures_nothing(self):
+        win, recorded = self.build()
+        self.select(win, "gamma-match")
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(recorded, [])
+
+    def test_the_view_remembers_what_was_recorded(self):
+        win, _ = self.build()
+        self.select(win, "black-level")
+        win.set_probe(0.003)
+        self.press(win, Qt.Key.Key_Enter)
+        self.assertAlmostEqual(win.accepted["black-level"], 0.003)
+
+    def test_recording_survives_moving_to_another_pattern_and_back(self):
+        win, _ = self.build()
+        self.select(win, "black-level")
+        win.set_probe(0.003)
+        self.press(win, Qt.Key.Key_Return)
+        self.select(win, "peak-white")
+        self.select(win, "black-level")
+        self.assertIn("black-level", win.accepted)
+
+    def test_a_view_with_no_measure_callback_ignores_enter(self):
+        win = self.window()
+        self.select(win, "peak-white")
+        self.press(win, Qt.Key.Key_Return)  # must not raise
+        self.assertEqual(win.accepted, {})
+
+
 class MarkerTests(PatternViewTestCase):
     """A pattern with no visible target cannot be aimed at."""
 
