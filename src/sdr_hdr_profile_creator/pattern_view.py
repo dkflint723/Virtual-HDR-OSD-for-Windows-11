@@ -292,10 +292,7 @@ def render_overlay(
             # the screen offering to save them -- and it was followed, because it said to.
             y += spacing(16)
             painter.setPen(QColor(255, 255, 255, 255))
-            painter.drawText(margin, y, "Last step. Enter shows your results.")
-            y += spacing(22)
-            painter.setPen(QColor(170, 140, 140, 255))
-            painter.drawText(margin, y, "Esc here discards the measurements.")
+            painter.drawText(margin, y, "Last step. Enter shows the results.")
     finally:
         painter.end()
 
@@ -458,6 +455,7 @@ class PatternWindow(QWidget):
         self._guided = bool(guided) and measure is not None
         self._step = 0
         self._complete = False
+        self._showing_summary = False
         self.accepted: dict[str, float] = {}
         self.failure = ""
 
@@ -526,7 +524,7 @@ class PatternWindow(QWidget):
         # Choosing a pattern by hand means leaving the sequence; carrying on numbering the
         # steps afterwards would be a lie about where the user is.
         self._guided = False
-        self._complete = False
+        self._showing_summary = False
         self._pattern_index = index % len(PATTERNS)
         self._start_level()
         self.refresh()
@@ -640,6 +638,7 @@ class PatternWindow(QWidget):
             # screen looking exactly as it did a moment earlier, so there was no way to
             # tell whether Enter had done anything. Say plainly that it is finished.
             self._complete = True
+            self._showing_summary = True
             self.refresh()
             return False
         self._step += 1
@@ -684,13 +683,13 @@ class PatternWindow(QWidget):
                 painter.drawText(margin, y, "Written into the profile. Esc to finish.")
             else:
                 painter.setPen(QColor(255, 255, 255, 255))
-                painter.drawText(margin, y, "Enter   write these into the profile")
+                painter.drawText(margin, y, "Enter   write these into the profile now")
                 y += round(30 * scale)
                 painter.setPen(QColor(160, 160, 160, 255))
-                painter.drawText(margin, y, "Esc     discard them and leave")
+                painter.drawText(margin, y, "Esc     leave; they stay in the editor")
             y += round(34 * scale)
             painter.setPen(QColor(130, 130, 130, 255))
-            painter.drawText(margin, y, "1-9 to look at any pattern instead")
+            painter.drawText(margin, y, "1-9 views a pattern, S returns here")
         finally:
             painter.end()
         return (bytes(image.constBits()), width, height)
@@ -703,7 +702,7 @@ class PatternWindow(QWidget):
         Stepping from 2.200 to 1.700 one arrow press at a time is not a control anyone
         would use, and on a level-driven pattern the range spans four orders of magnitude.
         """
-        if self._complete:
+        if self._showing_summary:
             return False
         if not self.pattern.level_driven:
             control = self.active_control
@@ -756,12 +755,22 @@ class PatternWindow(QWidget):
             return True
         return True   # swallow everything else; half-typed input must not switch pattern
 
+    def show_summary(self) -> bool:
+        """Return to the results after looking at a pattern."""
+        if not self._complete:
+            return False
+        self._showing_summary = True
+        self.refresh()
+        return True
+
     def apply_measurements(self) -> bool:
         """Write everything measured into the profile, without leaving the patterns.
 
         Live Apply covers the sliders, but a measurement only reaches the editor state, so
-        closing the view without this quietly threw the three readings away. Telling the
-        user to go and do it themselves was asking them to finish the job by hand.
+        without this the readings sit there until the user thinks to press Apply Edits
+        themselves. They are not lost by leaving -- _record_measurement writes and persists
+        them at the moment of capture -- so nothing here may describe Esc as discarding
+        anything.
         """
         if self._apply is None or self.applied:
             return False
@@ -818,7 +827,7 @@ class PatternWindow(QWidget):
     def build_frame(self) -> bytes:
         width, height = self.device_size()
         scale = max(1.0, min(3.0, width / OVERLAY_REFERENCE_WIDTH))
-        if self._complete:
+        if self._showing_summary:
             # Black, so the eyes recover, and nothing on screen that looks adjustable.
             overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * 0.34)))
             return compose(
@@ -967,10 +976,15 @@ class PatternWindow(QWidget):
         if key == Qt.Key.Key_E:
             self.begin_edit()
             return
+        if key == Qt.Key.Key_S and self._complete:
+            # The summary invites browsing the patterns, so there has to be a way back to
+            # it. Without one, a single digit key destroyed the results screen for good.
+            self.show_summary()
+            return
         if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             # On the finished screen there is no step left to confirm, so Enter is free
             # for the one thing still outstanding.
-            if self._complete:
+            if self._showing_summary:
                 self.apply_measurements()
             else:
                 self.confirm_step()

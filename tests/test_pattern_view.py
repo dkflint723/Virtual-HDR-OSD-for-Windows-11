@@ -598,9 +598,12 @@ class CompletionTests(PatternViewTestCase):
         self.assertGreater(sum(1 for i in range(3, len(raw), 4) if raw[i] > 0), 200)
 
     def test_picking_a_pattern_leaves_the_finished_screen(self):
+        """It leaves the summary, but the run stays finished: forgetting that was what
+        made the results unreachable after a single digit key."""
         win = self.finished()
         win.select_pattern(0)
-        self.assertFalse(win._complete)
+        self.assertFalse(win._showing_summary)
+        self.assertTrue(win._complete)
 
 
 class FullFrameCriterionTests(PatternViewTestCase):
@@ -1205,12 +1208,14 @@ class LastStepGuidanceTests(PatternViewTestCase):
         source = Path(pattern_view.__file__).read_text(encoding="utf-8")
         self.assertNotIn("Esc, then Apply Edits in the app", source)
 
-    def test_escape_is_still_described_as_destructive(self):
-        """Removing the bad instruction must not leave Esc looking harmless."""
+    def test_escape_is_described_by_what_it_actually_does(self):
+        """The first fix replaced a false instruction with its mirror image: Esc was said
+        to discard readings that _record_measurement had already written and persisted."""
         from pathlib import Path
 
         source = Path(pattern_view.__file__).read_text(encoding="utf-8")
-        self.assertIn("discards the measurements", source)
+        self.assertNotIn("discards the measurements", source)
+        self.assertIn("stay in the editor", source)
 
     def test_pressing_enter_on_the_last_step_reaches_the_summary(self):
         win = PatternWindow(capability(), 240.0, self.controls,
@@ -1223,3 +1228,82 @@ class LastStepGuidanceTests(PatternViewTestCase):
         self.assertTrue(win._complete, "Enter did not finish the run")
         raw, width, height = win.render_summary(600, 500, 1.0)
         self.assertGreater(pattern_view._ink_extent(raw, width, height), 0)
+
+
+class MeasurementPersistenceHonestyTests(PatternViewTestCase):
+    """_record_measurement writes into editor state and persists at the moment of capture,
+    and the only close handler restores Live Apply. Leaving therefore discards nothing, and
+    saying otherwise would strand a bad reading in the profile of a user who believed they
+    had thrown it away."""
+
+    def source(self):
+        from pathlib import Path
+
+        return Path(pattern_view.__file__).read_text(encoding="utf-8")
+
+    def test_nothing_claims_that_leaving_discards_measurements(self):
+        for phrase in ("discards the measurements", "discard them and leave",
+                       "threw the three readings away"):
+            with self.subTest(phrase=phrase):
+                self.assertNotIn(phrase, self.source())
+
+    def test_the_summary_says_where_the_readings_go_instead(self):
+        self.assertIn("stay in the editor", self.source())
+
+
+class SummaryReturnTests(PatternViewTestCase):
+    """The summary invites browsing the patterns, so there has to be a way back. Without
+    one, a single digit key destroyed the results screen permanently."""
+
+    def finished(self):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=lambda: True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in range(len(GUIDED_SEQUENCE)):
+            win.confirm_step()
+        return win
+
+    def test_the_summary_is_showing_when_the_run_ends(self):
+        win = self.finished()
+        self.assertTrue(win._complete)
+        self.assertTrue(win._showing_summary)
+
+    def test_browsing_a_pattern_leaves_the_summary_but_not_the_finished_state(self):
+        win = self.finished()
+        win.select_pattern(0)
+        self.assertFalse(win._showing_summary)
+        self.assertTrue(win._complete, "the run was forgotten, so there is no way back")
+
+    def test_s_returns_to_the_summary(self):
+        win = self.finished()
+        win.select_pattern(0)
+        self.press(win, Qt.Key.Key_S)
+        self.assertTrue(win._showing_summary)
+
+    def test_s_does_nothing_before_the_run_has_finished(self):
+        win = self.window()
+        self.press(win, Qt.Key.Key_S)
+        self.assertFalse(win._showing_summary)
+
+    def test_applying_still_works_after_browsing_and_returning(self):
+        applied: list[bool] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None,
+                            apply=lambda: applied.append(True) or True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in range(len(GUIDED_SEQUENCE)):
+            win.confirm_step()
+        win.select_pattern(0)
+        self.press(win, Qt.Key.Key_S)
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(len(applied), 1)
+
+    def test_the_summary_says_how_to_come_back(self):
+        from pathlib import Path
+
+        self.assertIn("S returns here",
+                      Path(pattern_view.__file__).read_text(encoding="utf-8"))
