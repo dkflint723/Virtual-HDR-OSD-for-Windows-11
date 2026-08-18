@@ -352,16 +352,17 @@ PATTERNS: tuple[Pattern, ...] = (
         key="full-frame-white",
         title="Full-frame white",
         purpose="Measures how bright the display sustains with the whole screen lit.",
-        criterion="Correct is the highest level the whole screen holds without dimming.",
+        criterion="Correct is the highest level at which the circle still separates.",
         instructions=(
-            "This one floods the whole screen. It will be uncomfortable; that is normal.\n\n"
-            "1. Hold Right and watch the brightness.\n"
-            "2. Stop when it stops getting brighter, or starts dimming.\n"
+            "Same test as before, but the whole screen is lit so the brightness limiter "
+            "is working. It will be uncomfortable; that is normal.\n\n"
+            "1. Hold Right until the circle vanishes into the background.\n"
+            "2. Tap Left until you can just separate them again.\n"
             "3. Press Enter.\n\n"
-            "Expect a number far below peak on an OLED. That gap is the brightness "
-            "limiter doing its job, not a fault."
+            "Expect a lower number than peak white on an OLED. That gap is the limiter "
+            "doing its job, not a fault."
         ),
-        render=_render_solid_patch,
+        render=_render_peak_clip,
         markers=_probe_markers,
         level_driven=True,
         window_fraction=1.0,

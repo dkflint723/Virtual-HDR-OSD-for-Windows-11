@@ -544,3 +544,73 @@ class GuidedSequenceTests(PatternViewTestCase):
             420, 700, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
             step=2, total=3)
         self.assertNotEqual(raw_plain, raw_step)
+
+
+class CompletionTests(PatternViewTestCase):
+    """Ending the run by quietly dropping the step counter left the last pattern on screen
+    looking exactly as it had a moment before, so there was no way to tell Enter had done
+    anything at all."""
+
+    def finished(self):
+        win = PatternWindow(capability(), 240.0, self.controls, measure=lambda *_: None)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in MEASUREMENT_SEQUENCE:
+            win.accept_measurement()
+        return win
+
+    def test_the_run_ends_in_a_stated_finished_state(self):
+        self.assertTrue(self.finished()._complete)
+
+    def test_the_finished_screen_goes_dark(self):
+        """A bright pattern left up after the last step keeps the eyes adapted for nothing."""
+        win = self.finished()
+        frame = win.build_frame()
+        width, height = win.device_size()
+        centre = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)[0]
+        self.assertEqual(centre, 0.0)
+
+    def test_the_summary_lists_every_step(self):
+        win = self.finished()
+        raw, w, h = win.render_summary(500, 400, 1.0)
+        self.assertEqual(len(raw), w * h * 4)
+        self.assertGreater(sum(1 for i in range(3, len(raw), 4) if raw[i] > 0), 200)
+
+    def test_picking_a_pattern_leaves_the_finished_screen(self):
+        win = self.finished()
+        win.select_pattern(0)
+        self.assertFalse(win._complete)
+
+
+class FullFrameCriterionTests(PatternViewTestCase):
+    """'Watch until it stops getting brighter' gives the eye nothing to compare against.
+    A full white screen has no reference in it, so the judgement cannot be made; the same
+    disappearing-shape test as the other steps can."""
+
+    def test_the_whole_screen_is_lit_not_just_a_window(self):
+        win = self.window(width=400, height=300)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "full-frame-white"))
+        win.set_probe(300.0)
+        frame = win.build_frame()
+        corner = struct.unpack_from("<4e", frame, 0)[0]
+        self.assertGreater(corner, 0.0, "the corner is black, so the limiter is not engaged")
+
+    def test_there_is_a_shape_brighter_than_its_surround_to_judge(self):
+        win = self.window(width=400, height=300)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "full-frame-white"))
+        win.set_probe(300.0)
+        frame = win.build_frame()
+        width, height = win.device_size()
+        corner = struct.unpack_from("<4e", frame, 0)[0]
+        centre = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)[0]
+        self.assertGreater(centre, corner * 1.1, "nothing to separate, so nothing to judge")
+
+    def test_it_matches_the_criterion_of_the_step_before_it(self):
+        """Two steps that ask the same question should ask it the same way."""
+        from sdr_hdr_profile_creator.patterns import pattern_by_key
+
+        peak = pattern_by_key("peak-white").criterion
+        full = pattern_by_key("full-frame-white").criterion
+        self.assertIn("separates", peak)
+        self.assertIn("separates", full)

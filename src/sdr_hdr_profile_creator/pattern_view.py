@@ -27,6 +27,7 @@ from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
 from .patterns import (
     MEASUREMENT_SEQUENCE,
+    pattern_by_key,
     OVERLAY_NITS,
     PATTERNS,
     WINDOW_AREA_FRACTION,
@@ -289,6 +290,7 @@ class PatternWindow(QWidget):
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
         self._step = 0
+        self._complete = False
         self.accepted: dict[str, float] = {}
         self.failure = ""
 
@@ -354,6 +356,7 @@ class PatternWindow(QWidget):
         # Choosing a pattern by hand means leaving the sequence; carrying on numbering the
         # steps afterwards would be a lie about where the user is.
         self._guided = False
+        self._complete = False
         self._pattern_index = index % len(PATTERNS)
         self.refresh()
 
@@ -429,11 +432,57 @@ class PatternWindow(QWidget):
             return False
         if self._step + 1 >= len(MEASUREMENT_SEQUENCE):
             self._guided = False
+            # Ending the run by quietly dropping the step counter left the last pattern on
+            # screen looking exactly as it did a moment earlier, so there was no way to
+            # tell whether Enter had done anything. Say plainly that it is finished.
+            self._complete = True
             self.refresh()
             return False
         self._step += 1
         self._apply_guided_step()
         return True
+
+    def render_summary(self, width: int, height: int, scale: float) -> tuple[bytes, int, int]:
+        """The finished screen: what was measured, and the one thing left to do."""
+        image = QImage(width, height, QImage.Format.Format_RGBA8888)
+        image.fill(QColor(0, 0, 0, 0))
+        painter = QPainter(image)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+            margin = max(1, round(28 * scale))
+            y = margin + round(30 * scale)
+
+            title = QFont()
+            title.setPointSize(max(6, round(17 * scale)))
+            title.setBold(True)
+            painter.setFont(title)
+            painter.setPen(QColor(255, 255, 255, 255))
+            painter.drawText(margin, y, "Measurements complete")
+            y += round(52 * scale)
+
+            body = QFont()
+            body.setPointSize(max(6, round(11 * scale)))
+            painter.setFont(body)
+            for key in MEASUREMENT_SEQUENCE:
+                pattern = next((p for p in PATTERNS if p.key == key), None)
+                value = self.accepted.get(key)
+                painter.setPen(QColor(150, 220, 150, 255) if value is not None
+                               else QColor(150, 150, 150, 255))
+                label = pattern.title if pattern else key
+                unit = " nits" if self._context.absolute else ""
+                shown = f"{value:.4g}{unit}" if value is not None else "not measured"
+                painter.drawText(margin, y, f"{label}:  {shown}")
+                y += round(34 * scale)
+
+            y += round(24 * scale)
+            painter.setPen(QColor(210, 210, 210, 255))
+            painter.drawText(margin, y, "Press Esc, then Apply Edits in the app")
+            y += round(30 * scale)
+            painter.setPen(QColor(130, 130, 130, 255))
+            painter.drawText(margin, y, "1-9 to look at any pattern instead")
+        finally:
+            painter.end()
+        return (bytes(image.constBits()), width, height)
 
     def accept_measurement(self) -> bool:
         """Record the current level as this step's answer.
@@ -460,10 +509,20 @@ class PatternWindow(QWidget):
 
     def build_frame(self) -> bytes:
         width, height = self.device_size()
+        scale = max(1.0, min(3.0, width / OVERLAY_REFERENCE_WIDTH))
+        if self._complete:
+            # Black, so the eyes recover, and nothing on screen that looks adjustable.
+            overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * 0.34)))
+            return compose(
+                width, height, pattern_by_key("black-level") or PATTERNS[0],
+                replace(self._context, probe_nits=0.0),
+                fraction=0.0001,
+                overlay=self.render_summary(overlay_width, min(height, round(height * 0.6)), scale),
+                overlay_side=self._overlay_side, overlay_nits=OVERLAY_NITS,
+            )
         pattern = self.pattern
         # Text is sized against a reference width so it stays the same physical size as
         # resolution grows, rather than shrinking into illegibility on a 4K panel.
-        scale = max(1.0, min(3.0, width / OVERLAY_REFERENCE_WIDTH))
         overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * OVERLAY_WIDTH_FRACTION)))
         overlay = render_overlay(
             overlay_width, min(int(height * 0.85), height),
