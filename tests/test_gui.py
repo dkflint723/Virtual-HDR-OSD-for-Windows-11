@@ -988,6 +988,65 @@ class ProfileBindingTests(WindowTestCase):
         self.assertEqual(reloaded.display_bindings[key].sdr_profile, "Calman_SDR_Calibrated.icm")
 
 
+class PatternViewWiringTests(WindowTestCase):
+    """The fullscreen view has to drive the real sliders, or it is a picture of a tool."""
+
+    def test_bindings_exist_for_the_tonal_controls(self):
+        labels = {binding.key for binding in self.window._pattern_view_bindings()}
+        self.assertEqual(labels, set(app_module.MainWindow.PATTERN_VIEW_CONTROLS))
+
+    def test_a_binding_reads_the_live_slider_value(self):
+        self.window.control_widgets["gamma"].set_value(2.05)
+        binding = next(b for b in self.window._pattern_view_bindings() if b.key == "gamma")
+        self.assertAlmostEqual(binding.read(), 2.05, places=3)
+
+    def test_nudging_moves_the_real_slider(self):
+        binding = next(b for b in self.window._pattern_view_bindings() if b.key == "gamma")
+        before = self.window.control_widgets["gamma"].value()
+        binding.nudge(binding.step)
+        self.assertAlmostEqual(
+            self.window.control_widgets["gamma"].value(), before + binding.step, places=4)
+
+    def test_nudging_emits_so_live_apply_still_runs(self):
+        """Adjusting from a pattern that did not update the display would be worse than
+        having no controls there at all."""
+        seen: list[float] = []
+        self.window.control_widgets["contrast"].valueChanged.connect(seen.append)
+        binding = next(b for b in self.window._pattern_view_bindings() if b.key == "contrast")
+        binding.nudge(binding.step)
+        self.assertTrue(seen, "the slider changed without emitting")
+
+    def test_the_step_matches_the_control_it_drives(self):
+        for binding in self.window._pattern_view_bindings():
+            with self.subTest(control=binding.key):
+                self.assertAlmostEqual(
+                    binding.step, self.window.control_widgets[binding.key].spec.step)
+
+    def test_an_unavailable_hdr_surface_is_reported_not_raised(self):
+        class Refusing:
+            failure = "no HDR surface on this display"
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setGeometry(self, *_a):
+                pass
+
+            def showFullScreen(self):
+                pass
+
+            def begin(self):
+                return False
+
+            def close(self):
+                pass
+
+        with mock.patch.object(app_module, "PatternWindow", Refusing):
+            self.window._open_pattern_view()
+        self.assertIn("no HDR surface on this display", self.window.status_label.text())
+        self.assertIsNone(self.window._pattern_window)
+
+
 class PanelGamutWarningTests(WindowTestCase):
     """A monitor's colour-space mode changes in its own OSD, unobservable from the PC."""
 

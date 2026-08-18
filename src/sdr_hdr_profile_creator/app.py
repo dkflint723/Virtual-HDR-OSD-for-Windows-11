@@ -11,6 +11,7 @@ from pathlib import Path
 from PySide6.QtCore import QSignalBlocker, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QDialog,
     QGridLayout,
@@ -45,6 +46,7 @@ from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
 from .hdr_display import capability_for_device_name
+from .pattern_view import ControlBinding, PatternWindow
 from .icc import (
     build_profile,
     content_digest,
@@ -139,6 +141,7 @@ class MainWindow(FluentWidget):
         self._generated_profile_cache: dict[str, tuple[int, int, bool]] = {}
         self._announced_base_divergence = ""
         self.control_widgets: dict[str, SliderControl] = {}
+        self._pattern_window: "PatternWindow | None" = None
         self._last_enabled_gamma_correction = self.state.hdr.sdr_gamma_correction if self.state.hdr.sdr_gamma_correction != "Off" else "Auto (Recommended)"
         self._hotkey_listener: GammaHotkeyListener | None = None
         self._guide_dialog: GuideDialog | None = None
@@ -532,6 +535,13 @@ class MainWindow(FluentWidget):
         reset_button.setToolTip("Return every slider to its neutral default without changing which profile is selected.")
         reset_button.clicked.connect(self._reset_all_controls)
         runtime_row.addWidget(reset_button)
+        self.patterns_button = PushButton("Test Patterns…", bar)
+        self.patterns_button.setToolTip(
+            "Fill the display with calibration patterns and adjust from the keyboard.\n"
+            "Number keys switch pattern, Tab picks a control, arrows adjust, Esc exits."
+        )
+        self.patterns_button.clicked.connect(self._open_pattern_view)
+        runtime_row.addWidget(self.patterns_button)
         runtime_row.addStretch(1)
         self.refresh_profile_button = PushButton("Reapply", bar)
         self.refresh_profile_button.setToolTip("Force a full reinstall of the current settings. Use this if Windows has dropped the HDR association, typically after a mode change or resume from sleep.")
@@ -1453,6 +1463,73 @@ class MainWindow(FluentWidget):
         generated = is_app_generated(path)
         self._generated_profile_cache[path.name] = (stamp.st_mtime_ns, stamp.st_size, generated)
         return generated
+
+    # Sliders worth reaching without leaving a fullscreen pattern. Deliberately short:
+    # every one costs a line of the overlay, and the overlay shares the screen with the
+    # patch. Colour trims are omitted because they are judged against a reference the
+    # patterns cannot supply.
+    PATTERN_VIEW_CONTROLS = ("gamma", "brightness_trim", "contrast")
+
+    def _pattern_view_bindings(self) -> list["ControlBinding"]:
+        bindings: list[ControlBinding] = []
+        for key in self.PATTERN_VIEW_CONTROLS:
+            control = self.control_widgets.get(key)
+            if control is None:
+                continue
+            bindings.append(ControlBinding(
+                key=key,
+                label=control.spec.title,
+                read=control.value,
+                # emit=True so Live Apply sees the change; adjusting a pattern that does
+                # not update the display would be worse than having no controls at all.
+                nudge=lambda delta, c=control: c.set_value(c.value() + delta, emit=True),
+                step=float(control.spec.step),
+                suffix=control.spec.suffix,
+            ))
+        return bindings
+
+    def _open_pattern_view(self) -> None:
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a display first.", "error")
+            return
+        capability = capability_for_device_name(display.gdi_name)
+        try:
+            sdr_white = get_sdr_white_level_nits(display)
+        except Exception:
+            sdr_white = 240.0
+
+        window = PatternWindow(capability, sdr_white, self._pattern_view_bindings())
+        screen = self._screen_for(display)
+        if screen is not None:
+            window.setGeometry(screen.geometry())
+        window.showFullScreen()
+        # The swapchain needs the real window handle and its final size, so it is created
+        # after the window is on screen rather than in the constructor.
+        QApplication.processEvents()
+        if not window.begin():
+            window.close()
+            self._set_status(
+                f"Calibration patterns need an HDR surface, which this display did not "
+                f"provide: {window.failure}",
+                "error",
+            )
+            return
+        window.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._pattern_window = window
+        self._set_status(
+            "Calibration patterns are on screen. Number keys switch pattern, Tab picks a "
+            "control, arrows adjust, Esc exits.",
+            "ok",
+        )
+
+    @staticmethod
+    def _screen_for(display: DisplayInfo):
+        """Match a Windows display to the Qt screen sitting on it."""
+        for screen in QApplication.screens():
+            if screen.name() == display.gdi_name:
+                return screen
+        return QApplication.primaryScreen()
 
     def _warn_if_panel_gamut_changed(self, display: DisplayInfo) -> None:
         """Say so when the HDR base profile no longer describes the panel.
