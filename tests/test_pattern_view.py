@@ -290,6 +290,73 @@ class ThresholdPatternTests(PatternViewTestCase):
         self.assertEqual(struct.unpack_from("<4e", frame, 0)[0], 0.0)
 
 
+class DevicePixelTests(PatternViewTestCase):
+    """Qt measures in logical units; the swapchain needs real pixels.
+
+    On a 125% display a fullscreen widget reports 3206x1803 while its client area is
+    3840x2160. Handing the smaller figure to the swapchain makes DXGI stretch the buffer,
+    and a stretched frame resamples the gamma-match lines -- which is the exact failure
+    the whole D3D path exists to avoid.
+    """
+
+    def test_the_frame_is_built_in_device_pixels_not_logical_ones(self):
+        win = self.window(width=1000, height=800)
+        with mock.patch.object(type(win), "devicePixelRatioF", lambda _self: 1.25):
+            self.assertEqual(win.device_size(), (1250, 1000))
+            self.assertEqual(len(win.build_frame()), 1250 * 1000 * 8)
+
+    def test_a_display_without_scaling_is_unaffected(self):
+        win = self.window(width=640, height=480)
+        with mock.patch.object(type(win), "devicePixelRatioF", lambda _self: 1.0):
+            self.assertEqual(win.device_size(), (640, 480))
+
+    def test_the_surface_is_created_at_device_size(self):
+        win = self.window(width=1000, height=800)
+        created: list[tuple[int, int]] = []
+
+        class Recording:
+            def __init__(self, _hwnd, width, height):
+                created.append((width, height))
+
+            def present(self, *_a, **_k):
+                pass
+
+        with mock.patch.object(type(win), "devicePixelRatioF", lambda _self: 1.25), \
+             mock.patch.object(pattern_view, "HdrSurface", Recording):
+            win.begin()
+        self.assertEqual(created, [(1250, 1000)])
+
+
+class OverlayScalingTests(PatternViewTestCase):
+    """A fixed pixel size is comfortable on 1080p and barely legible across a 32in 4K."""
+
+    def widths(self, width):
+        win = self.window(width=width, height=round(width * 9 / 16))
+        with mock.patch.object(type(win), "devicePixelRatioF", lambda _self: 1.0):
+            raw, overlay_width, _height = pattern_view.render_overlay(
+                min(width, max(pattern_view.OVERLAY_MIN_WIDTH,
+                               round(width * pattern_view.OVERLAY_WIDTH_FRACTION))),
+                400, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
+                scale=max(1.0, min(3.0, width / pattern_view.OVERLAY_REFERENCE_WIDTH)),
+            )
+        return overlay_width, sum(1 for i in range(3, len(raw), 4) if raw[i] > 0)
+
+    def test_the_panel_grows_with_the_display(self):
+        narrow, _ = self.widths(1920)
+        wide, _ = self.widths(3840)
+        self.assertGreater(wide, narrow)
+
+    def test_text_grows_too_rather_than_just_the_box(self):
+        """Widening the panel without scaling the type would leave the same tiny text."""
+        _, narrow_ink = self.widths(1920)
+        _, wide_ink = self.widths(3840)
+        self.assertGreater(wide_ink, narrow_ink * 1.5)
+
+    def test_a_small_display_keeps_a_usable_minimum(self):
+        width, _ = self.widths(1280)
+        self.assertGreaterEqual(width, pattern_view.OVERLAY_MIN_WIDTH)
+
+
 class AcceptMeasurementTests(PatternViewTestCase):
     def build(self):
         recorded: list[tuple[str, float]] = []

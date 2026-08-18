@@ -35,7 +35,12 @@ from .patterns import (
     window_size,
 )
 
-OVERLAY_WIDTH = 460
+# The guidance strip is sized against this reference width and scaled up from there. A
+# fixed pixel size shrinks as resolution grows: at 460 px it is comfortable on 1080p and
+# barely legible across a 32 inch 4K panel, which is the size of display this tool is for.
+OVERLAY_REFERENCE_WIDTH = 1920
+OVERLAY_WIDTH_FRACTION = 0.24
+OVERLAY_MIN_WIDTH = 460
 
 # One arrow press moves the probe this far in PQ code. A fixed step in nits is hopeless at
 # both ends: far too coarse near black where a threshold actually sits, and so fine near
@@ -86,6 +91,7 @@ def render_overlay(
     *,
     assumed_peak: bool = False,
     accepted: dict[str, float] | None = None,
+    scale: float = 1.0,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -100,51 +106,57 @@ def render_overlay(
     painter = QPainter(image)
     try:
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        margin = 18
+        def points(size: int) -> int:
+            return max(6, round(size * scale))
+
+        def spacing(size: int) -> int:
+            return max(1, round(size * scale))
+
+        margin = spacing(18)
         y = margin
 
         heading = QFont()
-        heading.setPointSize(15)
+        heading.setPointSize(points(15))
         heading.setBold(True)
         painter.setFont(heading)
         painter.setPen(QColor(255, 255, 255, 255))
-        painter.drawText(margin, y + 20, pattern.title)
-        y += 40
+        painter.drawText(margin, y + spacing(20), pattern.title)
+        y += spacing(40)
 
         body = QFont()
-        body.setPointSize(10)
+        body.setPointSize(points(10))
         # The criterion goes first and brightest. It is the thing being checked against,
         # and a target buried in a paragraph is a pattern that gets stared at, not read.
         criterion_font = QFont()
-        criterion_font.setPointSize(11)
+        criterion_font.setPointSize(points(11))
         criterion_font.setBold(True)
         painter.setFont(criterion_font)
         painter.setPen(QColor(255, 255, 255, 255))
         box = painter.boundingRect(
-            margin, y, width - margin * 2, 200,
+            margin, y, width - margin * 2, spacing(200),
             int(Qt.TextFlag.TextWordWrap), pattern.criterion,
         )
         painter.drawText(box, int(Qt.TextFlag.TextWordWrap), pattern.criterion)
-        y = box.bottom() + 18
+        y = box.bottom() + spacing(18)
 
         painter.setFont(body)
         painter.setPen(QColor(200, 200, 200, 255))
         box = painter.boundingRect(
-            margin, y, width - margin * 2, 400,
+            margin, y, width - margin * 2, spacing(400),
             int(Qt.TextFlag.TextWordWrap), pattern.instructions,
         )
         painter.drawText(box, int(Qt.TextFlag.TextWordWrap), pattern.instructions)
-        y = box.bottom() + 26
+        y = box.bottom() + spacing(26)
 
         painter.setPen(QColor(150, 150, 150, 255))
         if context.absolute:
-            scale = f"Peak {context.peak_nits:.0f} nits"
+            scale_note = f"Peak {context.peak_nits:.0f} nits"
             if assumed_peak:
-                scale += " (assumed; the panel reports nothing usable)"
+                scale_note += " (assumed; the panel reports nothing usable)"
         else:
-            scale = "SDR: levels are relative to reference white, not nits"
-        painter.drawText(margin, y, scale)
-        y += 30
+            scale_note = "SDR: levels are relative to reference white, not nits"
+        painter.drawText(margin, y, scale_note)
+        y += spacing(30)
 
         if pattern.level_driven:
             # The display holds still and the pattern moves, so the sliders are not what
@@ -153,7 +165,7 @@ def render_overlay(
             reading = (f"{context.probe_nits:.4g} nits" if context.absolute
                        else f"{context.probe_nits:.4g} of white")
             painter.drawText(margin, y, f"Level  {reading}")
-            y += 22
+            y += spacing(22)
             recorded = accepted.get(pattern.key) if accepted else None
             if recorded is not None:
                 painter.setPen(QColor(150, 220, 150, 255))
@@ -162,17 +174,17 @@ def render_overlay(
             else:
                 painter.setPen(QColor(150, 150, 150, 255))
                 painter.drawText(margin, y, "Enter records this level")
-            y += 30
+            y += spacing(30)
         else:
             for index, control in enumerate(controls):
                 selected = index == active
                 painter.setPen(QColor(255, 255, 255, 255) if selected
                                else QColor(140, 140, 140, 255))
                 painter.drawText(margin, y, f"{'▸ ' if selected else '  '}{control.label}")
-                painter.drawText(margin, y + 18, f"   {control.formatted()}")
-                y += 44
+                painter.drawText(margin, y + spacing(18), f"   {control.formatted()}")
+                y += spacing(44)
 
-        y += 10
+        y += spacing(10)
         painter.setPen(QColor(130, 130, 130, 255))
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
         lines = [f"1-{len(PATTERNS)}   pattern"]
@@ -184,7 +196,7 @@ def render_overlay(
         lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
-            y += 20
+            y += spacing(20)
     finally:
         painter.end()
 
@@ -192,7 +204,7 @@ def render_overlay(
 
 
 def render_markers(
-    width: int, height: int, pattern: Pattern, context: PatternContext
+    width: int, height: int, pattern: Pattern, context: PatternContext, scale: float = 1.0
 ) -> tuple[bytes, int, int] | None:
     """Paint a pattern's target labels into a window-sized RGBA image.
 
@@ -211,7 +223,7 @@ def render_markers(
         painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
         for marker in markers:
             font = QFont()
-            font.setPointSize(11 if marker.target else 9)
+            font.setPointSize(max(6, round((11 if marker.target else 9) * scale)))
             font.setBold(marker.target)
             painter.setFont(font)
             painter.setPen(QColor(255, 255, 255, 255) if marker.target
@@ -271,10 +283,23 @@ class PatternWindow(QWidget):
 
     # -- lifecycle -------------------------------------------------------------------
 
+    def device_size(self) -> tuple[int, int]:
+        """The window's size in real pixels, which is not what Qt reports.
+
+        Qt measures in logical units, so on this 125% display a fullscreen widget reports
+        3206x1803 while its client area is 3840x2160. Handing the smaller figure to the
+        swapchain makes DXGI stretch the buffer to fit, and a stretched frame resamples the
+        gamma-match lines -- which is precisely the failure the whole D3D path exists to
+        avoid. Everything here is therefore sized in device pixels.
+        """
+        ratio = self.devicePixelRatioF() or 1.0
+        return (max(1, round(self.width() * ratio)), max(1, round(self.height() * ratio)))
+
     def begin(self) -> bool:
         """Create the swapchain and show the first pattern. False if HDR is unavailable."""
+        width, height = self.device_size()
         try:
-            self._surface = HdrSurface(int(self.winId()), max(1, self.width()), max(1, self.height()))
+            self._surface = HdrSurface(int(self.winId()), width, height)
         except HdrDisplayError as exc:
             self.failure = str(exc)
             return False
@@ -371,12 +396,16 @@ class PatternWindow(QWidget):
     # -- rendering -------------------------------------------------------------------
 
     def build_frame(self) -> bytes:
-        width, height = max(1, self.width()), max(1, self.height())
+        width, height = self.device_size()
         pattern = self.pattern
+        # Text is sized against a reference width so it stays the same physical size as
+        # resolution grows, rather than shrinking into illegibility on a 4K panel.
+        scale = max(1.0, min(3.0, width / OVERLAY_REFERENCE_WIDTH))
+        overlay_width = min(width, max(OVERLAY_MIN_WIDTH, round(width * OVERLAY_WIDTH_FRACTION)))
         overlay = render_overlay(
-            min(OVERLAY_WIDTH, width), min(int(height * 0.8), height),
+            overlay_width, min(int(height * 0.85), height),
             pattern, self._context, self._controls, self._active,
-            assumed_peak=self._assumed_peak, accepted=self.accepted,
+            assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
         )
         block_width, block_height = window_size(
             width, height,
@@ -385,7 +414,8 @@ class PatternWindow(QWidget):
         return compose(
             width, height, pattern, self._context,
             overlay=overlay, overlay_side=self._overlay_side, overlay_nits=OVERLAY_NITS,
-            window_overlay=render_markers(block_width, block_height, pattern, self._context),
+            window_overlay=render_markers(
+                block_width, block_height, pattern, self._context, scale),
         )
 
     def refresh(self) -> None:
@@ -405,7 +435,7 @@ class PatternWindow(QWidget):
         super().resizeEvent(event)
         if self._surface is not None:
             try:
-                self._surface.resize(max(1, self.width()), max(1, self.height()))
+                self._surface.resize(*self.device_size())
             except HdrDisplayError as exc:
                 self.failure = str(exc)
                 return
