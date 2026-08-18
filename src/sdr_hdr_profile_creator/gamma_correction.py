@@ -10,8 +10,6 @@ CORRECTION_OPTIONS: Final[tuple[str, ...]] = (
     "200 nits / Brightness 30",
     "300 nits / Brightness 55",
     "400 nits / Brightness 80",
-    "Unspecified",
-    "SDR",
 )
 
 # Manual presets published by dylanraga. Auto is an app extension that reads the
@@ -21,9 +19,13 @@ _PRESET_WHITE_NITS: Final[dict[str, float]] = {
     "200 nits / Brightness 30": 200.0,
     "300 nits / Brightness 55": 300.0,
     "400 nits / Brightness 80": 400.0,
-    # Compatibility entries from the upstream download list. The SDR profile is
-    # based on the traditional 80-nit SDR reference. "Unspecified" uses the web
-    # generator's 200-nit default when Windows readback is unavailable.
+}
+
+# Retired names. "Unspecified" and "SDR" were filenames in the upstream download list
+# rather than settings anyone would choose, and meant nothing in a dropdown. They are still
+# resolved so a saved profile or state file naming one keeps working instead of silently
+# falling back to a different correction than it was built with.
+_RETIRED_WHITE_NITS: Final[dict[str, float]] = {
     "SDR": 80.0,
     "Unspecified": 200.0,
 }
@@ -62,7 +64,9 @@ def resolve_white_level(option: str, windows_white_nits: float | None) -> float 
         if windows_white_nits is not None and math.isfinite(windows_white_nits):
             return max(80.0, min(480.0, float(windows_white_nits)))
         return 200.0
-    return _PRESET_WHITE_NITS.get(option, 200.0)
+    if option in _PRESET_WHITE_NITS:
+        return _PRESET_WHITE_NITS[option]
+    return _RETIRED_WHITE_NITS.get(option, 200.0)
 
 
 def transform_piecewise_srgb_to_gamma(

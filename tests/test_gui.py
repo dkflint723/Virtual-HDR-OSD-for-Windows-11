@@ -1591,3 +1591,96 @@ class ApplyFromPatternViewTests(WindowTestCase):
         tags = _read_tags(written[0].read_bytes())
         self.assertAlmostEqual(
             struct.unpack_from(">i", tags[b"MHC2"], 16)[0] / 65536.0, 1043.0, places=1)
+
+
+class PanelLuminanceFallbackTests(WindowTestCase):
+    """A profile with no MHC2 says nothing about luminance, so importing one replaced
+    measured figures with a neutral state's defaults. On this display that turned a
+    measured 1080/1080 into 1000/400 and wrote it into the next generated profile."""
+
+    def capability(self, **overrides):
+        from sdr_hdr_profile_creator.hdr_display import (
+            DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            DisplayCapability,
+        )
+
+        base = dict(
+            device_name=self.display.gdi_name, left=0, top=0, right=3840, bottom=2160,
+            bits_per_color=10, color_space=DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
+            min_nits=0.0, max_nits=1080.0, max_full_frame_nits=1080.0,
+            red_primary=(0.67, 0.31), green_primary=(0.27, 0.69),
+            blue_primary=(0.15, 0.06), white_point=(0.313, 0.329),
+        )
+        base.update(overrides)
+        return DisplayCapability(**base)
+
+    def plain_profile(self, name="Calman_Style.icm"):
+        """A profile with colorimetry but no MHC2, as a third-party ICC would be."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        data = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
+        count = int.from_bytes(data[128:132], "big")
+        for index in range(count):
+            offset = 132 + index * 12
+            if data[offset:offset + 4] in (b"MHC2", b"sdhs"):
+                data[offset:offset + 4] = b"targ"
+        path = self.color_dir / name
+        path.write_bytes(bytes(data))
+        return path
+
+    def test_a_profile_without_mhc2_takes_the_panels_luminance(self):
+        path = self.plain_profile()
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability()):
+            self.window._load_profile_from_path(path)
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 1080.0)
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 1080.0)
+
+    def test_it_says_where_the_figures_came_from(self):
+        """Silently adopting numbers from elsewhere would be worse than the bug."""
+        path = self.plain_profile()
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability()):
+            self.window._load_profile_from_path(path)
+        self.assertIn("display's own figures", self.window.status_label.text())
+
+    def test_a_profile_carrying_mhc2_is_left_alone(self):
+        """Its own measured values outrank anything the panel claims about itself."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.peak_luminance_nits = 640.0
+        state.full_frame_luminance_nits = 210.0
+        path = self.color_dir / "Measured.icm"
+        path.write_bytes(build_profile("HDR", state, build_transform(state, hdr=True)))
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability()):
+            self.window._load_profile_from_path(path)
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 640.0)
+
+    def test_a_panel_reporting_nonsense_is_not_believed(self):
+        path = self.plain_profile()
+        with mock.patch.object(app_module, "capability_for_device_name",
+                               lambda _n: self.capability(max_nits=0.0)):
+            self.window._load_profile_from_path(path)
+        self.assertNotIn("display's own figures", self.window.status_label.text())
+
+    def test_full_frame_never_exceeds_peak_even_if_the_panel_claims_it(self):
+        path = self.plain_profile()
+        with mock.patch.object(
+            app_module, "capability_for_device_name",
+            lambda _n: self.capability(max_nits=600.0, max_full_frame_nits=4000.0),
+        ):
+            self.window._load_profile_from_path(path)
+        self.assertLessEqual(self.window.state.hdr.full_frame_luminance_nits,
+                             self.window.state.hdr.peak_luminance_nits)
+
+    def test_no_display_selected_is_not_an_error(self):
+        path = self.plain_profile()
+        with mock.patch.object(self.window, "_selected_display", lambda: None):
+            self.window._load_profile_from_path(path)  # must not raise

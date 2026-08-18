@@ -755,6 +755,20 @@ class PatternWindow(QWidget):
             return True
         return True   # swallow everything else; half-typed input must not switch pattern
 
+    def _fitted_summary(self, width: int, height: int, scale: float) -> tuple[bytes, int, int]:
+        """The summary at the largest scale that fits, as the guidance strip already does.
+
+        render_summary walks its own y with unconditional increments and QPainter clips at
+        the image edge without complaint, so on a narrow or very wide panel the readings
+        themselves could scroll off the bottom -- the results, silently absent, on the one
+        screen whose entire job is showing them.
+        """
+        probe = self.render_summary(width, height * 3, scale)
+        needed = _ink_extent(probe[0], width, height * 3) + 1
+        if 0 < needed > height:
+            scale = max(0.55, scale * (height / needed) * 0.97)
+        return self.render_summary(width, height, scale)
+
     def show_summary(self) -> bool:
         """Return to the results after looking at a pattern."""
         if not self._complete:
@@ -834,7 +848,7 @@ class PatternWindow(QWidget):
                 width, height, pattern_by_key("black-level") or PATTERNS[0],
                 replace(self._context, probe_nits=0.0),
                 fraction=0.0001,
-                overlay=self.render_summary(overlay_width, min(height, round(height * 0.6)), scale),
+                overlay=self._fitted_summary(overlay_width, min(height, round(height * 0.6)), scale),
                 # Centred, and brighter than the measuring overlay: there is no patch left
                 # to contaminate and no dark adaptation left to preserve.
                 overlay_side="centre", overlay_nits=SUMMARY_NITS,

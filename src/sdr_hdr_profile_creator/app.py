@@ -2158,6 +2158,33 @@ class MainWindow(FluentWidget):
     # ----------------------------------------------------------------------------------
     # Import / export
 
+    def _adopt_panel_luminance(self, imported) -> bool:
+        """Fill in luminance the profile does not carry, from what the panel reports.
+
+        A profile with no MHC2 tag says nothing about black point, peak or full-frame
+        luminance, so importing one used to replace measured figures with the generic
+        defaults of a neutral state -- switching to a Calman ICC on this display turned a
+        measured 1080/1080 into 1000/400, and wrote that into the next profile.
+
+        The display itself knows better, and by now the app reads it. Only used when the
+        profile is silent and the panel's own numbers are credible; a profile that carries
+        MHC2 is left entirely alone, and so is a panel reporting nonsense.
+        """
+        if "MHC2" in imported.tags:
+            return False
+        display = self._selected_display()
+        if display is None:
+            return False
+        capability = capability_for_device_name(display.gdi_name)
+        if capability is None or not capability.luminance_is_credible:
+            return False
+        imported.state.minimum_luminance_nits = max(0.0, min(100.0, capability.min_nits))
+        imported.state.peak_luminance_nits = max(80.0, min(10000.0, capability.max_nits))
+        imported.state.full_frame_luminance_nits = max(
+            80.0, min(imported.state.peak_luminance_nits, capability.max_full_frame_nits)
+        )
+        return True
+
     def _load_profile_from_path(self, source: Path) -> None:
         try:
             imported = import_profile(source, "HDR")
@@ -2169,6 +2196,7 @@ class MainWindow(FluentWidget):
             imported.state.base_profile = str(source)
             # Filename, not description; see import_profile.
             imported.state.base_profile_name = source.name
+        adopted = self._adopt_panel_luminance(imported)
         self.state.set_mode_state("HDR", imported.state)
         self._base_is_user_selected = True
         binding = self._selected_binding()
@@ -2187,6 +2215,13 @@ class MainWindow(FluentWidget):
             if imported.exact_state
             else f"Loaded {imported.description}. " + " ".join(imported.warnings)
         )
+        if adopted:
+            state = self.state.hdr
+            message += (
+                f" It carries no luminance data, so the display's own figures were used: "
+                f"{state.peak_luminance_nits:g} nits peak, "
+                f"{state.full_frame_luminance_nits:g} full-frame."
+            )
         self._set_status(message, "warning" if imported.warnings else "ok")
         self._update_activity_bar()
         if self._guide_dialog is not None:

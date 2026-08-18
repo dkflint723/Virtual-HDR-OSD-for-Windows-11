@@ -1307,3 +1307,50 @@ class SummaryReturnTests(PatternViewTestCase):
 
         self.assertIn("S returns here",
                       Path(pattern_view.__file__).read_text(encoding="utf-8"))
+
+
+class SummaryFittingTests(PatternViewTestCase):
+    """render_summary walks its own y with unconditional increments and QPainter clips at
+    the image edge without complaint, so the readings could scroll off the one screen whose
+    entire job is showing them."""
+
+    def finished(self, width=1200, height=800):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, apply=lambda: True)
+        win.resize(width, height)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for value in (0.004, 940.0, 612.0):
+            win.set_probe(value)
+            win.confirm_step()
+        win.confirm_step()
+        return win
+
+    def test_the_summary_fits_at_every_common_shape(self):
+        win = self.finished()
+        for width, height in ((460, 300), (653, 648), (922, 500), (1306, 1296)):
+            with self.subTest(panel=(width, height)):
+                raw, _w, _h = win._fitted_summary(width, height, 2.0)
+                self.assertLess(pattern_view._ink_extent(raw, width, height), height - 2,
+                                "the readings run off the bottom of the results screen")
+
+    def test_a_summary_that_already_fits_is_not_shrunk(self):
+        win = self.finished()
+        fitted, _w, _h = win._fitted_summary(1306, 1296, 2.0)
+        plain, _w2, _h2 = win.render_summary(1306, 1296, 2.0)
+        self.assertEqual(fitted, plain)
+
+    def test_every_reading_survives_a_cramped_panel(self):
+        win = self.finished()
+        raw, width, height = win._fitted_summary(460, 300, 2.0)
+        rows = [any(raw[(y * width + x) * 4 + 3] for x in range(width)) for y in range(height)]
+        bands, run = [], 0
+        for filled in rows:
+            if filled:
+                run += 1
+            elif run:
+                bands.append(run)
+                run = 0
+        if run:
+            bands.append(run)
+        self.assertGreaterEqual(len(bands), 5, f"only {len(bands)} lines survived")

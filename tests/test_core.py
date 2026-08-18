@@ -621,3 +621,35 @@ class CorrectionTargetGammaTests(unittest.TestCase):
         state.gamma = 2.4
         lowered = self.output_nits(state, 100.0)
         self.assertGreater(raised, lowered)
+
+
+class RetiredCorrectionOptionTests(unittest.TestCase):
+    """"Unspecified" and "SDR" were filenames in the upstream download list, not settings
+    anyone would choose. Removing them from the dropdown must not change what a profile
+    already built against one of them resolves to."""
+
+    def test_they_are_no_longer_offered(self):
+        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+
+        for name in ("Unspecified", "SDR"):
+            with self.subTest(option=name):
+                self.assertNotIn(name, CORRECTION_OPTIONS)
+
+    def test_a_saved_state_naming_one_still_resolves_the_same(self):
+        """Otherwise reopening an old profile silently applies a different correction."""
+        self.assertEqual(resolve_white_level("SDR", None), 80.0)
+        self.assertEqual(resolve_white_level("Unspecified", None), 200.0)
+
+    def test_the_offered_options_all_resolve(self):
+        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+
+        for option in CORRECTION_OPTIONS:
+            with self.subTest(option=option):
+                resolved = resolve_white_level(option, 240.0)
+                if option == "Off":
+                    self.assertIsNone(resolved)
+                else:
+                    self.assertGreater(resolved, 0.0)
+
+    def test_an_unknown_name_falls_back_rather_than_raising(self):
+        self.assertEqual(resolve_white_level("something else entirely", None), 200.0)
