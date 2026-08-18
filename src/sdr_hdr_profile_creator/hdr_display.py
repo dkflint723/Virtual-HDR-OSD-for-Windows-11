@@ -85,11 +85,20 @@ class DisplayCapability:
 
     @property
     def luminance_is_credible(self) -> bool:
-        """Whether the panel's reported luminance is worth showing to a user.
+        """Whether the reported luminance describes the panel's HDR colour volume.
 
-        A display reporting zero or an absurd peak has no usable metadata, and the
-        calibration steps then have to be driven by eye or by a meter instead.
+        DXGI reports the colour volume of the mode the output is *currently in*, not a
+        fixed property of the panel. With HDR off, one display here reports 240/240 nits
+        and BT.709 primaries; with HDR on, the same display reports 1080/1080 and DCI-P3.
+        240 is the SDR reference white, and it is perfectly plausible as a number, so a
+        range check alone would accept it and a calibration step would then target the
+        wrong peak entirely. HDR mode is therefore part of the test, not a separate one.
+
+        Beyond that, a display reporting zero or an absurd peak has no usable metadata,
+        and the calibration steps have to be driven by eye or by a meter instead.
         """
+        if not self.is_hdr:
+            return False
         return 40.0 <= self.max_nits <= PQ_MAX_NITS and self.max_full_frame_nits > 0.0
 
     def area_of_intersection(self, left: int, top: int, right: int, bottom: int) -> int:

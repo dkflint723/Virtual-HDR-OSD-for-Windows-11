@@ -92,6 +92,22 @@ class MetadataCredibilityTests(unittest.TestCase):
     def test_missing_full_frame_is_not_credible(self):
         self.assertFalse(capability(max_full_frame_nits=0.0).luminance_is_credible)
 
+    def test_sdr_mode_luminance_is_never_credible(self):
+        """DXGI describes the mode the output is in, not the panel.
+
+        Observed on a real display: HDR off reports 240/240 nits and BT.709 primaries,
+        HDR on reports 1080/1080 and DCI-P3. 240 is the SDR reference white and passes
+        any plain range check, so a calibration step would target it as if it were peak.
+        """
+        with_hdr_off = capability(
+            color_space=DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+            max_nits=240.0, max_full_frame_nits=240.0,
+        )
+        self.assertFalse(with_hdr_off.luminance_is_credible)
+
+    def test_the_same_panel_is_credible_once_hdr_is_on(self):
+        self.assertTrue(capability(max_nits=1080.0, max_full_frame_nits=1080.0).luminance_is_credible)
+
 
 class OutputSelectionTests(unittest.TestCase):
     """Microsoft's guidance is to pick the output by greatest overlap with the window,
