@@ -65,12 +65,20 @@ def resolve_white_level(option: str, windows_white_nits: float | None) -> float 
     return _PRESET_WHITE_NITS.get(option, 200.0)
 
 
-def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float) -> float:
+def transform_piecewise_srgb_to_gamma(
+    pq_input: float, white_level_nits: float, target_gamma: float = 2.2
+) -> float:
     """Port of dylanraga's current NVIDIA LUT generator direction.
 
     PQ input -> absolute luminance -> piecewise-sRGB signal relative to SDR white
-    -> reinterpret that signal through pure gamma 2.2 -> absolute luminance -> PQ.
+    -> reinterpret that signal through a pure power curve -> absolute luminance -> PQ.
     Values above diffuse SDR white are left untouched.
+
+    ``target_gamma`` is the curve the SDR range is reinterpreted through. dylanraga's web
+    generator exposes it for the same reason it is exposed here: it is the one parameter
+    of the correction a user might genuinely want to move, and moving it *inside* the
+    correction keeps everything above diffuse white at exact identity. Applying a separate
+    power afterwards does not -- see :func:`~.curves._shape_curve`.
     """
     x = max(0.0, min(1.0, float(pq_input)))
     if x <= 0.0:
@@ -80,5 +88,10 @@ def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float
     if luminance > white:
         return x
     srgb_signal = srgb_inverse_eotf(luminance / white)
-    gamma_luminance = white * srgb_signal**2.2
+    gamma_luminance = white * srgb_signal ** max(0.1, float(target_gamma))
     return max(0.0, min(1.0, pq_inverse_eotf(gamma_luminance)))
+
+
+def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float) -> float:
+    """The correction at its default 2.2 target."""
+    return transform_piecewise_srgb_to_gamma(pq_input, white_level_nits, 2.2)

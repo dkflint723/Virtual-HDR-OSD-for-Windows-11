@@ -543,3 +543,81 @@ class DisplayConfigLayoutTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CorrectionTargetGammaTests(unittest.TestCase):
+    """The Gamma slider sets the correction's target rather than applying a second power.
+
+    The correction's defining promise is that everything above diffuse SDR white is left
+    at exact identity, because native HDR content lives there and does not want it. A
+    power applied to PQ code afterwards lifts that range too, so moving one slider used to
+    silently rebrighten HDR highlights the correction never touches.
+    """
+
+    @staticmethod
+    def output_nits(state, nits, white=200.0):
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
+
+        transform = build_transform(state, hdr=True, sdr_white_nits=white)
+        position = pq_inverse_eotf(nits) * (len(transform.red) - 1)
+        low = int(position)
+        high = min(len(transform.red) - 1, low + 1)
+        value = transform.red[low] + (transform.red[high] - transform.red[low]) * (position - low)
+        return pq_eotf(value)
+
+    def corrected(self, gamma):
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.sdr_gamma_correction = "200 nits / Brightness 30"
+        state.gamma = gamma
+        return state
+
+    def test_highlights_are_untouched_at_every_gamma_setting(self):
+        for gamma in (1.8, 2.0, 2.2, 2.4, 2.6):
+            for nits in (400.0, 1000.0, 4000.0):
+                with self.subTest(gamma=gamma, nits=nits):
+                    self.assertAlmostEqual(
+                        self.output_nits(self.corrected(gamma), nits), nits, delta=nits * 0.01,
+                        msg="the correction stopped being identity above diffuse white",
+                    )
+
+    def test_diffuse_white_itself_stays_put(self):
+        for gamma in (1.8, 2.2, 2.6):
+            with self.subTest(gamma=gamma):
+                self.assertAlmostEqual(
+                    self.output_nits(self.corrected(gamma), 200.0), 200.0, delta=2.0)
+
+    def test_the_slider_does_move_the_sdr_range(self):
+        """It must still do something, or it would be a control that does nothing."""
+        dark = self.output_nits(self.corrected(2.4), 50.0)
+        bright = self.output_nits(self.corrected(2.0), 50.0)
+        self.assertGreater(bright, dark * 1.05)
+
+    def test_the_target_matches_the_reference_transform(self):
+        """Cross-checked against the correction evaluated directly at that target."""
+        from sdr_hdr_profile_creator.gamma_correction import (
+            pq_eotf,
+            pq_inverse_eotf,
+            transform_piecewise_srgb_to_gamma,
+        )
+
+        for nits in (5.0, 50.0, 100.0):
+            with self.subTest(nits=nits):
+                expected = pq_eotf(
+                    transform_piecewise_srgb_to_gamma(pq_inverse_eotf(nits), 200.0, 2.0))
+                self.assertAlmostEqual(
+                    self.output_nits(self.corrected(2.0), nits), expected, delta=expected * 0.02)
+
+    def test_gamma_still_works_as_a_plain_power_with_the_correction_off(self):
+        """With nothing to fold a target into, it has to stay an independent control."""
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.sdr_gamma_correction = "Off"
+        state.gamma = 2.0
+        raised = self.output_nits(state, 100.0)
+        state.gamma = 2.4
+        lowered = self.output_nits(state, 100.0)
+        self.assertGreater(raised, lowered)

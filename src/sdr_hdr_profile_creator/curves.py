@@ -4,7 +4,7 @@ import math
 from dataclasses import dataclass
 
 from .model import ModeState
-from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma22
+from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma
 
 
 @dataclass(slots=True)
@@ -241,11 +241,18 @@ def _shape_curve(value: float, state: ModeState, hdr: bool, sdr_white_nits: floa
     # Optional SDR-in-HDR correction follows dylanraga's documented direction.
     white_level = resolve_white_level(state.sdr_gamma_correction, sdr_white_nits)
     if white_level is not None:
-        x = transform_piecewise_srgb_to_gamma22(x, white_level)
-
-    # Traditional gamma remains an independent control. 2.20 is mathematically neutral.
-    gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
-    y = x**gamma_ratio
+        # The slider sets the correction's *target* rather than applying a second power on
+        # top of it. Stacking the two is not equivalent and is not harmless: a power
+        # applied to PQ code afterwards lifts everything, including the highlights above
+        # diffuse white that the correction deliberately leaves at identity. At 2.0 that
+        # put diffuse white 32% high and 1000-nit highlights 20% high, so moving one
+        # slider silently rebrightened native HDR content the correction never touches.
+        y = transform_piecewise_srgb_to_gamma(x, white_level, float(state.gamma))
+    else:
+        # With no correction there is nothing to fold the target into, so gamma stays an
+        # independent power. 2.20 is mathematically neutral.
+        gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
+        y = x**gamma_ratio
 
     # Contrast uses a smooth symmetric S-curve with fixed 0, 0.5 and 1 anchors.
     y = _contrast_curve(y, float(state.contrast))
