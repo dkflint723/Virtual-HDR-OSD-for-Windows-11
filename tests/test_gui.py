@@ -988,6 +988,73 @@ class ProfileBindingTests(WindowTestCase):
         self.assertEqual(reloaded.display_bindings[key].sdr_profile, "Calman_SDR_Calibrated.icm")
 
 
+class PanelGamutWarningTests(WindowTestCase):
+    """A monitor's colour-space mode changes in its own OSD, unobservable from the PC."""
+
+    P3 = ((0.6746, 0.3144), (0.2698, 0.6859), (0.1512, 0.0609))
+    BT709 = ((0.6400, 0.3300), (0.3000, 0.6000), (0.1500, 0.0600))
+
+    def setUp(self):
+        super().setUp()
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        base = self.color_dir / "PanelBase.icc"
+        base.write_bytes(build_profile("HDR", state, build_transform(state, hdr=True)))
+        self.window.state.hdr.base_profile = str(base)
+        self.display.advanced_color_kind = "HDR"
+
+    def fake_panel(self, primaries, *, is_hdr=True):
+        from sdr_hdr_profile_creator import hdr_display
+
+        capability = hdr_display.DisplayCapability(
+            device_name=self.display.gdi_name, left=0, top=0, right=100, bottom=100,
+            bits_per_color=10,
+            color_space=(hdr_display.DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 if is_hdr
+                         else hdr_display.DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709),
+            min_nits=0.0, max_nits=1080.0, max_full_frame_nits=1080.0,
+            red_primary=primaries[0], green_primary=primaries[1], blue_primary=primaries[2],
+            white_point=(0.3127, 0.329),
+        )
+        return mock.patch.object(app_module, "capability_for_device_name", lambda _name: capability)
+
+    def described_primaries(self):
+        from sdr_hdr_profile_creator.icc import profile_primaries_xy
+
+        return profile_primaries_xy(Path(self.window.state.hdr.base_profile).read_bytes())[:3]
+
+    def test_a_changed_panel_gamut_is_reported(self):
+        far = tuple((x + 0.08, y - 0.04) for x, y in self.described_primaries())
+        with self.fake_panel(far):
+            self.window._warn_if_panel_gamut_changed(self.display)
+        self.assertIn("colour space", self.window.status_label.text())
+
+    def test_a_matching_panel_says_nothing(self):
+        self.window._set_status("baseline", "ok")
+        unchanged = self.window.status_label.text()
+        with self.fake_panel(self.described_primaries()):
+            self.window._warn_if_panel_gamut_changed(self.display)
+        self.assertEqual(self.window.status_label.text(), unchanged)
+
+    def test_nothing_is_claimed_while_hdr_is_off(self):
+        """DXGI reports the current mode's colour volume, so its primaries mean nothing
+        about HDR while the display is in SDR. This is how a correctly set up machine --
+        an sRGB-clamped SDR mode on a wide-gamut panel -- would otherwise be warned at."""
+        self.display.advanced_color_kind = "SDR"
+        self.window._set_status("baseline", "ok")
+        unchanged = self.window.status_label.text()
+        with self.fake_panel(self.BT709, is_hdr=False):
+            self.window._warn_if_panel_gamut_changed(self.display)
+        self.assertEqual(self.window.status_label.text(), unchanged)
+
+    def test_a_missing_base_profile_is_not_an_error(self):
+        self.window.state.hdr.base_profile = str(self.color_dir / "gone.icc")
+        with self.fake_panel(self.BT709):
+            self.window._warn_if_panel_gamut_changed(self.display)  # must not raise
+
+
 class HdrSwitchTests(WindowTestCase):
     def test_switch_reflects_the_current_display_mode(self):
         self.assertTrue(self.window.hdr_switch.isChecked())

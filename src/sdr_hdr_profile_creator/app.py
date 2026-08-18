@@ -44,7 +44,15 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
-from .icc import build_profile, content_digest, import_profile, is_app_generated
+from .hdr_display import capability_for_device_name
+from .icc import (
+    build_profile,
+    content_digest,
+    import_profile,
+    is_app_generated,
+    primaries_disagree,
+    profile_primaries_xy,
+)
 from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState
 from .windows_api import (
     DisplayInfo,
@@ -1130,6 +1138,7 @@ class MainWindow(FluentWidget):
             self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
             self._set_status(f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.", "ok")
+            self._warn_if_panel_gamut_changed(selected)
 
     def _display_selected(self, _index: int) -> None:
         selected = self.display_combo.currentData()
@@ -1444,6 +1453,44 @@ class MainWindow(FluentWidget):
         generated = is_app_generated(path)
         self._generated_profile_cache[path.name] = (stamp.st_mtime_ns, stamp.st_size, generated)
         return generated
+
+    def _warn_if_panel_gamut_changed(self, display: DisplayInfo) -> None:
+        """Say so when the HDR base profile no longer describes the panel.
+
+        A monitor's colour-space mode is set in its own OSD, where nothing on the PC can
+        watch it change. Switch a display from DCI-P3 to sRGB and every HDR profile on it
+        silently describes a panel that is no longer there, with no error anywhere.
+
+        Only the HDR base is compared, and only while HDR is on. A pinned SDR profile is
+        frequently and correctly targeted at BT.709 even on a wide-gamut panel -- Calman
+        does exactly that -- so comparing it here would warn about a display that is set
+        up properly. DXGI likewise reports the current mode's colour volume, so its
+        primaries mean nothing about HDR while the display is in SDR.
+        """
+        if display.current_mode != "HDR":
+            return
+        capability = capability_for_device_name(display.gdi_name)
+        if capability is None or not capability.is_hdr:
+            return
+        base = self.state.hdr.base_profile
+        if not base:
+            return
+        try:
+            described = profile_primaries_xy(Path(base).read_bytes())
+        except OSError:
+            return
+        if described is None:
+            return
+        panel = (capability.red_primary, capability.green_primary, capability.blue_primary)
+        worst = primaries_disagree(described[:3], panel)
+        if not worst:
+            return
+        self._set_status(
+            f"{Path(base).name} describes different primaries than {display.friendly_name} "
+            f"now reports (up to {worst:.3f} xy apart). If you changed the monitor's colour "
+            "space in its own menu, recalibrate or pick a profile made for the new mode.",
+            "warning",
+        )
 
     def _announce_diverged_base(self, pinned: str, windows_default: str) -> None:
         """Say once that Windows' HDR default no longer matches the pinned base.

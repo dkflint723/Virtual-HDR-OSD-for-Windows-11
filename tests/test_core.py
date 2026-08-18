@@ -364,6 +364,67 @@ class BaseNameMigrationTests(unittest.TestCase):
         self.assertEqual(second.base_profile_name, "A B.icc")
 
 
+class PanelGamutAgreementTests(unittest.TestCase):
+    """A monitor's gamut mode lives in its own OSD, invisible to the PC.
+
+    Switching a display from DCI-P3 to sRGB leaves every HDR profile describing a panel
+    that no longer exists, with no error raised anywhere. Comparing what the profile
+    claims against what DXGI reports is the only way to notice.
+    """
+
+    P3 = ((0.6746, 0.3144), (0.2698, 0.6859), (0.1512, 0.0609))
+    BT709 = ((0.6400, 0.3300), (0.3000, 0.6000), (0.1500, 0.0600))
+
+    def test_primaries_are_reported_undapted_not_in_the_d50_pcs(self):
+        """ICC stores colorants adapted to D50; raw tag values are not the primaries.
+
+        A generated profile is built from D65 primaries, so reading it back must return
+        something near D65 sRGB rather than the D50-adapted numbers actually on disk.
+        """
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile, profile_primaries_xy
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("SDR")
+        data = build_profile("SDR", state, build_transform(state, hdr=False))
+        result = profile_primaries_xy(data)
+        self.assertIsNotNone(result)
+        red, _green, _blue, white = result
+        self.assertAlmostEqual(white[0], 0.3127, places=2)
+        self.assertAlmostEqual(white[1], 0.3290, places=2)
+        self.assertGreater(red[0], 0.55, "red x collapsed; the D50 adaptation was not undone")
+
+    def test_a_profile_without_colorants_reports_nothing(self):
+        from sdr_hdr_profile_creator.icc import profile_primaries_xy
+
+        self.assertIsNone(profile_primaries_xy(b"not an icc profile at all"))
+
+    def test_matching_profile_and_panel_agree(self):
+        from sdr_hdr_profile_creator.icc import primaries_disagree
+
+        self.assertEqual(primaries_disagree(self.P3, self.P3), 0.0)
+
+    def test_measurement_noise_does_not_trip_the_check(self):
+        """A real matching pair agrees to about 0.00005 xy; that must not alarm."""
+        from sdr_hdr_profile_creator.icc import primaries_disagree
+
+        nudged = tuple((x + 0.00005, y - 0.00005) for x, y in self.P3)
+        self.assertEqual(primaries_disagree(self.P3, nudged), 0.0)
+
+    def test_the_smallest_real_gamut_change_is_caught(self):
+        """DCI-P3 to BT.709 is the mildest switch a monitor OSD offers."""
+        from sdr_hdr_profile_creator.icc import primaries_disagree
+
+        worst = primaries_disagree(self.P3, self.BT709)
+        self.assertGreater(worst, 0.03)
+
+    def test_the_threshold_sits_between_noise_and_real_change(self):
+        from sdr_hdr_profile_creator.icc import PRIMARY_MISMATCH_THRESHOLD_XY
+
+        self.assertGreater(PRIMARY_MISMATCH_THRESHOLD_XY, 0.0005, "would fire on noise")
+        self.assertLess(PRIMARY_MISMATCH_THRESHOLD_XY, 0.03, "would miss a P3 to BT.709 switch")
+
+
 class TemplateMergeTests(unittest.TestCase):
     """A base profile is an ICC tag template; half of one is worse than none."""
 

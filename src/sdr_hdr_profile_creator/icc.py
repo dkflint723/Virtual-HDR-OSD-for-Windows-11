@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .curves import CalibrationTransform, estimate_curve_gamma
+from .curves import CalibrationTransform, _inverse3, estimate_curve_gamma
 from .model import DisplayMode, ModeState
 
 D50_XYZ = (0.9642, 1.0, 0.8249)
@@ -493,6 +493,90 @@ def _parse_xyz_y(payload: bytes) -> float | None:
     if len(payload) < 20 or payload[:4] != b"XYZ ":
         return None
     return struct.unpack_from(">i", payload, 12)[0] / 65536.0
+
+
+def _parse_xyz(payload: bytes) -> tuple[float, float, float] | None:
+    if len(payload) < 20 or payload[:4] != b"XYZ ":
+        return None
+    return tuple(struct.unpack_from(">i", payload, 8 + 4 * i)[0] / 65536.0 for i in range(3))
+
+
+def _parse_chad(payload: bytes) -> tuple[float, ...] | None:
+    """The chromatic adaptation matrix, as nine s15Fixed16 values after an 8 byte header."""
+    if len(payload) < 44 or payload[:4] != b"sf32":
+        return None
+    return tuple(struct.unpack_from(">i", payload, 8 + 4 * i)[0] / 65536.0 for i in range(9))
+
+
+def _to_xy(xyz: tuple[float, float, float]) -> tuple[float, float]:
+    total = sum(xyz)
+    if total <= 0.0:
+        return (0.0, 0.0)
+    return (xyz[0] / total, xyz[1] / total)
+
+
+def profile_primaries_xy(
+    profile: bytes,
+) -> tuple[tuple[float, float], tuple[float, float], tuple[float, float], tuple[float, float]] | None:
+    """The display primaries and white a profile describes, as CIE xy chromaticities.
+
+    ICC stores colorant tags adapted to the D50 profile connection space, so the raw
+    rXYZ/gXYZ/bXYZ values are not the display's primaries and comparing them against
+    anything measured would be wrong. The profile's own ``chad`` is inverted to undo that
+    adaptation; a profile without one is assumed to be unadapted already.
+
+    Returns ``None`` when the profile has no colorant tags at all, which is normal for
+    LUT-based profiles.
+    """
+    try:
+        tags = _read_tags(profile)
+    except ValueError:
+        return None
+    try:
+        red = _parse_xyz(tags[b"rXYZ"])
+        green = _parse_xyz(tags[b"gXYZ"])
+        blue = _parse_xyz(tags[b"bXYZ"])
+        white = _parse_xyz(tags[b"wtpt"])
+    except KeyError:
+        return None
+    if red is None or green is None or blue is None or white is None:
+        return None
+
+    chad = _parse_chad(tags.get(b"chad", b""))
+    if chad is not None:
+        try:
+            undo = _inverse3(chad)
+        except ValueError:
+            return None
+        red, green, blue, white = (_matrix_vector(undo, v) for v in (red, green, blue, white))
+    return (_to_xy(red), _to_xy(green), _to_xy(blue), _to_xy(white))
+
+
+# A matching profile and panel agree to about 0.00005 xy on a real display, while the
+# smallest gamut change a monitor's OSD can make -- DCI-P3 to BT.709 -- moves red by 0.035.
+# Anything between those is a comfortable threshold; this sits ~100x above the noise and
+# ~7x below the smallest real change.
+PRIMARY_MISMATCH_THRESHOLD_XY = 0.005
+
+
+def primaries_disagree(
+    profile_primaries: tuple[tuple[float, float], ...],
+    panel_primaries: tuple[tuple[float, float], ...],
+    *,
+    threshold: float = PRIMARY_MISMATCH_THRESHOLD_XY,
+) -> float:
+    """Largest per-primary xy distance between a profile and a panel, or 0.0 if they agree.
+
+    A monitor's gamut mode lives in its own OSD, where nothing on the PC can observe it
+    changing. Switch a display from DCI-P3 to sRGB and every HDR profile silently
+    describes the wrong panel, with no error anywhere. Comparing the two readings is the
+    only way to notice.
+    """
+    worst = 0.0
+    for profile_xy, panel_xy in zip(profile_primaries[:3], panel_primaries[:3]):
+        distance = math.hypot(profile_xy[0] - panel_xy[0], profile_xy[1] - panel_xy[1])
+        worst = max(worst, distance)
+    return worst if worst > threshold else 0.0
 
 
 def _parse_vcgt(payload: bytes) -> tuple[list[float], list[float], list[float]] | None:
