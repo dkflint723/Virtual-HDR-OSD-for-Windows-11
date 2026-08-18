@@ -523,7 +523,7 @@ class ToneTrackingGuidanceTests(unittest.TestCase):
         return pattern_by_key("tone-tracking").instructions
 
     def test_it_asks_about_the_level_on_screen_first(self):
-        self.assertIn("Look at the bar now", self.instructions())
+        self.assertIn("Assess the bar here", self.instructions())
 
     def test_it_says_how_to_reach_the_other_levels(self):
         self.assertIn("Up and Down", self.instructions())
@@ -547,11 +547,54 @@ class ToneTrackingGuidanceTests(unittest.TestCase):
                     "an outcome with no direction to move in",
                 )
 
-    def test_it_says_the_pattern_of_errors_is_what_matters(self):
+    def test_it_says_the_overall_pattern_is_what_matters(self):
         """A single level says nothing on its own; that has to be stated or it will be
         read as a per-level verdict."""
-        self.assertIn("pattern of errors", self.instructions())
+        self.assertIn("overall pattern", self.instructions())
 
     def test_the_criterion_describes_this_level_not_a_row_of_them(self):
         criterion = pattern_by_key("tone-tracking").criterion
-        self.assertIn("here", criterion)
+        self.assertIn("this level", criterion)
+
+
+class InstructionVoiceTests(unittest.TestCase):
+    """This text ships to every user of the tool, not to whoever it was drafted beside.
+
+    It drifted into second-person commentary during development -- reassurance, asides,
+    and references to a previous pattern as though the reader had just been looking at it.
+    """
+
+    CONVERSATIONAL = (
+        "this one", "you can", "you see", "your eyes", "costs you", "that is normal",
+        "same test as before", "come back", "go slowly", "doing its job", "what you saw",
+    )
+
+    def all_copy(self):
+        for pattern in PATTERNS:
+            yield pattern.key, " ".join(
+                (pattern.purpose, pattern.criterion, pattern.instructions)).lower()
+
+    def test_no_pattern_addresses_the_reader_conversationally(self):
+        for key, text in self.all_copy():
+            for phrase in self.CONVERSATIONAL:
+                with self.subTest(pattern=key, phrase=phrase):
+                    self.assertNotIn(phrase, text)
+
+    def test_no_pattern_refers_to_another_by_position(self):
+        """"The one before" means nothing to someone who arrived by number key."""
+        for key, text in self.all_copy():
+            for phrase in ("as before", "previous pattern", "the one before"):
+                with self.subTest(pattern=key, phrase=phrase):
+                    self.assertNotIn(phrase, text)
+
+    def test_every_criterion_is_a_statement_of_the_correct_state(self):
+        """Not an instruction and not a description of the pattern: the thing to check."""
+        for pattern in PATTERNS:
+            with self.subTest(pattern=pattern.key):
+                self.assertGreater(len(pattern.criterion), 20)
+                self.assertFalse(pattern.criterion.lower().startswith(("press ", "hold ", "tap ")))
+
+    def test_numbered_steps_are_used_wherever_there_is_a_procedure(self):
+        for key in ("black-level", "peak-white", "full-frame-white", "solid-patch"):
+            with self.subTest(pattern=key):
+                self.assertIn("1.", pattern_by_key(key).instructions)

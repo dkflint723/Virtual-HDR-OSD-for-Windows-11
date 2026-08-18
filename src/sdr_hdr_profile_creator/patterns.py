@@ -474,11 +474,11 @@ PATTERNS: tuple[Pattern, ...] = (
         purpose="Reads the transfer function the display is actually producing.",
         criterion="The patch labelled TARGET is the one that vanishes into the lines.",
         instructions=(
-            "This one needs distance. At a desk the lines will not blend -- stand back "
-            "about two metres, or squint until they turn into flat grey.\n\n"
+            "Requires viewing distance. The lines do not blend at a desk: view from about "
+            "two metres, or squint until they merge into flat grey.\n\n"
             "1. Find the single patch that disappears into the background.\n"
-            "2. If it sits above TARGET, press Left; if below, press Right.\n"
-            "3. Repeat until TARGET is the one that disappears."
+            "2. If it sits above TARGET, press Left. If below, press Right.\n"
+            "3. Repeat until TARGET is the patch that disappears."
         ),
         render=_render_gamma_match,
         markers=_gamma_markers,
@@ -487,12 +487,12 @@ PATTERNS: tuple[Pattern, ...] = (
         key="black-level",
         title="Black level",
         purpose="Measures the darkest luminance this display can still show.",
-        criterion="Correct is the lowest level at which the shape is still just visible.",
+        criterion="The lowest level at which the shape remains just visible.",
         instructions=(
-            "1. Turn the room lights off and wait a minute for your eyes to adjust.\n"
-            "2. Hold Left until the circle disappears completely.\n"
-            "3. Tap Right until you can just barely see it again.\n"
-            "4. Press Enter."
+            "Best performed in a dark room, after a minute of visual adjustment.\n\n"
+            "1. Hold Left until the circle disappears completely.\n"
+            "2. Tap Right until it becomes just visible again.\n"
+            "3. Press Enter."
         ),
         render=_render_black_level,
         markers=_probe_markers,
@@ -501,14 +501,15 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="peak-white",
         title="Peak white",
-        purpose="Measures peak luminance instead of trusting the panel's own claim.",
-        criterion="Correct is the highest level at which the shape still separates.",
+        purpose="Measures peak luminance rather than trusting the panel's declared figure.",
+        criterion="The highest level at which the circle still separates from its surround.",
         instructions=(
-            "There is a circle here slightly brighter than the square around it.\n\n"
-            "1. Hold Right until the circle vanishes into the square.\n"
-            "2. Tap Left until you can just separate them again.\n"
+            "The circle is slightly brighter than the square around it.\n\n"
+            "1. Hold Right until the circle merges into the square.\n"
+            "2. Tap Left until the two separate again.\n"
             "3. Press Enter.\n\n"
-            "Go slowly near the top: the panel takes a few seconds to settle."
+            "Allow a few seconds between steps near the top of the range. Emissive panels "
+            "take time to settle, and a reading taken before they do will be wrong."
         ),
         render=_render_peak_clip,
         markers=_probe_markers,
@@ -517,16 +518,16 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="full-frame-white",
         title="Full-frame white",
-        purpose="Measures how bright the display sustains with the whole screen lit.",
-        criterion="Correct is the highest level at which the circle still separates.",
+        purpose="Measures the luminance the display sustains with the whole screen lit.",
+        criterion="The highest level at which the circle still separates from its surround.",
         instructions=(
-            "Same test as before, but the whole screen is lit so the brightness limiter "
-            "is working. It will be uncomfortable; that is normal.\n\n"
-            "1. Hold Right until the circle vanishes into the background.\n"
-            "2. Tap Left until you can just separate them again.\n"
+            "The whole screen is lit, so the panel's brightness limiter is engaged. This "
+            "pattern is bright by design.\n\n"
+            "1. Hold Right until the circle merges into the background.\n"
+            "2. Tap Left until the two separate again.\n"
             "3. Press Enter.\n\n"
-            "Expect a lower number than peak white on an OLED. That gap is the limiter "
-            "doing its job, not a fault."
+            "On an emissive panel this figure normally falls well below peak white. The "
+            "difference is the brightness limiter, not a defect."
         ),
         render=_render_peak_clip,
         markers=_probe_markers,
@@ -536,23 +537,23 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="tone-tracking",
         title="Tone tracking",
-        purpose="Names which of the three tone controls is wrong, at normal viewing distance.",
-        criterion="Correct is the bar only just visible -- here, and at every other level.",
+        purpose="Identifies which tone control is misadjusted, at normal viewing distance.",
+        criterion="The bar only just visible, at this level and at every other.",
         instructions=(
-            "There is a faint bar across the middle of this patch. One level is shown at a "
-            "time, because a bright field anywhere on screen makes a dark one impossible "
-            "to judge.\n\n"
-            "1. Look at the bar now. Is it too faint to find, about right, or obvious?\n"
-            "2. Up and Down move to the next level. Give your eyes a few seconds each time.\n"
-            "3. Walk all seven, then match what you saw against the list below.\n"
-            "4. Tab picks a control, Left and Right move it. Then walk the levels again.\n\n"
+            "A faint bar crosses the middle of the patch. Levels are shown one at a time, "
+            "because a bright area anywhere on screen prevents a dark one from being "
+            "judged.\n\n"
+            "1. Assess the bar here: too faint to find, about right, or obvious.\n"
+            "2. Up and Down move between levels. Allow a few seconds at each.\n"
+            "3. Cover all seven, then compare the result against the table below.\n"
+            "4. Tab selects a control, Left and Right adjust it. Repeat the sweep.\n\n"
             "too faint at the DARK levels only    -> raise Midtone Brightness\n"
             "too faint at the BRIGHT levels only  -> lower Midtone Brightness\n"
             "too faint at BOTH ends               -> lower Contrast\n"
             "too obvious at BOTH ends             -> raise Contrast\n"
-            "wrong the same way at EVERY level    -> adjust Gamma\n\n"
-            "Only the pattern of errors matters, not any single level. Change one control "
-            "at a time."
+            "wrong by the same amount EVERYWHERE  -> adjust Gamma\n\n"
+            "Only the overall pattern is meaningful. No single level indicates anything on "
+            "its own. Adjust one control at a time."
         ),
         render=_render_tone_tracking,
         markers=_tone_tracking_markers,
@@ -562,11 +563,12 @@ PATTERNS: tuple[Pattern, ...] = (
         key="grey-staircase",
         title="Grey staircase",
         purpose="Shows crush, clipping and banding across the whole range at once.",
-        criterion="Correct is every step distinguishable from both of its neighbours.",
+        criterion="Every step distinguishable from both of its neighbours.",
         instructions=(
-            "Steps merging at the dark end is crush; merging at the bright end is "
-            "clipping. This is a check rather than an adjustment: fix it with Black level "
-            "and Peak white, then come back and confirm."
+            "Steps merging at the dark end indicate crush. Steps merging at the bright end "
+            "indicate clipping.\n\n"
+            "This is a verification pattern rather than an adjustment. Correct the cause "
+            "using Black level and Peak white, then return here to confirm."
         ),
         render=_render_grey_staircase,
         markers=_staircase_markers,
@@ -574,12 +576,13 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="near-black",
         title="Shadow ladder",
-        purpose="Shows how far into the shadows detail survives, in real luminance.",
-        criterion="Correct is being able to separate every labelled patch from the one beside it.",
+        purpose="Shows how far into the shadows detail survives, in absolute luminance.",
+        criterion="Every labelled patch distinguishable from the one beside it.",
         instructions=(
-            "Labels are nits. Note the darkest patch you can still separate from black; "
-            "everything below it is being crushed. Use this to see what the SDR-in-HDR "
-            "correction costs you: it takes 0.5 nits to roughly 0.1."
+            "Labels are nits. The darkest patch still separable from the background marks "
+            "where shadow detail ends; everything below it is crushed.\n\n"
+            "Also shows the cost of the SDR-in-HDR correction, which takes 0.5 nits down "
+            "to roughly 0.1."
         ),
         render=_render_near_black,
         markers=_near_black_markers,
@@ -588,23 +591,25 @@ PATTERNS: tuple[Pattern, ...] = (
         key="neutral-ramp",
         title="Neutral ramp",
         purpose="Exposes tint that drifts across the luminance range.",
-        criterion="Correct is a sweep with no colour in it at any point.",
+        criterion="A sweep with no colour visible at any point.",
         instructions=(
-            "Look for colour creeping in at one end and not the other. A uniform cast is "
-            "hard to judge without a reference; a drifting one is not, and it is what the "
-            "per-channel Fine Balance trims correct."
+            "Look for colour appearing at one end of the sweep and not the other.\n\n"
+            "A uniform cast cannot be judged reliably without a reference. A drifting one "
+            "can, and it is what the per-channel Fine Balance trims correct."
         ),
         render=_render_neutral_ramp,
     ),
     Pattern(
         key="solid-patch",
         title="Solid patch",
-        purpose="One flat level, for a meter to read.",
-        criterion="Nothing to judge by eye: this is the patch a meter measures.",
+        purpose="A single flat level for meter measurement.",
+        criterion="Not judged by eye. This is the patch a meter reads.",
         instructions=(
-            "Set the level, place the meter against the centre of the patch, and let it "
-            "settle. Emissive panels drift for several seconds after a bright patch "
-            "appears, and a reading taken too early is simply wrong."
+            "1. Set the level.\n"
+            "2. Place the meter against the centre of the patch.\n"
+            "3. Allow the reading to settle before recording it.\n\n"
+            "Emissive panels drift for several seconds after a bright patch appears. A "
+            "reading taken before the panel settles will be wrong."
         ),
         render=_render_solid_patch,
         markers=_probe_markers,
@@ -613,12 +618,13 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="colour-patches",
         title="Colour patches",
-        purpose="Hue and saturation sanity, including memory colours.",
-        criterion="Correct is skin, sky and foliage all looking unremarkable.",
+        purpose="Hue and saturation check, including memory colours.",
+        criterion="Skin, sky and foliage all appearing unremarkable.",
         instructions=(
-            "Those three are the colours the eye judges hardest, which is what makes them "
-            "useful. Check these after the greyscale is right, never before -- white "
-            "balance moves every one of them."
+            "Memory colours are the hardest for the eye to accept as wrong, which is what "
+            "makes them useful here.\n\n"
+            "Check this pattern after greyscale is correct, never before: white balance "
+            "moves every one of them."
         ),
         render=_render_colour_patches,
     ),
