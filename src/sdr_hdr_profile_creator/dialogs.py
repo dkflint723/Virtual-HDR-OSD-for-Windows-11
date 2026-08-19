@@ -162,12 +162,18 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
         "hdr_active",
     ),
     GuideStep(
-        "2 · Optional — create a base profile with Windows HDR Calibration",
-        "This tool edits an existing HDR profile rather than inventing one. The strongly recommended base is "
-        "Microsoft's free Windows HDR Calibration app, which measures your panel's real black point, peak "
-        "brightness and full-frame brightness.\n\n"
-        "It is a separate Microsoft download, so this is the one step that lives outside this window. Run it "
-        "once and save the profile. Skip this entirely if you already have an HDR profile you trust.",
+        "2 · Decide where the colour data comes from",
+        "A profile needs to know what the display can actually do. There are two ways to supply that, "
+        "and either produces a complete profile."
+        "\n\n"
+        "Build it from the display itself. In row 2, choose the first entry in the HDR profile list. "
+        "The panel reports its own primaries and peak brightness, and those are used directly. Nothing "
+        "to install, and no measurements to take."
+        "\n\n"
+        "Or start from a profile you already have. Anything from Microsoft's free Windows HDR "
+        "Calibration app, or from calibration software such as Calman or DisplayCAL, can be used as "
+        "the base. That is worth doing if the profile was made with a meter, because a measurement "
+        "describes your individual unit where the panel's own figures describe the model.",
         "Get Windows HDR Calibration",
         "hdr_calibration_app",
     ),
@@ -204,11 +210,18 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
         "wrong. Press Alt+1 before playing HDR content and Alt+2 to bring it back for the desktop.",
     ),
     GuideStep(
-        "6 · Optional — keep it working after you close this window",
-        "Windows sometimes drops the HDR profile association when the display mode changes. The standalone "
-        "watchdog re-applies it, and keeps Alt+1 / Alt+2 available with the GUI closed.\n\n"
-        "Install it after you are happy with your settings, and re-run Install whenever you deliberately change "
-        "which profile is your default.",
+        "6 · Lock the profile in place",
+        "Windows drops the HDR profile association from time to time — after a display mode change, "
+        "a resume from sleep, or a graphics driver reset. Turn on Keep Profile Locked in row 3 and a "
+        "small background program puts it back whenever that happens, and keeps Alt+1 / Alt+2 working "
+        "once this window is closed."
+        "\n\n"
+        "It installs separately and needs administrator rights, so expect a console window and a "
+        "prompt. The switch reports what is actually running rather than what was last clicked, so "
+        "dismissing the prompt simply leaves it off."
+        "\n\n"
+        "Later slider edits are picked up on their own. Re-run the installer only when you change "
+        "which profile Windows should fall back to.",
         "Open Watchdog Settings",
         "watchdog",
     ),

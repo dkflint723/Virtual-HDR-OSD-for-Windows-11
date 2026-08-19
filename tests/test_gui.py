@@ -70,6 +70,8 @@ class WindowTestCase(unittest.TestCase):
             directory.mkdir(parents=True, exist_ok=True)
 
         self.display = hdr_display()
+        # Whether the fixture pretends the standalone watchdog is running.
+        self.watchdog_running = False
         # What Windows "currently has" associated, and what got installed.
         self.default_profiles = {"HDR": "BaseCalibration.icm", "SDR": "sRGB.icm"}
         self.installed: list[str] = []
@@ -133,6 +135,9 @@ class WindowTestCase(unittest.TestCase):
             # Individual tests still override these where they need real values.
             "capability_for_device_name": lambda _name: None,
             "read_panel_metadata": lambda _path: None,
+            # Probing the real watchdog would make the lock switch reflect the
+            # developer's machine rather than the fixture.
+            "watchdog_is_running": lambda: self.watchdog_running,
         }
         for name, value in patches.items():
             patcher = mock.patch.object(app_module, name, value)
@@ -1927,3 +1932,73 @@ class BuildFromPanelTests(WindowTestCase):
         self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
         self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 742.0)
         self.assertAlmostEqual(self.window.state.hdr.minimum_luminance_nits, 0.004)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class ProfileLockSwitchTests(WindowTestCase):
+    """The switch that keeps an applied HDR profile applied.
+
+    It reports whether the watchdog process is running, not what was last
+    clicked: the installer is a separate elevated program that the user can
+    dismiss at the UAC prompt, and the watchdog can be stopped from outside
+    this app entirely.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.scripts: list[str] = []
+        patcher = mock.patch.object(
+            self.window, "_run_watchdog_script", lambda name: self.scripts.append(name)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_starts_off_when_the_watchdog_is_not_running(self):
+        self.assertFalse(self.window.lock_switch.isChecked())
+
+    def test_follows_a_watchdog_that_starts_outside_the_app(self):
+        self.watchdog_running = True
+        self.window._sync_lock_switch()
+        self.assertTrue(self.window.lock_switch.isChecked())
+
+    def test_follows_a_watchdog_that_stops_outside_the_app(self):
+        self.watchdog_running = True
+        self.window._sync_lock_switch()
+        self.watchdog_running = False
+        self.window._sync_lock_switch()
+        self.assertFalse(self.window.lock_switch.isChecked())
+
+    def test_switching_on_runs_the_installer(self):
+        self.window._lock_toggled(True)
+        self.assertEqual(len(self.scripts), 1)
+        self.assertIn("Install-Watchdog", self.scripts[0])
+
+    def test_switching_off_runs_the_uninstaller(self):
+        self.watchdog_running = True
+        self.window._lock_toggled(False)
+        self.assertEqual(self.scripts, ["Uninstall-Watchdog.bat"])
+
+    def test_no_script_when_the_switch_already_agrees_with_reality(self):
+        """The poll writes the switch back; that must not re-run the installer."""
+        self.watchdog_running = True
+        self.window._lock_toggled(True)
+        self.assertEqual(self.scripts, [])
+
+    def test_syncing_the_switch_does_not_trigger_an_install(self):
+        self.watchdog_running = True
+        self.window._sync_lock_switch()
+        self.assertEqual(self.scripts, [])
+
+    def test_reports_the_outcome_once_the_install_actually_lands(self):
+        self.window._lock_toggled(True)
+        self.assertEqual(self.window._lock_pending, "install")
+        self.watchdog_running = True
+        self.window._sync_lock_switch()
+        self.assertEqual(self.window._lock_pending, "")
+        self.assertIn("lock is on", self.window.status_label.text().lower())
+
+    def test_a_dismissed_uac_prompt_leaves_the_switch_off(self):
+        """Nothing starts, so the switch must go back to telling the truth."""
+        self.window.lock_switch.setChecked(True)
+        self.window._sync_lock_switch()
+        self.assertFalse(self.window.lock_switch.isChecked())

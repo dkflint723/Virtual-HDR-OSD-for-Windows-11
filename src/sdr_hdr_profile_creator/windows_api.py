@@ -786,3 +786,39 @@ def send_hdr_toggle_shortcut() -> None:
         user32.keybd_event(key, 0, 0, 0)
     for key in (VK_B, VK_MENU, VK_LWIN):
         user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
+
+
+# The standalone watchdog holds this for as long as it runs; it is how the
+# watchdog stops a second copy of itself from starting.
+WATCHDOG_SINGLETON_MUTEX = r"Local\ColorProfileModeWatchdogStandalone"
+
+
+def watchdog_is_running() -> bool:
+    """Whether the standalone watchdog is running right now.
+
+    Opening its singleton mutex answers the question the installed-file check
+    cannot: the script being on disk, and a scheduled task existing, both stay
+    true after the watchdog has exited or been killed. Only this tracks whether
+    anything is actually holding the profile associations in place.
+
+    SYNCHRONIZE is the least access that will open a mutex, and the handle is
+    closed immediately, so this neither disturbs the watchdog nor keeps the
+    object alive if it exits in between.
+    """
+    if not IS_WINDOWS:
+        return False
+    SYNCHRONIZE = 0x00100000
+    try:
+        kernel32.OpenMutexW.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_wchar_p]
+        kernel32.OpenMutexW.restype = ctypes.c_void_p
+        handle = kernel32.OpenMutexW(SYNCHRONIZE, False, WATCHDOG_SINGLETON_MUTEX)
+    except Exception:
+        return False
+    if not handle:
+        return False
+    try:
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+    return True

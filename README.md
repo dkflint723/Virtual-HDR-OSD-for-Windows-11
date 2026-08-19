@@ -107,11 +107,19 @@ reproduces the original behaviour exactly.
 
 ## Recommended workflow
 
-The recommended starting point is a profile created with **Windows HDR Calibration** from Microsoft.
+A profile needs to know what the display can do. There are two ways to supply that, and either
+produces a complete profile.
 
-Apart from that one Microsoft download, the whole workflow runs inside the app: HDR is switched
-from the top bar, and both profiles are chosen from dropdowns of what is already installed —
-there is no round trip through Windows Settings and no import/restart cycle.
+- **Build it from the display itself.** Pick the first entry in the **HDR** dropdown,
+  *Build from this display's own panel data*. The panel reports its own primaries through DXGI
+  and its luminance through EDID, and both go straight into the profile. Nothing to download.
+- **Start from a profile you already have.** Anything from Microsoft's free **Windows HDR
+  Calibration**, or from calibration software such as Calman or DisplayCAL, works as the base.
+
+The second is worth preferring when the profile was made with a meter, because a measurement
+describes your individual unit where the panel's own figures describe the model. Everything else
+runs inside the app: HDR is switched from the top bar, and both profiles are chosen from dropdowns
+of what is already installed -- no round trip through Windows Settings, no import/restart cycle.
 
 > [!TIP]
 > The **Getting Started** button in the top bar walks you through this entire
@@ -119,18 +127,22 @@ there is no round trip through Windows Settings and no import/restart cycle.
 > whether HDR is actually active, whether a base profile has been imported, and
 > whether Live Apply is on. It opens automatically the first time you run the app.
 
-1. Run **Windows HDR Calibration** and complete its black-level, peak-luminance, full-frame luminance, and color-saturation calibration, then save the profile it generates. Skip this if you already have an HDR profile you trust.
-2. Start Virtual HDR OSD for Windows.
-3. Select the correct monitor under **1 · Target Display** and switch **HDR On** next to it.
-4. In **2 · Profiles for this Display**, pick that profile from the **HDR** dropdown. It loads as the editable base immediately.
-5. Set the **SDR** dropdown (see below). If another program calibrates your SDR, choose *Leave unmanaged*.
-6. Use **Import…** only for a file that is not installed in the Windows colour folder.
-7. Enable **Live Apply** if you want every adjustment to be reflected on the display automatically.
-8. Make small tonal and color corrections. **Reset All Sliders** returns everything to neutral, and **Revert to Base** reloads the imported profile untouched.
-9. Flip the **HDR** switch in row 1 off and on when you want to compare white balance, overall color appearance, and perceived brightness against the SDR desktop.
-10. When satisfied, use **Export Copy…** to save the result.
+1. Start Virtual HDR OSD for Windows.
+2. Select the correct monitor under **1 · Target Display** and switch **HDR On** next to it.
+3. In **2 · Profiles for this Display**, choose where the colour data comes from: the
+   *Build from this display's own panel data* entry, or an installed profile of your own.
+4. Set the **SDR** dropdown (see below). If another program calibrates your SDR, choose *Leave unmanaged*.
+5. Use **Import…** only for a file that is not installed in the Windows colour folder.
+6. Enable **Live Apply** if you want every adjustment to be reflected on the display automatically.
+7. Make small tonal and color corrections. **Reset All Sliders** returns everything to neutral, and **Revert to Base** reloads the base profile untouched.
+8. Flip the **HDR** switch in row 1 off and on when you want to compare white balance, overall color appearance, and perceived brightness against the SDR desktop.
+9. Press **Apply Edits** to install and associate the result.
+10. Turn on **Keep Profile Locked** so Windows cannot drop the association on the next mode change.
+11. Use **Export Copy…** to save a backup.
 
-Windows HDR Calibration is the preferred base because it is specifically designed to calibrate HDR-capable displays under Windows 11. Virtual HDR OSD is best treated as the final subjective fine-adjustment stage rather than the primary HDR calibration stage.
+Virtual HDR OSD is best treated as the final fine-adjustment stage. A profile built from the
+panel's own reported figures is a sound starting point, but those figures describe the model as
+specified, not the unit in front of you; a meter-made base still measures better.
 
 ---
 
@@ -188,7 +200,11 @@ Below that:
 - **Tone & Brightness** — fine tonal controls, plus the **SDR-in-HDR Gamma Correction** dropdown (optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys).
 - **Color & White Balance** — white-point, chroma, and RGB fine adjustments.
 - **Getting Started** — the step-by-step walkthrough, with live progress checks.
-- **Watchdog Settings…** — installs/removes the independent association watchdog and persistent gamma hotkeys.
+- **Keep Profile Locked** — the switch in row 3. Installs the independent association watchdog, which
+  puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
+  closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
+  dismissed administrator prompt leaves it off rather than lying about it.
+- **Watchdog Settings…** — the same install/remove actions with a fuller explanation.
 - **Help** — the full usage guide, control reference, and recovery notes.
 
 Two bars run along the bottom:
@@ -964,7 +980,16 @@ The watchdog exists specifically to make those mode transitions more determinist
 
 ## Watchdog Settings in the GUI
 
-The main window exposes a dedicated **Watchdog Settings…** button. It opens a small explanatory dialog with **Install Watchdog** and **Uninstall Watchdog** actions. The same underlying BAT files remain independently shareable; the GUI is only a convenient front end for them.
+The main window exposes the watchdog two ways. **Keep Profile Locked** in row 3 is a switch that
+installs or removes it directly; **Watchdog Settings…** opens a dialog with the same **Install
+Watchdog** and **Uninstall Watchdog** actions and a fuller explanation.
+
+The switch is driven by the watchdog's own singleton mutex, so it reflects whether the process is
+running right now. The installed script being present on disk, and the scheduled task existing, both
+stay true after the watchdog has exited or been killed, and neither is evidence that anything is
+holding the associations in place.
+
+The same underlying BAT files remain independently shareable; the GUI is only a convenient front end.
 
 ## The watchdog is independent of Virtual HDR OSD
 

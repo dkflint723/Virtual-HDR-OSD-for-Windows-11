@@ -73,6 +73,7 @@ from .windows_api import (
     reapply_existing_default_profile,
     remove_profile,
     send_hdr_toggle_shortcut,
+    watchdog_is_running,
 )
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
@@ -174,6 +175,10 @@ class MainWindow(FluentWidget):
         except Exception:
             pass
 
+        # Which direction a watchdog install/uninstall was last asked to go, so the
+        # outcome can be reported once it actually lands. Empty when nothing is pending.
+        self._lock_pending = ""
+
         self.live_timer = QTimer(self)
         self.live_timer.setSingleShot(True)
         self.live_timer.setInterval(420)
@@ -187,6 +192,14 @@ class MainWindow(FluentWidget):
         self.mode_timer = QTimer(self)
         self.mode_timer.setInterval(900)
         self.mode_timer.timeout.connect(self._poll_windows_mode)
+
+        # The watchdog is a separate process with its own installer, and it can be
+        # stopped from outside this app entirely. Polling is the only way for the
+        # switch to keep telling the truth; an install also completes long after
+        # the click, behind a UAC prompt nobody can time.
+        self.watchdog_timer = QTimer(self)
+        self.watchdog_timer.setInterval(2500)
+        self.watchdog_timer.timeout.connect(self._sync_lock_switch)
 
         self._build_ui()
         self._load_mode_into_controls()
@@ -207,6 +220,8 @@ class MainWindow(FluentWidget):
 
         self._refresh_displays(initial=True)
         self.mode_timer.start()
+        self._sync_lock_switch()
+        self.watchdog_timer.start()
         self._update_activity_bar()
 
         if self._first_run:
@@ -535,6 +550,19 @@ class MainWindow(FluentWidget):
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
         runtime_row.addWidget(self.automatic_mode_checkbox)
+        self.lock_switch = SwitchButton(bar)
+        self.lock_switch.setOffText("Keep Profile Locked")
+        self.lock_switch.setOnText("Keep Profile Locked")
+        self.lock_switch.setToolTip(
+            "Install the standalone watchdog, which re-asserts this display's HDR profile "
+            "whenever Windows drops it — after a mode change, a resume from sleep, or a "
+            "driver reset — and keeps Alt+1 / Alt+2 working once this window is closed.\n\n"
+            "It is a separate program with its own installer, so switching this on opens a "
+            "console and asks for administrator rights. The switch follows what is actually "
+            "running, not what was last clicked."
+        )
+        self.lock_switch.checkedChanged.connect(self._lock_toggled)
+        runtime_row.addWidget(self.lock_switch)
         revert_button = PushButton("Revert to Base", bar)
         revert_button.setToolTip("Discard your slider edits and reload the selected HDR profile untouched.")
         revert_button.clicked.connect(self._revert_to_base)
@@ -1005,6 +1033,42 @@ class MainWindow(FluentWidget):
         if self.state.live_mode:
             return True, "Live Apply is on. Slider changes install automatically."
         return False, "Live Apply is off. Turn it on, or use Apply Edits after each change."
+
+    def _sync_lock_switch(self) -> None:
+        """Point the switch at whether the watchdog is actually running.
+
+        Deliberately not a record of what was last clicked. Installing runs a
+        separate elevated installer that the user can dismiss at the UAC prompt,
+        and the watchdog can be stopped from outside this app, so the only
+        honest source is the process itself.
+        """
+        if not hasattr(self, "lock_switch"):
+            return
+        running = watchdog_is_running()
+        if running == self.lock_switch.isChecked():
+            return
+        with QSignalBlocker(self.lock_switch):
+            self.lock_switch.setChecked(running)
+        if running and self._lock_pending == "install":
+            self._set_status(
+                "Profile lock is on. The watchdog will re-apply this display's HDR profile "
+                "whenever Windows drops it.",
+                "ok",
+            )
+            self._lock_pending = ""
+        elif not running and self._lock_pending == "uninstall":
+            self._set_status("Profile lock is off. Windows may drop the association on a mode change.", "ok")
+            self._lock_pending = ""
+
+    def _lock_toggled(self, checked: bool) -> None:
+        if self._loading_controls:
+            return
+        if checked == watchdog_is_running():
+            return
+        self._lock_pending = "install" if checked else "uninstall"
+        self._run_watchdog_script(
+            "2- OPTIONAL - Install-Watchdog.bat" if checked else "Uninstall-Watchdog.bat"
+        )
 
     def _show_watchdog_settings(self) -> None:
         dialog = QDialog(self)
@@ -2478,6 +2542,7 @@ class MainWindow(FluentWidget):
     def closeEvent(self, event: QCloseEvent) -> None:
         self.live_timer.stop()
         self.mode_timer.stop()
+        self.watchdog_timer.stop()
         self.gamma_runtime_timer.stop()
         self.state_save_timer.stop()
         if self._hotkey_listener is not None:
