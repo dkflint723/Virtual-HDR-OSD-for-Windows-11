@@ -1,16 +1,28 @@
 """Turning meter readings into the figures a profile is built from.
 
 Kept free of both the instrument and the display so the arithmetic can be tested
-without either. ``meter`` talks to spotread; ``patterns.compose`` puts a patch on
-screen; this decides which patches to show and what their readings mean.
+without either. ``meter`` talks to spotread; ``patterns.measurement_frame`` puts a
+patch on screen; this decides which patches to show and what their readings mean.
 
 The checks in ``validate`` matter more than the arithmetic. A meter that is
 unplugged, pointed at the wrong part of the screen, or reading through a closed
-diffuser does not fail -- it returns numbers. Those numbers reach the profile as
-peak luminance and display primaries, where nothing downstream can tell them from
-measurements, and the profile then describes a display that does not exist. Every
-rule below exists to reject a reading that is physically impossible rather than
-merely surprising, because a surprising reading may well be the panel.
+diffuser does not fail -- it returns numbers, and those reach the profile with
+nothing downstream able to tell them from measurements. Every rule below rejects
+a reading that is physically impossible rather than merely surprising, because a
+surprising reading may well be the panel.
+
+**What the red, green and blue patches are, and are not.** They are presented in
+scRGB, which is defined on BT.709 primaries, so asking for ``(1, 0, 0)`` asks for
+BT.709 red and Windows renders it inside whatever the panel can do. Measured on a
+P3 panel whose native green is (0.2698, 0.6859), the reading came back
+(0.3141, 0.5892) -- 0.0141 from BT.709 green and 0.0967 from the panel's own. So
+they are useless as a description of the display's gamut, and writing them to a
+profile's colorant tags replaced correct figures with a narrower, wrong gamut.
+
+They are exactly right for the other job. A white-balance correction acts on the
+signal this app sends, so what it needs to know is how the display responds to
+*that* signal -- which is what these patches measure. The panel's native primaries
+come from DXGI; the effective ones come from here.
 """
 
 from __future__ import annotations
@@ -21,20 +33,25 @@ from typing import Callable, Protocol
 
 from .meter import MeterError, Reading
 
-# The measurement window is a tenth of the screen, centred, on black -- see
-# patterns.compose. On an emissive panel the surround is part of the measurement,
-# because the brightness limiter responds to total output.
 WHITE = (1.0, 1.0, 1.0)
 BLACK = (0.0, 0.0, 0.0)
+
+# The patch covers this fraction of screen area -- see patterns.WINDOW_AREA_FRACTION.
+# Peak luminance is meaningless without it: an emissive panel's brightness limiter
+# responds to total output, and the display this was developed against is rated
+# 1015 nits but reads 454 on a tenth of the screen.
+WINDOW_AREA_FRACTION = 0.10
+
+# CIE xy of D65, the white every HDR profile here is built around.
+D65_XY = (0.3127, 0.3290)
 
 
 @dataclass(frozen=True, slots=True)
 class MeasurementStep:
     """One patch to display and read.
 
-    ``rgb`` is relative channel drive and ``nits`` the absolute level the white
-    point of that patch is asked for, because patterns work in absolute
-    luminance rather than code values.
+    ``rgb`` is relative channel drive and ``nits`` the absolute level white is
+    asked for, because patterns work in absolute luminance rather than code values.
     """
 
     key: str
@@ -49,16 +66,17 @@ def plan(peak_nits: float) -> tuple[MeasurementStep, ...]:
 
     Black comes first while the panel is still cool: on an emissive display a
     long bright sequence warms it, and the black floor is the reading most
-    disturbed by that. White follows, then the three primaries at the same drive
-    so their chromaticities are comparable with each other.
+    disturbed by that. The primaries follow white at the same drive, because a
+    channel measured at some other level samples a different point on the
+    display's response and cannot be combined with the others.
     """
     target = max(80.0, min(10000.0, float(peak_nits)))
     return (
         MeasurementStep("black", "Black level", BLACK, 0.0, settle_seconds=3.0),
-        MeasurementStep("white", "Peak white", WHITE, target),
-        MeasurementStep("red", "Red primary", (1.0, 0.0, 0.0), target),
-        MeasurementStep("green", "Green primary", (0.0, 1.0, 0.0), target),
-        MeasurementStep("blue", "Blue primary", (0.0, 0.0, 1.0), target),
+        MeasurementStep("white", "Peak white", WHITE, target, settle_seconds=2.0),
+        MeasurementStep("red", "Red channel", (1.0, 0.0, 0.0), target),
+        MeasurementStep("green", "Green channel", (0.0, 1.0, 0.0), target),
+        MeasurementStep("blue", "Blue channel", (0.0, 0.0, 1.0), target),
     )
 
 
@@ -73,27 +91,76 @@ MAX_CREDIBLE_PEAK = 10000.0
 # display; it is a meter reading room light, or a patch that never went black.
 MAX_BLACK_FRACTION = 0.02
 
-# Areas of the RGB triangle in xy, computed rather than estimated:
-#   BT.709 0.1120   Adobe RGB 0.1512   DCI-P3 0.1520   BT.2020 0.2119
-# The ceiling has to clear BT.2020, whose primaries sit on the spectral locus and
-# so bound anything a display can actually reproduce. An earlier guess of 0.15
-# would have rejected BT.2020 outright, and sat 1% above the wide-gamut panel
-# this was developed on -- a threshold that fails on real hardware is worse than
-# none, because it refuses the readings it was meant to protect.
-MAX_GAMUT_AREA = 0.30
-# A tenth of BT.709. Below this the three readings are effectively the same
-# colour, which is what a meter measures when the patch never changed.
-MIN_GAMUT_AREA = 0.0112
+# How far the three channels added together may sit from the measured white before
+# the set is refused. Additivity is the assumption the whole correction rests on:
+# if red plus green plus blue does not make the white that was measured, something
+# between the signal and the panel is not linear -- tone mapping, or a brightness
+# limiter reacting to the different patches -- and gains derived from it would be
+# confidently wrong. 8% is loose enough for instrument noise on a dim channel and
+# tight enough to catch a limiter.
+MAX_ADDITIVITY_ERROR = 0.08
+
+# The per-channel trims a profile can carry, as a fraction. Matches the +/-25%
+# range ModeState clamps red_channel, green_channel and blue_channel to.
+MAX_CHANNEL_TRIM = 0.25
+
+# The three channels must actually differ from one another, measured as the area
+# of the triangle they span in xy. This is a degeneracy check and nothing more --
+# these readings describe the encoding rather than the panel, so their absolute
+# size says nothing about the display's gamut. But three readings of the same
+# colour mean the patch never changed between them, and the gains solved from
+# that are meaningless: the matrix is singular, and a set that adds up correctly
+# can still be three identical greys. A tenth of the BT.709 area (0.1120) is far
+# below any real set and far above measurement noise.
+MIN_CHANNEL_SEPARATION = 0.0112
 
 
 class MeasurementError(ValueError):
     """Readings that must not be allowed to reach a profile."""
 
 
-def _triangle_area(primaries: tuple[float, ...]) -> float:
-    """Area of the RGB triangle in the xy plane."""
-    rx, ry, gx, gy, bx, by = primaries[:6]
+def _xyz(reading: Reading) -> tuple[float, float, float]:
+    return (reading.X, reading.Y, reading.Z)
+
+
+def _inverse3(m: tuple[float, ...]) -> tuple[float, ...] | None:
+    """Inverse of a row-major 3x3, or None when it is singular."""
+    a, b, c, d, e, f, g, h, i = m
+    det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+    if abs(det) < 1e-12:
+        return None
+    return (
+        (e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
+        (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
+        (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det,
+    )
+
+
+def _matvec3(m: tuple[float, ...], v: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (
+        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
+        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
+        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
+    )
+
+
+def _channel_separation(readings: dict[str, Reading]) -> float:
+    """Area of the triangle the three channel readings span in xy."""
+    rx, ry = readings["red"].x, readings["red"].y
+    gx, gy = readings["green"].x, readings["green"].y
+    bx, by = readings["blue"].x, readings["blue"].y
     return abs((gx - rx) * (by - ry) - (bx - rx) * (gy - ry)) / 2.0
+
+
+def _additivity_error(readings: dict[str, Reading]) -> float:
+    """How far red + green + blue sits from the measured white, relatively."""
+    white = _xyz(readings["white"])
+    total = tuple(
+        sum(_xyz(readings[channel])[axis] for channel in ("red", "green", "blue"))
+        for axis in range(3)
+    )
+    scale = max(white[1], 1e-6)
+    return max(abs(total[axis] - white[axis]) for axis in range(3)) / scale
 
 
 def validate(readings: dict[str, Reading]) -> list[str]:
@@ -128,43 +195,29 @@ def validate(readings: dict[str, Reading]) -> list[str]:
     if white <= black:
         problems.append("Peak white measured no brighter than black.")
 
-    primaries = measured_primaries(readings)
-    for name, (x, y) in zip(
-        ("red", "green", "blue", "white"),
-        [(primaries[i], primaries[i + 1]) for i in (0, 2, 4, 6)],
-    ):
+    for name in ("white", "red", "green", "blue"):
+        x, y = readings[name].x, readings[name].y
         if not (0.0 < x < 1.0 and 0.0 < y < 1.0):
-            problems.append(f"The {name} reading has an impossible chromaticity ({x:.4f}, {y:.4f}).")
+            problems.append(
+                f"The {name} reading has an impossible chromaticity ({x:.4f}, {y:.4f})."
+            )
 
-    area = _triangle_area(primaries)
-    if area > MAX_GAMUT_AREA:
-        problems.append(
-            f"The measured primaries span an impossible gamut (area {area:.4f}). "
-            "The patches and the readings are probably out of step."
-        )
-    elif area < MIN_GAMUT_AREA:
-        problems.append(
-            f"The red, green and blue readings are nearly the same colour (area {area:.4f}). "
-            "The patch may not have changed between readings."
-        )
+    if not problems:
+        separation = _channel_separation(readings)
+        if separation < MIN_CHANNEL_SEPARATION:
+            problems.append(
+                f"The red, green and blue readings are nearly the same colour (area "
+                f"{separation:.4f}). The patch cannot have changed between them, so there "
+                "is no white balance to solve."
+            )
+        error = _additivity_error(readings)
+        if error > MAX_ADDITIVITY_ERROR:
+            problems.append(
+                f"Red, green and blue add up to {error:.0%} away from the measured white. "
+                "Something between the signal and the panel is not linear, so a white "
+                "balance derived from these would be wrong."
+            )
     return problems
-
-
-def measured_primaries(readings: dict[str, Reading]) -> tuple[float, ...]:
-    """The eight xy coordinates a profile describes a display with.
-
-    Ordered rx, ry, gx, gy, bx, by, wx, wy to match ``ModeState.panel_primaries``.
-    """
-    return (
-        readings["red"].x,
-        readings["red"].y,
-        readings["green"].x,
-        readings["green"].y,
-        readings["blue"].x,
-        readings["blue"].y,
-        readings["white"].x,
-        readings["white"].y,
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,14 +226,72 @@ class Calibration:
 
     peak_nits: float
     black_nits: float
-    primaries: tuple[float, ...]
+    white_xy: tuple[float, float]
+    channel_gains: tuple[float, float, float]
+    window_fraction: float = WINDOW_AREA_FRACTION
 
     @property
     def contrast(self) -> float:
-        """Measured contrast ratio, or infinity for a true black."""
+        """Measured contrast ratio, or infinity when black is below the floor.
+
+        An OLED reads a true black as 0.0000 on this class of instrument, which is
+        a real result rather than a failed one -- but it is a floor, not a value,
+        so an infinite ratio should be read as "unmeasurably low".
+        """
         if self.black_nits <= 0.0:
             return float("inf")
         return self.peak_nits / self.black_nits
+
+    @property
+    def white_error(self) -> tuple[float, float]:
+        """How far measured white sits from D65, as (dx, dy)."""
+        return (self.white_xy[0] - D65_XY[0], self.white_xy[1] - D65_XY[1])
+
+    @property
+    def channel_trims(self) -> tuple[float, float, float]:
+        """The gains as the percentage trims a profile stores, red first.
+
+        Always zero or negative. A display cannot be asked for light it does not
+        have, so white is corrected by pulling the excess channels down to meet
+        the weakest, never by pushing one up into clipping.
+        """
+        return tuple(round((gain - 1.0) * 100.0, 3) for gain in self.channel_gains)
+
+    @property
+    def trims_exceed_range(self) -> bool:
+        """Whether the correction is larger than a profile can carry."""
+        return any(abs(trim) > MAX_CHANNEL_TRIM * 100.0 for trim in self.channel_trims)
+
+
+def white_balance_gains(readings: dict[str, Reading]) -> tuple[float, float, float]:
+    """Per-channel gains that move measured white onto D65.
+
+    Solves ``M g = T``, where the columns of ``M`` are the measured XYZ of the
+    three channels at full drive and ``T`` is D65 at the same luminance. If the
+    display were already neutral the answer would be (1, 1, 1).
+
+    The result is scaled so the largest gain is exactly 1.0. Correcting white by
+    boosting a channel would ask for output the panel has already run out of, so
+    the excess channels come down to meet the weakest instead. That costs
+    luminance, which is the honest price of a neutral white.
+    """
+    columns = [_xyz(readings[channel]) for channel in ("red", "green", "blue")]
+    matrix = tuple(columns[column][row] for row in range(3) for column in range(3))
+    inverse = _inverse3(matrix)
+    if inverse is None:
+        # Three channels that do not span a colour space; validate() will have
+        # said why, and a neutral answer is the only safe one.
+        return (1.0, 1.0, 1.0)
+
+    luminance = max(readings["white"].Y, 1e-6)
+    x, y = D65_XY
+    target = ((x / y) * luminance, luminance, ((1.0 - x - y) / y) * luminance)
+
+    gains = _matvec3(inverse, target)
+    largest = max(gains)
+    if largest <= 0.0:
+        return (1.0, 1.0, 1.0)
+    return tuple(max(0.0, gain / largest) for gain in gains)
 
 
 def derive(readings: dict[str, Reading]) -> Calibration:
@@ -193,10 +304,12 @@ def derive(readings: dict[str, Reading]) -> Calibration:
     problems = validate(readings)
     if problems:
         raise MeasurementError(" ".join(problems))
+    white = readings["white"]
     return Calibration(
-        peak_nits=readings["white"].Y,
+        peak_nits=white.Y,
         black_nits=max(0.0, readings["black"].Y),
-        primaries=measured_primaries(readings),
+        white_xy=(white.x, white.y),
+        channel_gains=white_balance_gains(readings),
     )
 
 
@@ -225,10 +338,9 @@ def run(
     patch, in what order, how long to settle, what to do when one fails -- can be
     tested without either.
 
-    A failed reading ends the run rather than being skipped. Deriving a
-    calibration from four of five patches would quietly change what the readings
-    mean: primaries taken without their matching white are not comparable, and a
-    peak carried over from a previous attempt is not a measurement of anything.
+    A failed reading ends the run rather than being skipped. Channels measured
+    without their matching white cannot be combined, and a peak carried over from
+    a previous attempt is not a measurement of anything.
     """
     steps = plan(peak_nits)
     readings: dict[str, Reading] = {}

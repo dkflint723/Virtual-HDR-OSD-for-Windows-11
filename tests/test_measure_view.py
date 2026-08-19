@@ -35,12 +35,31 @@ def reading(Y, x, y):
     return Reading(X=(x / y) * Y, Y=Y, Z=((1.0 - x - y) / y) * Y, x=x, y=y)
 
 
+def _combine(*channels):
+    """The white three channels add up to.
+
+    Computed rather than written down, because validate() now checks that red
+    plus green plus blue really is the measured white. A hand-picked white that
+    looks plausible fails that check -- the first version here was out by 11% on
+    Z -- and the failure would have been about the fixture, not the code.
+    """
+    X = sum(c.X for c in channels)
+    Y = sum(c.Y for c in channels)
+    Z = sum(c.Z for c in channels)
+    total = X + Y + Z
+    return Reading(X=X, Y=Y, Z=Z, x=X / total, y=Y / total)
+
+
+_RED = reading(215.0, 0.674586, 0.314418)
+_GREEN = reading(710.0, 0.269814, 0.685949)
+_BLUE = reading(90.0, 0.151222, 0.060916)
+
 GOOD_ORDER = [
-    reading(0.00016, 0.3130, 0.3290),      # black
-    reading(1015.24, 0.3127, 0.3290),      # white
-    reading(215.0, 0.674586, 0.314418),    # red
-    reading(710.0, 0.269814, 0.685949),    # green
-    reading(90.0, 0.151222, 0.060916),     # blue
+    reading(0.0, 0.3130, 0.3290),          # black
+    _combine(_RED, _GREEN, _BLUE),         # white
+    _RED,
+    _GREEN,
+    _BLUE,
 ]
 
 

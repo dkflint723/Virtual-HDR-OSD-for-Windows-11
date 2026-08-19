@@ -45,7 +45,7 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
-from . import measure_view
+from . import measure, measure_view
 from .edid import read_panel_metadata
 from .meter import MeterError, find_spotread, list_instruments, read_emissive
 from .hdr_display import capability_for_device_name
@@ -1878,17 +1878,50 @@ class MainWindow(FluentWidget):
         state = self.state.hdr
         state.peak_luminance_nits = max(80.0, min(10000.0, result.peak_nits))
         state.minimum_luminance_nits = max(0.0, min(100.0, result.black_nits))
-        state.panel_primaries = normalize_primaries(result.primaries)
+
+        # panel_primaries is deliberately untouched. The patches are presented in
+        # scRGB, which is defined on BT.709, so a measured "red" is BT.709 red as
+        # the display renders it -- not the display's own primary. Writing that to
+        # the profile's colorant tags replaced correct DXGI figures with a
+        # narrower, wrong gamut. The same readings are exactly right for the
+        # correction below, which acts on the signal this app sends rather than
+        # describing the panel. See measure.py's module docstring.
+        limit = 100.0 * measure.MAX_CHANNEL_TRIM
+        red, green, blue = result.channel_trims
+        state.red_channel = max(-limit, min(limit, red))
+        state.green_channel = max(-limit, min(limit, green))
+        state.blue_channel = max(-limit, min(limit, blue))
+
         self._save_state_now()
         self._load_mode_into_controls()
 
         contrast = result.contrast
-        contrast_text = "infinite" if contrast == float("inf") else f"{contrast:,.0f}:1"
+        contrast_text = (
+            "contrast too high to measure" if contrast == float("inf")
+            else f"{contrast:,.0f}:1 contrast"
+        )
+        dx, _dy = result.white_error
+        if abs(dx) < 0.002:
+            white_note = "White was already on D65, so the channel trims are near zero"
+        else:
+            direction = "warm" if dx > 0 else "cool"
+            white_note = (
+                f"White measured {abs(dx):.4f} {direction} of D65; channel trims set to "
+                f"R {red:+.1f}%, G {green:+.1f}%, B {blue:+.1f}% to neutralise it"
+            )
+        level = "ok"
+        if result.trims_exceed_range:
+            white_note += (
+                f". The correction needed exceeds the {limit:.0f}% a profile can carry and "
+                "has been clamped, so white will still be off -- check the monitor's own "
+                "colour temperature setting first"
+            )
+            level = "warning"
         self._set_status(
-            f"Measured {result.peak_nits:.1f} nits peak and {result.black_nits:.4f} black "
-            f"({contrast_text} contrast), with this panel's own primaries. "
-            "Press Apply Edits to put them into the profile.",
-            "ok",
+            f"Measured {result.peak_nits:.1f} nits peak on a "
+            f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
+            f"({contrast_text}). {white_note}. Press Apply Edits to store it.",
+            level,
         )
 
     def _apply_from_pattern_view(self) -> bool:

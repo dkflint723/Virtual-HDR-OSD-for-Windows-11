@@ -2022,10 +2022,16 @@ class MeterIntegrationTests(WindowTestCase):
 
     PRIMARIES = (0.674586, 0.314418, 0.269814, 0.685949, 0.151222, 0.060916, 0.3127, 0.3290)
 
-    def calibration(self, peak=1015.24, black=0.00016):
+    def calibration(self, peak=454.25, black=0.0, gains=(1.0, 1.0, 1.0),
+                    white_xy=(0.3270, 0.3295)):
         from sdr_hdr_profile_creator.measure import Calibration
 
-        return Calibration(peak_nits=peak, black_nits=black, primaries=self.PRIMARIES)
+        return Calibration(
+            peak_nits=peak,
+            black_nits=black,
+            white_xy=white_xy,
+            channel_gains=gains,
+        )
 
     def test_the_button_is_offered(self):
         self.assertTrue(hasattr(self.window, "meter_button"))
@@ -2063,16 +2069,38 @@ class MeterIntegrationTests(WindowTestCase):
     def test_a_completed_measurement_is_adopted(self):
         self.window._measure_finished(self.calibration(), "")
         state = self.window.state.hdr
-        self.assertAlmostEqual(state.peak_luminance_nits, 1015.24, places=2)
-        self.assertAlmostEqual(state.minimum_luminance_nits, 0.00016, places=6)
-        self.assertEqual(state.panel_primaries, self.PRIMARIES)
+        self.assertAlmostEqual(state.peak_luminance_nits, 454.25, places=2)
+        self.assertAlmostEqual(state.minimum_luminance_nits, 0.0, places=6)
+
+    def test_measured_primaries_never_reach_the_profile_gamut(self):
+        """scRGB is defined on BT.709, so a measured "red" is BT.709 red as the
+        display renders it. Writing that to the colorant tags replaced the
+        correct DXGI figures with a narrower, wrong gamut -- and nothing
+        downstream could tell the difference."""
+        self.window.state.hdr.panel_primaries = self.PRIMARIES
+        self.window._measure_finished(self.calibration(), "")
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.PRIMARIES)
+
+    def test_the_white_balance_is_applied_to_the_channel_trims(self):
+        """The same readings that are useless as a gamut are exactly right here:
+        the correction acts on the signal this app sends."""
+        self.window._measure_finished(self.calibration(gains=(0.86, 1.0, 0.97)), "")
+        state = self.window.state.hdr
+        self.assertAlmostEqual(state.red_channel, -14.0, places=1)
+        self.assertAlmostEqual(state.green_channel, 0.0, places=1)
+        self.assertAlmostEqual(state.blue_channel, -3.0, places=1)
+
+    def test_an_oversized_correction_is_clamped_and_said_so(self):
+        """Clamping silently would leave white visibly off with nothing said."""
+        self.window._measure_finished(self.calibration(gains=(0.4, 1.0, 1.0)), "")
+        self.assertGreaterEqual(self.window.state.hdr.red_channel, -25.0)
+        self.assertIn("clamped", self.window.status_label.text())
 
     def test_measured_values_outrank_whatever_was_there(self):
         """A measurement describes this unit; everything else describes a model."""
         self.window.state.hdr.peak_luminance_nits = 1019.5
-        self.window.state.hdr.minimum_luminance_nits = 0.0
         self.window._measure_finished(self.calibration(), "")
-        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 1015.24, places=2)
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 454.25, places=2)
 
     def test_a_failed_measurement_changes_nothing(self):
         before = (
@@ -2094,14 +2122,21 @@ class MeterIntegrationTests(WindowTestCase):
         self.assertIn("cancelled", self.window.status_label.text().lower())
 
     def test_the_reading_is_reported_with_its_contrast(self):
-        self.window._measure_finished(self.calibration(), "")
+        self.window._measure_finished(self.calibration(black=0.05), "")
         text = self.window.status_label.text()
-        self.assertIn("1015.2", text)
+        self.assertIn("454.2", text)
         self.assertIn("contrast", text)
 
-    def test_a_true_black_reports_infinite_contrast_rather_than_dividing(self):
+    def test_the_window_size_is_reported_beside_the_peak(self):
+        """Peak luminance means nothing without it: this panel is rated 1015
+        nits and reads 454 on a tenth of the screen."""
+        self.window._measure_finished(self.calibration(), "")
+        self.assertIn("10% window", self.window.status_label.text())
+
+    def test_an_unmeasurable_black_is_not_reported_as_infinite_contrast(self):
+        """0.0000 is the instrument's floor, not a measurement of zero."""
         self.window._measure_finished(self.calibration(black=0.0), "")
-        self.assertIn("infinite", self.window.status_label.text())
+        self.assertIn("too high to measure", self.window.status_label.text())
 
     def test_implausible_measurements_are_still_clamped_before_storage(self):
         """derive already refuses these, so this is the second line rather than
