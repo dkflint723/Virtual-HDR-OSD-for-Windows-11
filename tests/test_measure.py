@@ -12,6 +12,10 @@ import unittest
 
 from sdr_hdr_profile_creator.measure import (
     D65_XY,
+    VERIFIED_DELTA_UV,
+    compose_gains,
+    correlated_colour_temperature,
+    delta_uv,
     MAX_CHANNEL_TRIM,
     Aborted,
     Calibration,
@@ -407,6 +411,68 @@ class RunTests(unittest.TestCase):
                       reading(BALANCE, 0.3127, 0.3290), same, same, same])
         with self.assertRaises(MeasurementError):
             self.run_sequence(lambda: next(order))
+
+
+class WhiteErrorMetricTests(unittest.TestCase):
+    """xy is not perceptually uniform, so the verdict is given in u'v'."""
+
+    def test_d65_against_itself_is_zero(self):
+        self.assertAlmostEqual(delta_uv(D65_XY, D65_XY), 0.0, places=9)
+
+    def test_d65_is_about_6504_kelvin(self):
+        self.assertAlmostEqual(correlated_colour_temperature(*D65_XY), 6504.0, delta=5.0)
+
+    def test_the_panel_as_measured_was_visibly_warm(self):
+        """Recorded from the development display before any correction: 5616K,
+        which is 0.0123 in u'v' -- four times the threshold a calibrated display
+        is held to, and plainly visible."""
+        measured = (0.3300, 0.3291)
+        self.assertAlmostEqual(correlated_colour_temperature(*measured), 5616.0, delta=20.0)
+        self.assertGreater(delta_uv(measured, D65_XY), VERIFIED_DELTA_UV * 4)
+
+    def test_a_calibration_reports_its_own_verdict(self):
+        warm = derive(WARM)
+        self.assertFalse(warm.verified)
+        self.assertGreater(warm.white_delta_uv, VERIFIED_DELTA_UV)
+        self.assertTrue(derive(NEUTRAL).verified)
+
+    def test_a_tiny_xy_error_in_an_insensitive_direction_still_passes(self):
+        """The point of using u'v': the same dx means different things in
+        different parts of the diagram, so dx alone cannot be the test."""
+        self.assertLess(delta_uv((D65_XY[0] + 0.0005, D65_XY[1]), D65_XY), VERIFIED_DELTA_UV)
+
+
+class ComposeGainsTests(unittest.TestCase):
+    """A measurement is relative to the correction already in force."""
+
+    APPLIED = (0.78677, 0.98424, 1.0)
+
+    def test_a_perfect_re_measure_leaves_the_correction_alone(self):
+        """Without this, a second pass undoes the first: a corrected display
+        measures neutral, solves (1, 1, 1), and stores that."""
+        composed = compose_gains(self.APPLIED, (1.0, 1.0, 1.0))
+        for got, wanted in zip(composed, self.APPLIED):
+            self.assertAlmostEqual(got, wanted, places=5)
+
+    def test_a_residual_error_tightens_the_correction_further(self):
+        composed = compose_gains(self.APPLIED, (0.97, 1.0, 1.0))
+        self.assertLess(composed[0], self.APPLIED[0])
+
+    def test_repeated_passes_converge_rather_than_oscillate(self):
+        gains = (1.0, 1.0, 1.0)
+        for _ in range(5):
+            gains = compose_gains(gains, (0.9, 1.0, 1.0))
+        # Each pass finds the same residual, so it keeps tightening; what must
+        # not happen is a swing back and forth.
+        self.assertLess(gains[0], 0.7)
+        self.assertAlmostEqual(max(gains), 1.0, places=6)
+
+    def test_nothing_is_ever_boosted_above_unity(self):
+        composed = compose_gains((0.5, 1.0, 0.9), (1.0, 0.8, 1.0))
+        self.assertAlmostEqual(max(composed), 1.0, places=6)
+
+    def test_a_degenerate_correction_falls_back_to_neutral(self):
+        self.assertEqual(compose_gains((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), (1.0, 1.0, 1.0))
 
 
 if __name__ == "__main__":

@@ -2334,6 +2334,76 @@ class PanelPrimarySourceTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class MeasurementCompositionTests(WindowTestCase):
+    """A second measurement must verify the first, not undo it."""
+
+    def calibration(self, gains=(1.0, 1.0, 1.0), white_xy=(0.3127, 0.3290)):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        return Calibration(
+            peak_nits=450.49, black_nits=0.0,
+            white_xy=white_xy, channel_gains=gains,
+        )
+
+    def set_trims(self, red, green, blue):
+        self.window.state.hdr.red_channel = red
+        self.window.state.hdr.green_channel = green
+        self.window.state.hdr.blue_channel = blue
+
+    def trims(self):
+        state = self.window.state.hdr
+        return (state.red_channel, state.green_channel, state.blue_channel)
+
+    def test_a_neutral_re_measure_leaves_an_applied_correction_in_place(self):
+        """The display reads neutral *because* the correction is working. Storing
+        the (1, 1, 1) that implies would throw it away and the display would go
+        straight back to where it started."""
+        self.set_trims(-21.323, -1.576, 0.0)
+        self.window._measure_finished(self.calibration(), "")
+        red, green, blue = self.trims()
+        self.assertAlmostEqual(red, -21.323, places=2)
+        self.assertAlmostEqual(green, -1.576, places=2)
+        self.assertAlmostEqual(blue, 0.0, places=2)
+
+    def test_a_residual_error_tightens_the_correction(self):
+        self.set_trims(-21.323, -1.576, 0.0)
+        self.window._measure_finished(
+            self.calibration(gains=(0.97, 1.0, 1.0), white_xy=(0.3180, 0.3291)), ""
+        )
+        self.assertLess(self.trims()[0], -21.323)
+
+    def test_the_first_measurement_on_an_uncorrected_display_applies_in_full(self):
+        self.set_trims(0.0, 0.0, 0.0)
+        self.window._measure_finished(
+            self.calibration(gains=(0.7865, 0.9833, 1.0), white_xy=(0.3300, 0.3291)), ""
+        )
+        red, green, blue = self.trims()
+        self.assertAlmostEqual(red, -21.35, places=1)
+        self.assertAlmostEqual(green, -1.67, places=1)
+
+    def test_a_verified_run_says_so(self):
+        self.set_trims(-21.323, -1.576, 0.0)
+        self.window._measure_finished(self.calibration(), "")
+        self.assertIn("verified", self.window.status_label.text().lower())
+
+    def test_an_unverified_run_reports_how_far_off_it_still_is(self):
+        self.set_trims(-21.323, -1.576, 0.0)
+        self.window._measure_finished(
+            self.calibration(gains=(0.97, 1.0, 1.0), white_xy=(0.3300, 0.3291)), ""
+        )
+        text = self.window.status_label.text().lower()
+        self.assertIn("still", text)
+
+    def test_the_colour_temperature_is_reported(self):
+        """A number a person can recognise, unlike a chromaticity pair."""
+        self.set_trims(0.0, 0.0, 0.0)
+        self.window._measure_finished(
+            self.calibration(gains=(0.79, 0.98, 1.0), white_xy=(0.3300, 0.3291)), ""
+        )
+        self.assertIn("5,616K", self.window.status_label.text())
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
 class ProfileLockSwitchTests(WindowTestCase):
     """The switch that keeps an applied HDR profile applied.
 

@@ -53,6 +53,11 @@ WINDOW_AREA_FRACTION = 0.10
 # CIE xy of D65, the white every HDR profile here is built around.
 D65_XY = (0.3127, 0.3290)
 
+# White within this distance of D65 in u'v' counts as neutral. 0.003 is the
+# threshold a calibrated display is normally held to, and comfortably below where
+# a tint becomes visible against a reference.
+VERIFIED_DELTA_UV = 0.003
+
 # The level the balance patches are shown at, in nits.
 #
 # White balance is solved from red plus green plus blue equalling the white they
@@ -67,6 +72,62 @@ D65_XY = (0.3127, 0.3290)
 # measured, and the balance set is measured here, low enough that it never
 # engages and high enough to sit far above the instrument's noise.
 BALANCE_NITS = 100.0
+
+
+def to_uv(x: float, y: float) -> tuple[float, float]:
+    """CIE 1976 u'v', where equal distances are roughly equally visible.
+
+    xy is not perceptually uniform: the same numeric error is glaring in one
+    part of the diagram and invisible in another, which makes a dx of 0.017
+    impossible to interpret on its own.
+    """
+    denominator = -2.0 * x + 12.0 * y + 3.0
+    if abs(denominator) < 1e-9:
+        return (0.0, 0.0)
+    return (4.0 * x / denominator, 9.0 * y / denominator)
+
+
+def delta_uv(first: tuple[float, float], second: tuple[float, float]) -> float:
+    """Distance between two chromaticities in u'v'."""
+    u1, v1 = to_uv(*first)
+    u2, v2 = to_uv(*second)
+    return ((u1 - u2) ** 2 + (v1 - v2) ** 2) ** 0.5
+
+
+def correlated_colour_temperature(x: float, y: float) -> float:
+    """McCamy's approximation, in kelvin.
+
+    Only meaningful near the blackbody locus, which is where a display's white
+    should be; far from it the number is arithmetic rather than a temperature.
+    """
+    denominator = 0.1858 - y
+    if abs(denominator) < 1e-9:
+        return 0.0
+    n = (x - 0.3320) / denominator
+    return 449.0 * n**3 + 3525.0 * n**2 + 6823.3 * n + 5520.33
+
+
+def compose_gains(
+    existing: tuple[float, float, float], measured: tuple[float, float, float]
+) -> tuple[float, float, float]:
+    """Fold a new correction into the one already in force.
+
+    A measurement describes the display *as it is currently corrected*, so its
+    gains are relative to that, not absolute. Replacing rather than composing
+    makes a second pass undo the first: a display corrected to neutral measures
+    neutral, solves gains of (1, 1, 1), and stores them -- throwing the
+    correction away and returning the display to where it started.
+
+    Composing also makes repeated passes converge. Where the first correction was
+    imperfect the second measures only what is left, and the product is the
+    total. A verified calibration therefore reports a composed result equal to
+    the one it started with.
+    """
+    combined = tuple(max(0.0, a) * max(0.0, b) for a, b in zip(existing, measured))
+    largest = max(combined)
+    if largest <= 0.0:
+        return (1.0, 1.0, 1.0)
+    return tuple(value / largest for value in combined)
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +339,30 @@ class Calibration:
     def white_error(self) -> tuple[float, float]:
         """How far measured white sits from D65, as (dx, dy)."""
         return (self.white_xy[0] - D65_XY[0], self.white_xy[1] - D65_XY[1])
+
+    @property
+    def white_delta_uv(self) -> float:
+        """White error in u'v', which is what decides whether it is visible.
+
+        Roughly: below 0.001 is indistinguishable, 0.003 is the usual target for
+        a calibrated display, and 0.005 is where a careful eye starts to see a
+        tint against a known reference.
+        """
+        return delta_uv(self.white_xy, D65_XY)
+
+    @property
+    def white_cct(self) -> float:
+        """Measured white as a colour temperature, which D65 puts at 6504K."""
+        return correlated_colour_temperature(*self.white_xy)
+
+    @property
+    def verified(self) -> bool:
+        """Whether the display was already neutral when this was measured.
+
+        True means the run found nothing left to correct, which for a second pass
+        over an applied calibration is the confirmation that it worked.
+        """
+        return self.white_delta_uv <= VERIFIED_DELTA_UV
 
     @property
     def channel_trims(self) -> tuple[float, float, float]:

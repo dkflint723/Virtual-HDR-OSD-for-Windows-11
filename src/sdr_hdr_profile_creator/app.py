@@ -1916,8 +1916,16 @@ class MainWindow(FluentWidget):
             "peak_nits": result.peak_nits,
             "black_nits": result.black_nits,
             "white_xy": list(result.white_xy),
+            "white_cct": result.white_cct,
+            "white_delta_uv": result.white_delta_uv,
+            "verified": result.verified,
             "channel_gains": list(result.channel_gains),
             "channel_trims": list(result.channel_trims),
+            "trims_already_applied": [
+                self.state.hdr.red_channel,
+                self.state.hdr.green_channel,
+                self.state.hdr.blue_channel,
+            ],
         })
 
         state = self.state.hdr
@@ -1932,7 +1940,22 @@ class MainWindow(FluentWidget):
         # correction below, which acts on the signal this app sends rather than
         # describing the panel. See measure.py's module docstring.
         limit = 100.0 * measure.MAX_CHANNEL_TRIM
-        red, green, blue = result.channel_trims
+        # The measurement describes the display as it is *currently corrected*, so
+        # its gains are relative to the trims already in force rather than
+        # absolute. Replacing them would make a second pass undo the first: a
+        # display corrected to neutral measures neutral, solves (1, 1, 1), and
+        # stores that -- discarding the correction and returning the display to
+        # where it started. Composing also makes repeated passes converge.
+        applied = (
+            1.0 + state.red_channel / 100.0,
+            1.0 + state.green_channel / 100.0,
+            1.0 + state.blue_channel / 100.0,
+        )
+        was_corrected = any(abs(gain - 1.0) > 1e-4 for gain in applied)
+        red, green, blue = (
+            round((gain - 1.0) * 100.0, 3)
+            for gain in measure.compose_gains(applied, result.channel_gains)
+        )
         state.red_channel = max(-limit, min(limit, red))
         state.green_channel = max(-limit, min(limit, green))
         state.blue_channel = max(-limit, min(limit, blue))
@@ -1945,15 +1968,28 @@ class MainWindow(FluentWidget):
             "contrast too high to measure" if contrast == float("inf")
             else f"{contrast:,.0f}:1 contrast"
         )
-        dx, _dy = result.white_error
-        if abs(dx) < 0.002:
-            white_note = "White was already on D65, so the channel trims are near zero"
-        else:
-            direction = "warm" if dx > 0 else "cool"
+
+        # The error this run *found* is the verdict on whatever was applied before
+        # it, which is what makes every pass after the first a verification.
+        error = result.white_delta_uv
+        cct = result.white_cct
+        if result.verified:
             white_note = (
-                f"White measured {abs(dx):.4f} {direction} of D65; channel trims set to "
-                f"R {red:+.1f}%, G {green:+.1f}%, B {blue:+.1f}% to neutralise it"
+                f"White is neutral: {cct:,.0f}K, {error:.4f} from D65 in u'v', inside the "
+                f"{measure.VERIFIED_DELTA_UV} a calibrated display is held to"
             )
+            if was_corrected:
+                white_note = "Verified. " + white_note + ", so the correction is working"
+        else:
+            direction = "warm" if result.white_error[0] > 0 else "cool"
+            white_note = (
+                f"White measured {cct:,.0f}K, {direction} of D65 by {error:.4f} in u'v'; "
+                f"trims now R {red:+.1f}%, G {green:+.1f}%, B {blue:+.1f}%"
+            )
+            if was_corrected:
+                white_note = (
+                    f"Still {error:.4f} off after the last correction. " + white_note
+                )
         level = "ok"
         if result.trims_exceed_range:
             white_note += (
