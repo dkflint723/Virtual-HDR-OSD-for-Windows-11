@@ -214,6 +214,11 @@ class ApplicationState:
     # Keyed by DisplayInfo.stable_key, not .key: adapter LUIDs are reissued on
     # reboot, so anything keyed on those would be lost every restart.
     display_bindings: dict[str, DisplayBinding] = field(default_factory=dict)
+    # Directory holding ArgyllCMS's executables, when the user has one. Argyll
+    # ships on Windows as a zip with no installer, so it commonly lives somewhere
+    # only the user knows about and PATH is often not set. Empty means "look in
+    # PATH and the usual places".
+    argyll_path: str = ""
 
     @classmethod
     def neutral(cls) -> "ApplicationState":
@@ -226,6 +231,7 @@ class ApplicationState:
             ModeState.neutral("SDR"),
             ModeState.neutral("HDR"),
             {},
+            "",
         )
 
     def binding(self, stable_key: str) -> DisplayBinding:
@@ -258,6 +264,7 @@ class ApplicationState:
             "display_bindings": {
                 key: binding.to_dict() for key, binding in self.display_bindings.items()
             },
+            "argyll_path": self.argyll_path,
         }
 
     @classmethod
@@ -271,6 +278,7 @@ class ApplicationState:
             ModeState.from_dict(dict(data.get("sdr", {})), "SDR"),
             ModeState.from_dict(dict(data.get("hdr", {})), "HDR"),
             cls._bindings_from_dict(data.get("display_bindings")),
+            str(data.get("argyll_path", "") or ""),
         )
 
     @staticmethod

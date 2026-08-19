@@ -607,6 +607,81 @@ While the GUI is open, **Auto** reads the current Windows SDR white level and re
 
 ---
 
+# Measuring with a colorimeter
+
+Everything the app can work out on its own is *declared* rather than measured. EDID
+carries the luminance the panel's model was specified at and DXGI reports its primaries;
+neither is your individual unit measured, and neither notices that a panel drifts.
+A colorimeter closes that gap.
+
+## What you need
+
+**ArgyllCMS**, from [argyllcms.com/downloadwin.html](https://www.argyllcms.com/downloadwin.html).
+Download the **executable** distribution, not the source, and unzip it somewhere without
+spaces in the path -- Argyll's own documentation warns against Program Files for that
+reason. `D:\Argyll` is a good choice. Point the app at the `bin` directory inside it, or
+put that directory on your PATH.
+
+Argyll is run as a separate program, never copied into this project. That keeps its
+licence at arm's length, and means its maintained instrument code does the colour
+matching rather than a reimplementation of it here.
+
+## Drivers
+
+Most likely none. Instruments in the i1Display 3 family -- i1Display Pro, ColorMunki
+Display, and the Calibrite ColorChecker Display range -- enumerate as USB HID devices and
+work on the driver Windows already has. Argyll's warning about installing its libusb
+driver, and about that driver replacing the manufacturer's, applies only to non-HID
+instruments.
+
+Where no driver change is needed, other calibration software keeps working exactly as
+before. Only one program can hold the instrument open at a time, so close the other one
+before measuring.
+
+## What gets measured
+
+Five patches, each shown in the same centred window covering a tenth of the screen, on
+black. Holding the window size constant matters on an emissive panel, where the
+brightness limiter responds to total output and a full-screen patch would not measure the
+same thing as a small one.
+
+| Patch | What it establishes |
+|---|---|
+| Black | The panel's real black floor, and with peak white its contrast |
+| Peak white | Actual peak luminance, and the white point |
+| Red, green, blue | The real primaries, replacing the ones DXGI reports |
+
+Black is measured first, while the panel is still cool: a long bright sequence warms an
+emissive display, and the black floor is the reading most disturbed by that.
+
+## When a reading is refused
+
+A meter that is unplugged, aimed at the wrong part of the screen, or reading through a
+closed diffuser does not fail -- it returns numbers. Those numbers would reach the profile
+as peak luminance and display primaries, where nothing afterwards could tell them from
+real measurements.
+
+So a set of readings is checked for things that are physically impossible rather than
+merely surprising, and refused outright if any of them hold: a peak outside 40-10,000
+nits, a black that is more than 2% of white, a chromaticity outside the xy plane, or three
+primaries spanning a gamut larger than BT.2020 or narrower than a tenth of sRGB. A
+surprising reading may well be the panel; an impossible one is not.
+
+A failed patch ends the run rather than being skipped. Primaries measured without their
+matching white are not comparable with each other, and a peak carried over from an earlier
+attempt is not a measurement of anything.
+
+## The first failure you are likely to see
+
+> The meter's sensor is in the wrong position. Slide the ambient filter off the lens.
+
+i1d3-family instruments have a rotating ambient diffuser that has to be moved off the lens
+before they can read a screen. With it closed, `spotread` retries forever rather than
+giving up -- 46 MB of the same complaint in 200 seconds during development -- so the app
+stops at the first occurrence and says what to do about it.
+
+---
+
 # Calibration patterns
 
 **Test Patterns…** in row 3 fills the display with calibration patterns. The screen becomes
