@@ -47,26 +47,40 @@ def combine(channels: dict[str, Reading]) -> Reading:
 
 
 PEAK = 454.252093
+BALANCE = 100.0
+
+# The balance patches are shown well below peak so the panel is linear there, and
+# peak white is dimmed by the limiter relative to the sum of the channels -- which
+# is exactly the situation that made an earlier version refuse every real run.
+DIMMED_PEAK = reading(PEAK, 0.3270, 0.3295)
 
 # BT.709 channels weighted so they sum to exactly D65 -- a display needing no
 # correction at all.
 NEUTRAL_CHANNELS = {
-    "red": reading(0.2126 * PEAK, 0.640, 0.330),
-    "green": reading(0.7152 * PEAK, 0.300, 0.600),
-    "blue": reading(0.0722 * PEAK, 0.150, 0.060),
+    "red": reading(0.2126 * BALANCE, 0.640, 0.330),
+    "green": reading(0.7152 * BALANCE, 0.300, 0.600),
+    "blue": reading(0.0722 * BALANCE, 0.150, 0.060),
 }
-NEUTRAL = dict(NEUTRAL_CHANNELS, black=reading(0.0, 0.3130, 0.3290),
-               white=combine(NEUTRAL_CHANNELS))
+NEUTRAL = dict(
+    NEUTRAL_CHANNELS,
+    black=reading(0.0, 0.3130, 0.3290),
+    white=DIMMED_PEAK,
+    **{"balance-white": combine(NEUTRAL_CHANNELS)},
+)
 
 # The chromaticities actually measured on the development panel, with red raised
 # so white lands warm, as it did there.
 WARM_CHANNELS = {
-    "red": reading(0.2126 * PEAK * 1.13, 0.6486, 0.3312),
-    "green": reading(0.7152 * PEAK * 0.99, 0.3141, 0.5892),
-    "blue": reading(0.0722 * PEAK * 0.97, 0.1524, 0.0596),
+    "red": reading(0.2126 * BALANCE * 1.13, 0.6486, 0.3312),
+    "green": reading(0.7152 * BALANCE * 0.99, 0.3141, 0.5892),
+    "blue": reading(0.0722 * BALANCE * 0.97, 0.1524, 0.0596),
 }
-WARM = dict(WARM_CHANNELS, black=reading(0.0, 0.3130, 0.3290),
-            white=combine(WARM_CHANNELS))
+WARM = dict(
+    WARM_CHANNELS,
+    black=reading(0.0, 0.3130, 0.3290),
+    white=DIMMED_PEAK,
+    **{"balance-white": combine(WARM_CHANNELS)},
+)
 
 
 def changed(base=None, **replacements) -> dict[str, Reading]:
@@ -82,10 +96,10 @@ def without(key: str) -> dict[str, Reading]:
 
 
 class PlanTests(unittest.TestCase):
-    def test_measures_black_white_and_the_three_channels(self):
+    def test_measures_black_peak_and_a_balance_set(self):
         self.assertEqual(
             [step.key for step in plan(1000.0)],
-            ["black", "white", "red", "green", "blue"],
+            ["black", "white", "balance-white", "red", "green", "blue"],
         )
 
     def test_black_is_measured_first_while_the_panel_is_still_cool(self):
@@ -97,12 +111,23 @@ class PlanTests(unittest.TestCase):
         steps = {step.key: step for step in plan(1000.0)}
         self.assertGreater(steps["black"].settle_seconds, steps["white"].settle_seconds)
 
-    def test_channels_are_driven_at_the_same_level_as_white(self):
+    def test_channels_are_driven_at_the_same_level_as_the_reference_white(self):
         """A channel measured at another level samples a different point on the
         display's response and cannot be combined with the others."""
         steps = {step.key: step for step in plan(1000.0)}
         for key in ("red", "green", "blue"):
-            self.assertEqual(steps[key].nits, steps["white"].nits)
+            self.assertEqual(steps[key].nits, steps["balance-white"].nits)
+
+    def test_the_balance_set_sits_well_below_peak(self):
+        """White at peak asks for about three times the power of one channel, so
+        the limiter dims it much harder and the channels no longer add up to it.
+        An earlier version measured balance at peak and refused every real run."""
+        steps = {step.key: step for step in plan(1000.0)}
+        self.assertLess(steps["balance-white"].nits, steps["white"].nits / 2.0)
+
+    def test_a_dim_display_is_not_asked_for_balance_above_half_its_peak(self):
+        steps = {step.key: step for step in plan(120.0)}
+        self.assertLessEqual(steps["balance-white"].nits, steps["white"].nits / 2.0)
 
     def test_an_absurd_peak_is_clamped_into_range(self):
         self.assertLessEqual(plan(99000.0)[1].nits, 10000.0)
@@ -162,6 +187,17 @@ class DeriveTests(unittest.TestCase):
         self.assertAlmostEqual(result.peak_nits, PEAK, places=2)
         self.assertEqual(result.black_nits, 0.0)
 
+    def test_peak_comes_from_the_full_drive_patch_not_the_balance_one(self):
+        """They are deliberately different levels, and mixing them up would
+        report the balance level as the display's peak."""
+        self.assertAlmostEqual(derive(NEUTRAL).peak_nits, PEAK, places=2)
+        self.assertGreater(derive(NEUTRAL).peak_nits, BALANCE * 2)
+
+    def test_the_white_point_comes_from_the_patch_the_channels_sat_beside(self):
+        """That is the white the correction is solved against."""
+        result = derive(WARM)
+        self.assertAlmostEqual(result.white_xy[0], WARM["balance-white"].x, places=6)
+
     def test_records_the_window_the_peak_was_measured_on(self):
         """Peak luminance is meaningless without it. The development panel is
         rated 1015 nits but reads 454 on a tenth of the screen, because the
@@ -180,8 +216,10 @@ class DeriveTests(unittest.TestCase):
     def test_white_error_is_reported_against_d65(self):
         dx, dy = derive(WARM).white_error
         self.assertGreater(dx, 0.0)
-        self.assertAlmostEqual(dx, WARM["white"].x - D65_XY[0], places=6)
-        self.assertAlmostEqual(dy, WARM["white"].y - D65_XY[1], places=6)
+        # Against the reference white the channels sat beside, not peak white,
+        # because that is the white the correction is solved against.
+        self.assertAlmostEqual(dx, WARM["balance-white"].x - D65_XY[0], places=6)
+        self.assertAlmostEqual(dy, WARM["balance-white"].y - D65_XY[1], places=6)
 
     def test_trims_are_the_gains_as_percentages_and_never_positive(self):
         trims = derive(WARM).channel_trims
@@ -197,8 +235,13 @@ class DeriveTests(unittest.TestCase):
         """A profile can only carry so much, and clamping it silently would
         leave white visibly off with nothing said."""
         extreme = dict(WARM_CHANNELS)
-        extreme["red"] = reading(0.2126 * PEAK * 3.0, 0.6486, 0.3312)
-        readings = dict(extreme, black=reading(0.0, 0.313, 0.329), white=combine(extreme))
+        extreme["red"] = reading(0.2126 * BALANCE * 3.0, 0.6486, 0.3312)
+        readings = dict(
+            extreme,
+            black=reading(0.0, 0.313, 0.329),
+            white=DIMMED_PEAK,
+            **{"balance-white": combine(extreme)},
+        )
         self.assertTrue(derive(readings).trims_exceed_range)
 
     def test_a_modest_correction_is_not_flagged(self):
@@ -267,17 +310,25 @@ class ValidationTests(unittest.TestCase):
         best display this could be pointed at."""
         self.assertEqual(validate(changed(black=reading(0.0, 0.31, 0.33))), [])
 
-    def test_rejects_channels_that_do_not_add_up_to_the_measured_white(self):
+    def test_rejects_channels_that_do_not_add_up_to_the_reference_white(self):
         """Additivity is the assumption the correction rests on. If red plus
-        green plus blue is not the white that was measured, something in the
+        green plus blue is not the white measured beside them, something in the
         path is not linear and gains derived from it would be wrong."""
-        problems = validate(changed(white=reading(PEAK * 1.6, 0.3127, 0.3290)))
+        broken = reading(BALANCE * 1.6, 0.3127, 0.3290)
+        problems = validate(changed(**{"balance-white": broken}))
         self.assertTrue(any("not linear" in p for p in problems), problems)
 
     def test_small_departures_from_additivity_are_tolerated(self):
         """Instrument noise on a dim blue channel should not fail a good run."""
-        nudged = reading(NEUTRAL["white"].Y * 1.03, NEUTRAL["white"].x, NEUTRAL["white"].y)
-        self.assertEqual(validate(changed(white=nudged)), [])
+        base = NEUTRAL["balance-white"]
+        nudged = reading(base.Y * 1.03, base.x, base.y)
+        self.assertEqual(validate(changed(**{"balance-white": nudged})), [])
+
+    def test_a_peak_white_the_limiter_dimmed_is_not_an_additivity_failure(self):
+        """This is the whole reason the balance set exists. Peak white is
+        expected to fall well short of the channel sum."""
+        self.assertEqual(validate(NEUTRAL), [])
+        self.assertLess(NEUTRAL["balance-white"].Y, NEUTRAL["white"].Y)
 
 
 class FakeDisplay:
@@ -291,7 +342,7 @@ class FakeDisplay:
 class RunTests(unittest.TestCase):
     """Sequencing, with both the screen and the instrument injected."""
 
-    ORDER = ("black", "white", "red", "green", "blue")
+    ORDER = ("black", "white", "balance-white", "red", "green", "blue")
 
     def setUp(self):
         self.display = FakeDisplay()
@@ -316,7 +367,7 @@ class RunTests(unittest.TestCase):
     def test_lets_the_panel_settle_before_each_reading(self):
         """A patch read the instant it appears is read mid-transition."""
         self.run_sequence(self.good_reader())
-        self.assertEqual(len(self.slept), 5)
+        self.assertEqual(len(self.slept), 6)
         self.assertTrue(all(delay > 0 for delay in self.slept))
 
     def test_reports_progress_for_each_step(self):
@@ -326,7 +377,7 @@ class RunTests(unittest.TestCase):
             on_progress=lambda step, i, total: seen.append((step.key, i, total)),
         )
         self.assertEqual([entry[0] for entry in seen], list(self.ORDER))
-        self.assertEqual(seen[0][2], 5)
+        self.assertEqual(seen[0][2], 6)
 
     def test_a_failed_reading_ends_the_run_rather_than_being_skipped(self):
         def reader():
@@ -351,8 +402,9 @@ class RunTests(unittest.TestCase):
 
     def test_readings_that_do_not_survive_validation_are_refused(self):
         """The run completing is not the same as the readings being usable."""
-        same = reading(150.0, 0.3127, 0.3290)
-        order = iter([NEUTRAL["black"], NEUTRAL["white"], same, same, same])
+        same = reading(BALANCE / 3.0, 0.3127, 0.3290)
+        order = iter([NEUTRAL["black"], NEUTRAL["white"],
+                      reading(BALANCE, 0.3127, 0.3290), same, same, same])
         with self.assertRaises(MeasurementError):
             self.run_sequence(lambda: next(order))
 

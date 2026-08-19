@@ -50,13 +50,16 @@ def _combine(*channels):
     return Reading(X=X, Y=Y, Z=Z, x=X / total, y=Y / total)
 
 
-_RED = reading(215.0, 0.674586, 0.314418)
-_GREEN = reading(710.0, 0.269814, 0.685949)
-_BLUE = reading(90.0, 0.151222, 0.060916)
+# At the balance level, not peak: the channels have to add up to the white
+# measured beside them, which they cannot do where the limiter is running.
+_RED = reading(21.5, 0.674586, 0.314418)
+_GREEN = reading(71.0, 0.269814, 0.685949)
+_BLUE = reading(9.0, 0.151222, 0.060916)
 
 GOOD_ORDER = [
     reading(0.0, 0.3130, 0.3290),          # black
-    _combine(_RED, _GREEN, _BLUE),         # white
+    reading(454.25, 0.3127, 0.3290),       # peak white, dimmed by the limiter
+    _combine(_RED, _GREEN, _BLUE),         # reference white, below the limiter
     _RED,
     _GREEN,
     _BLUE,
@@ -207,7 +210,10 @@ class MeasurementWorkerTests(unittest.TestCase):
         result, message = outcomes[0]
         self.assertIsInstance(result, Calibration)
         self.assertEqual(message, "")
-        self.assertEqual(display.shown, ["black", "white", "red", "green", "blue"])
+        self.assertEqual(
+            display.shown,
+            ["black", "white", "balance-white", "red", "green", "blue"],
+        )
 
     def test_a_meter_failure_reports_a_message_and_no_calibration(self):
         def reader():
@@ -247,8 +253,8 @@ class MeasurementWorkerTests(unittest.TestCase):
         seen = []
         worker.progress.connect(lambda label, index, total: seen.append((label, index, total)))
         worker.run()
-        self.assertEqual(len(seen), 5)
-        self.assertEqual(seen[0][2], 5)
+        self.assertEqual(len(seen), 6)
+        self.assertEqual(seen[0][2], 6)
         self.assertEqual(seen[0][0], "Black level")
 
 

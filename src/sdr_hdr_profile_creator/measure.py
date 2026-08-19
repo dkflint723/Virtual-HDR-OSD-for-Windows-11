@@ -21,8 +21,16 @@ profile's colorant tags replaced correct figures with a narrower, wrong gamut.
 
 They are exactly right for the other job. A white-balance correction acts on the
 signal this app sends, so what it needs to know is how the display responds to
-*that* signal -- which is what these patches measure. The panel's native primaries
-come from DXGI; the effective ones come from here.
+*that* signal -- which is what these patches measure. The panel's own primaries
+are read from its EDID instead, because DXGI reports the applied profile back.
+
+**Why the balance patches are dim.** The correction is solved from red plus green
+plus blue equalling the white they make, which only holds where the panel is
+linear. At peak drive it is not: white asks for about three times the power of a
+single channel, so the brightness limiter dims white much harder than it dims
+red, and the channels then sum far above the white measured beside them. Peak is
+therefore measured at full drive, where the limiter is the point, and the balance
+set well below it, where the limiter is not running.
 """
 
 from __future__ import annotations
@@ -44,6 +52,21 @@ WINDOW_AREA_FRACTION = 0.10
 
 # CIE xy of D65, the white every HDR profile here is built around.
 D65_XY = (0.3127, 0.3290)
+
+# The level the balance patches are shown at, in nits.
+#
+# White balance is solved from red plus green plus blue equalling the white they
+# make, and that only holds where the panel is linear. At full drive it is not:
+# white asks for roughly three times the power of any single channel, so an
+# emissive panel's brightness limiter dims white far harder than it dims red, and
+# the three channels then sum to well above the white actually measured. On the
+# development panel a mere 5% of such dimming already exceeds the additivity
+# check, and a limiter does much more than 5%.
+#
+# So peak is measured at full drive, where the limiter is the thing being
+# measured, and the balance set is measured here, low enough that it never
+# engages and high enough to sit far above the instrument's noise.
+BALANCE_NITS = 100.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,16 +94,20 @@ def plan(peak_nits: float) -> tuple[MeasurementStep, ...]:
     display's response and cannot be combined with the others.
     """
     target = max(80.0, min(10000.0, float(peak_nits)))
+    # Never ask for a balance level above half the peak, so a dim display is not
+    # measured for balance at a level its own limiter is already fighting.
+    balance = min(BALANCE_NITS, target / 2.0)
     return (
         MeasurementStep("black", "Black level", BLACK, 0.0, settle_seconds=3.0),
         MeasurementStep("white", "Peak white", WHITE, target, settle_seconds=2.0),
-        MeasurementStep("red", "Red channel", (1.0, 0.0, 0.0), target),
-        MeasurementStep("green", "Green channel", (0.0, 1.0, 0.0), target),
-        MeasurementStep("blue", "Blue channel", (0.0, 0.0, 1.0), target),
+        MeasurementStep("balance-white", "Reference white", WHITE, balance),
+        MeasurementStep("red", "Red channel", (1.0, 0.0, 0.0), balance),
+        MeasurementStep("green", "Green channel", (0.0, 1.0, 0.0), balance),
+        MeasurementStep("blue", "Blue channel", (0.0, 0.0, 1.0), balance),
     )
 
 
-REQUIRED = ("black", "white", "red", "green", "blue")
+REQUIRED = ("black", "white", "balance-white", "red", "green", "blue")
 
 # Widest range the Windows HDR calibration flow admits, so an unusual but real
 # panel is never rejected for being unusual.
@@ -153,8 +180,13 @@ def _channel_separation(readings: dict[str, Reading]) -> float:
 
 
 def _additivity_error(readings: dict[str, Reading]) -> float:
-    """How far red + green + blue sits from the measured white, relatively."""
-    white = _xyz(readings["white"])
+    """How far red + green + blue sits from the reference white, relatively.
+
+    Measured against the balance white rather than peak white, because the three
+    channels were shown at the same level as it. Comparing them against a peak
+    white the limiter has dimmed would fail on every emissive panel.
+    """
+    white = _xyz(readings["balance-white"])
     total = tuple(
         sum(_xyz(readings[channel])[axis] for channel in ("red", "green", "blue"))
         for axis in range(3)
@@ -195,7 +227,7 @@ def validate(readings: dict[str, Reading]) -> list[str]:
     if white <= black:
         problems.append("Peak white measured no brighter than black.")
 
-    for name in ("white", "red", "green", "blue"):
+    for name in ("white", "balance-white", "red", "green", "blue"):
         x, y = readings[name].x, readings[name].y
         if not (0.0 < x < 1.0 and 0.0 < y < 1.0):
             problems.append(
@@ -283,7 +315,7 @@ def white_balance_gains(readings: dict[str, Reading]) -> tuple[float, float, flo
         # said why, and a neutral answer is the only safe one.
         return (1.0, 1.0, 1.0)
 
-    luminance = max(readings["white"].Y, 1e-6)
+    luminance = max(readings["balance-white"].Y, 1e-6)
     x, y = D65_XY
     target = ((x / y) * luminance, luminance, ((1.0 - x - y) / y) * luminance)
 
@@ -304,11 +336,14 @@ def derive(readings: dict[str, Reading]) -> Calibration:
     problems = validate(readings)
     if problems:
         raise MeasurementError(" ".join(problems))
-    white = readings["white"]
+    # Peak comes from the patch driven to peak; the white point comes from the
+    # one the channels were measured beside, which is the white the correction
+    # is actually solved against.
+    reference = readings["balance-white"]
     return Calibration(
-        peak_nits=white.Y,
+        peak_nits=readings["white"].Y,
         black_nits=max(0.0, readings["black"].Y),
-        white_xy=(white.x, white.y),
+        white_xy=(reference.x, reference.y),
         channel_gains=white_balance_gains(readings),
     )
 
@@ -329,6 +364,7 @@ def run(
     *,
     peak_nits: float,
     on_progress: Callable[[MeasurementStep, int, int], None] | None = None,
+    on_reading: Callable[[MeasurementStep, Reading], None] | None = None,
     should_abort: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> Calibration:
@@ -359,8 +395,13 @@ def run(
         if should_abort is not None and should_abort():
             raise Aborted()
         try:
-            readings[step.key] = read()
+            reading = read()
         except MeterError as exc:
             raise MeasurementError(f"{step.label}: {exc}") from exc
+        readings[step.key] = reading
+        if on_reading is not None:
+            # Reported as it arrives rather than at the end, so a run that is
+            # later refused still leaves the numbers that caused it.
+            on_reading(step, reading)
 
     return derive(readings)

@@ -141,6 +141,7 @@ class MeasurementWorker(QObject):
     """Runs the measurement sequence off the UI thread."""
 
     progress = Signal(str, int, int)
+    reading = Signal(str, object)
     finished = Signal(object, str)
 
     def __init__(
@@ -177,6 +178,7 @@ class MeasurementWorker(QObject):
                 on_progress=lambda step, index, total: self.progress.emit(
                     step.label, index, total
                 ),
+                on_reading=lambda step, value: self.reading.emit(step.key, value),
                 should_abort=lambda: self._abort,
                 sleep=self._sleep,
             )
@@ -196,6 +198,7 @@ def start(
     peak_nits: float,
     on_progress: Callable[[str, int, int], None],
     on_finished: Callable[[Calibration | None, str], None],
+    on_reading: Callable[[str, Reading], None] | None = None,
 ) -> tuple[QThread, MeasurementWorker]:
     """Begin a run, returning the thread and worker so the caller can cancel.
 
@@ -209,6 +212,8 @@ def start(
 
     thread.started.connect(worker.run)
     worker.progress.connect(on_progress)
+    if on_reading is not None:
+        worker.reading.connect(on_reading)
 
     def _done(result, message):
         on_finished(result, message)

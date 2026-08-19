@@ -85,6 +85,11 @@ LIVE_REGISTRY_PATH = LOCAL_ROOT / "live_registry.json"
 PACKAGE_ROOT = Path(__file__).resolve().parent
 RESOURCE_ROOT = PACKAGE_ROOT / "resources"
 GAMMA_HOTKEY_STATE_PATH = LOCAL_ROOT / "gamma_hotkeys.json"
+# Raw meter readings and the outcome of each run. A refused measurement reports a
+# sentence in the status bar and then the numbers behind it are gone, which made
+# every failure a round trip through the user. Written as JSON lines, appended,
+# and never read back by the app.
+METER_LOG_PATH = LOCAL_ROOT / "meter_log.jsonl"
 GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
 # Where the standalone watchdog installs itself. Read only, to confirm that its
 # installer actually ran; this app never writes there.
@@ -1835,6 +1840,12 @@ class MainWindow(FluentWidget):
             return
 
         self._measure_window = window
+        self._log_meter({
+            "event": "start",
+            "display": display.friendly_name,
+            "instrument": instrument.label,
+            "requested_peak_nits": peak,
+        })
         self._set_status(
             f"Measuring {display.friendly_name} with {instrument.label}. Place the meter "
             "over the centre of the screen. Esc cancels.",
@@ -1847,11 +1858,32 @@ class MainWindow(FluentWidget):
             peak,
             self._measure_progress,
             self._measure_finished,
+            on_reading=self._measure_reading,
         )
         # Held on self so neither is collected mid-run: a QThread that goes out of
         # scope takes its worker with it and reports nothing useful about why.
         self._measure_thread = thread
         self._measure_worker = worker
+
+    def _log_meter(self, record: dict) -> None:
+        """Append one line to the meter log, and never fail the run over it."""
+        try:
+            METER_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            record["at"] = datetime.now().astimezone().isoformat()
+            with METER_LOG_PATH.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        except Exception:
+            # Diagnostics must never be the reason a measurement fails.
+            pass
+
+    def _measure_reading(self, key: str, reading) -> None:
+        """Record a patch as it is read, before anything decides what it means."""
+        self._log_meter({
+            "event": "reading",
+            "patch": key,
+            "X": reading.X, "Y": reading.Y, "Z": reading.Z,
+            "x": reading.x, "y": reading.y,
+        })
 
     def _measure_progress(self, label: str, index: int, total: int) -> None:
         self._set_status(
@@ -1869,11 +1901,24 @@ class MainWindow(FluentWidget):
         self._measure_worker = None
 
         if result is None:
+            self._log_meter({
+                "event": "cancelled" if not message else "refused",
+                "message": message,
+            })
             if message:
                 self._set_status(f"Measurement stopped: {message}", "error")
             else:
                 self._set_status("Measurement cancelled. Nothing was changed.", "ok")
             return
+
+        self._log_meter({
+            "event": "accepted",
+            "peak_nits": result.peak_nits,
+            "black_nits": result.black_nits,
+            "white_xy": list(result.white_xy),
+            "channel_gains": list(result.channel_gains),
+            "channel_trims": list(result.channel_trims),
+        })
 
         state = self.state.hdr
         state.peak_luminance_nits = max(80.0, min(10000.0, result.peak_nits))
