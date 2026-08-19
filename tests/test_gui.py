@@ -2227,6 +2227,86 @@ class ControlRowFitTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class PanelPrimarySourceTests(WindowTestCase):
+    """Where the panel's gamut is read from, and why not from DXGI.
+
+    DXGI_OUTPUT_DESC1 reports whatever ICC profile is associated, not the panel.
+    On the development display it answered (0.6746, 0.3144) for red under one
+    profile and (0.6486, 0.3312) under the next -- each matching that profile's
+    colorant tags to four decimals -- while the EDID said (0.6836, 0.3047)
+    throughout. A profile written from DXGI's answer becomes its next answer, and
+    this app watched its own BT.709 output come back as the panel's gamut.
+    """
+
+    EDID_PRIMARIES = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
+                      0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
+    # What DXGI says while our own BT.709-ish profile is applied.
+    ECHOED = (0.648591, 0.33118, 0.314107, 0.589249, 0.152411, 0.059645, 0.312725, 0.329022)
+
+    def use_edid(self, primaries=None):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        panel = PanelMetadata(
+            peak_nits=1015.24, max_frame_average_nits=265.05, min_nits=0.000156,
+            supports_pq=True,
+            primaries=self.EDID_PRIMARIES if primaries is None else primaries,
+        )
+        patcher = mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def use_dxgi(self, primaries=None):
+        values = self.ECHOED if primaries is None else primaries
+        capability = SimpleNamespace(
+            device_name=r"\\.\DISPLAY1", is_hdr=True,
+            red_primary=values[0:2], green_primary=values[2:4],
+            blue_primary=values[4:6], white_point=values[6:8],
+        )
+        patcher = mock.patch.object(
+            app_module, "capability_for_device_name", lambda _n: capability
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_edid_outranks_dxgi(self):
+        self.use_edid()
+        self.use_dxgi()
+        self.window._capture_panel_primaries(self.display)
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.EDID_PRIMARIES)
+
+    def test_the_echoed_values_are_never_adopted_while_edid_answers(self):
+        self.use_edid()
+        self.use_dxgi()
+        self.window._capture_panel_primaries(self.display)
+        self.assertNotEqual(self.window.state.hdr.panel_primaries, self.ECHOED)
+
+    def test_a_profile_already_written_from_the_echo_is_corrected(self):
+        """The loop has to be breakable, not merely avoidable."""
+        self.window.state.hdr.panel_primaries = self.ECHOED
+        self.use_edid()
+        self.use_dxgi()
+        self.assertTrue(self.window._capture_panel_primaries(self.display))
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.EDID_PRIMARIES)
+
+    def test_dxgi_is_still_used_when_the_edid_cannot_be_read(self):
+        """A possibly-echoed answer still beats the generic BT.2020 table."""
+        self.use_edid(primaries=())
+        self.use_dxgi()
+        self.window._capture_panel_primaries(self.display)
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.ECHOED)
+
+    def test_dxgi_is_not_consulted_in_sdr(self):
+        """With HDR off the same panel reports BT.709, which would describe a
+        wide-gamut display as sRGB."""
+        self.display.advanced_color_kind = "SDR"
+        self.window._current_display_snapshot = self.display
+        self.use_edid(primaries=())
+        self.use_dxgi()
+        self.window._capture_panel_primaries(self.display)
+        self.assertEqual(self.window.state.hdr.panel_primaries, ())
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
 class ProfileLockSwitchTests(WindowTestCase):
     """The switch that keeps an applied HDR profile applied.
 

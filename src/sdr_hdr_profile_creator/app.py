@@ -2576,33 +2576,45 @@ class MainWindow(FluentWidget):
     def _capture_panel_primaries(self, display: DisplayInfo) -> bool:
         """Record the panel's own gamut, for profiles generated without a base.
 
-        Only meaningful while the display is actually in HDR mode. With HDR off,
-        the driver reports BT.709 for this same panel, and storing that would
-        describe a wide-gamut display as sRGB.
+        The EDID is the source, not DXGI. ``DXGI_OUTPUT_DESC1`` reports whatever
+        ICC profile is currently associated rather than the panel: on the display
+        this was developed against it answered (0.6746, 0.3144) for red under one
+        profile and (0.6486, 0.3312) under the next, each matching that profile's
+        colorant tags to four decimal places, while the EDID said (0.6836, 0.3047)
+        throughout. Believing DXGI closes a loop -- a profile written from its
+        answer becomes its next answer -- and this app watched its own BT.709
+        output come back as the panel's gamut and stick.
 
-        This is only ever consulted when there is no base profile to inherit
-        rXYZ/gXYZ/bXYZ from. The alternative in that case is the generic table,
-        whose HDR entry is BT.2020 -- a gamut essentially no display covers.
+        DXGI remains the fallback for a display whose EDID cannot be read, where a
+        possibly-echoed answer still beats the generic BT.2020 table. It is only
+        taken in HDR mode, because with HDR off the same panel reports BT.709.
         """
-        if display.current_mode != "HDR":
+        panel = read_panel_metadata(display.device_path)
+        measured = normalize_primaries(panel.primaries) if panel is not None else ()
+        if not measured:
+            measured = self._dxgi_primaries(display)
+        if not measured or measured == self.state.hdr.panel_primaries:
             return False
+        self.state.hdr.panel_primaries = measured
+        self._save_state_soon()
+        return True
+
+    def _dxgi_primaries(self, display: DisplayInfo) -> tuple[float, ...]:
+        """What the driver reports, which may be the applied profile talking back."""
+        if display.current_mode != "HDR":
+            return ()
         try:
             capability = capability_for_device_name(display.gdi_name)
         except Exception:
-            return False
+            return ()
         if capability is None or not capability.is_hdr:
-            return False
-        primaries = normalize_primaries(
+            return ()
+        return normalize_primaries(
             tuple(capability.red_primary)
             + tuple(capability.green_primary)
             + tuple(capability.blue_primary)
             + tuple(capability.white_point)
         )
-        if not primaries or primaries == self.state.hdr.panel_primaries:
-            return False
-        self.state.hdr.panel_primaries = primaries
-        self._save_state_soon()
-        return True
 
     def _adopt_panel_luminance_from_edid(self, display: DisplayInfo) -> bool:
         """Replace the luminance figures with what the panel declares.

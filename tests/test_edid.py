@@ -13,6 +13,7 @@ import unittest
 from sdr_hdr_profile_creator.edid import (
     PanelMetadata,
     parse_hdr_static_metadata,
+    parse_chromaticity,
     read_panel_metadata,
 )
 
@@ -139,3 +140,58 @@ class FrameAverageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def encode_chromaticity(values):
+    """Build EDID base-block bytes 0x19-0x22 for eight xy coordinates.
+
+    Each coordinate is 10 bits: the high eight in its own byte, the low two
+    packed into one of two shared bytes.
+    """
+    codes = [max(0, min(1023, round(value * 1024.0))) for value in values]
+    rx, ry, gx, gy, bx, by, wx, wy = codes
+    low_rg = ((rx & 3) << 6) | ((ry & 3) << 4) | ((gx & 3) << 2) | (gy & 3)
+    low_bw = ((bx & 3) << 6) | ((by & 3) << 4) | ((wx & 3) << 2) | (wy & 3)
+    block = bytearray(0x23)
+    block[0x19] = low_rg
+    block[0x1A] = low_bw
+    for index, code in enumerate(codes):
+        block[0x1B + index] = code >> 2
+    return bytes(block)
+
+
+class ChromaticityTests(unittest.TestCase):
+    """The panel's own gamut, which is the only source DXGI cannot contaminate."""
+
+    # Read from the development panel's real EDID.
+    PANEL = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
+             0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
+
+    def test_round_trips_the_panel_it_was_read_from(self):
+        self.assertEqual(parse_chromaticity(encode_chromaticity(self.PANEL)), self.PANEL)
+
+    def test_resolution_is_about_a_thousandth_in_xy(self):
+        """10 bits per coordinate. Coarser than the float DXGI reports, and
+        unlike it, describing the panel rather than the profile in force."""
+        decoded = parse_chromaticity(encode_chromaticity((0.6800, 0.3200, 0.2650, 0.6900,
+                                                          0.1500, 0.0600, 0.3127, 0.3290)))
+        for got, wanted in zip(decoded, (0.6800, 0.3200, 0.2650, 0.6900,
+                                         0.1500, 0.0600, 0.3127, 0.3290)):
+            self.assertAlmostEqual(got, wanted, delta=0.001)
+
+    def test_a_truncated_edid_yields_nothing_rather_than_raising(self):
+        self.assertEqual(parse_chromaticity(b"\x00" * 16), ())
+
+    def test_an_all_zero_block_is_rejected(self):
+        """A panel that answers with zeros has not answered, and each y divides
+        when the coordinates are converted to XYZ."""
+        self.assertEqual(parse_chromaticity(bytes(0x23)), ())
+
+    def test_the_panel_gamut_is_wider_than_p3(self):
+        """A QD-OLED exceeds P3, and a check that quietly assumed otherwise
+        would reject the display it was written for."""
+        values = parse_chromaticity(encode_chromaticity(self.PANEL))
+        rx, ry, gx, gy, bx, by = values[:6]
+        area = abs((gx - rx) * (by - ry) - (bx - rx) * (gy - ry)) / 2
+        self.assertGreater(area, 0.1520)   # DCI-P3
+        self.assertLess(area, 0.2119)      # BT.2020, which bounds anything real

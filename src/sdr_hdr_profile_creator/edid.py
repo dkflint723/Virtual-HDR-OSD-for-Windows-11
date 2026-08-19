@@ -15,6 +15,16 @@ built on that describes a display nobody owns.
 The EDID is stored by the Plug and Play enumerator, so this reads the panel's own
 declaration rather than anything Windows derived from it. Encoding is CTA-861-G section
 7.5.13: luminance codes are logarithmic, and minimum is a fraction of maximum.
+
+The same applies to the display's primaries, for a worse reason. ``DXGI_OUTPUT_DESC1``
+reports whatever ICC profile is currently associated, not the panel. On the display this
+was developed against, DXGI reported (0.6746, 0.3144) for red while one profile was
+applied and (0.6486, 0.3312) after another was, each matching its profile's colorant
+tags to four decimal places, while the panel's own EDID says (0.6836, 0.3047) throughout.
+That feedback loop is self-sustaining: a profile written from DXGI's answer becomes
+DXGI's next answer. The EDID cannot be contaminated that way, so it is the source here.
+Base-block chromaticity is 10-bit, about 0.001 in xy -- coarser than DXGI's float and
+correct, which matters more.
 """
 
 from __future__ import annotations
@@ -45,6 +55,9 @@ class PanelMetadata:
     max_frame_average_nits: float
     min_nits: float
     supports_pq: bool
+    # rx, ry, gx, gy, bx, by, wx, wy from the base block, or empty when the EDID
+    # is malformed. Ordered to match ModeState.panel_primaries.
+    primaries: tuple[float, ...] = ()
 
     @property
     def credible(self) -> bool:
@@ -54,6 +67,38 @@ class PanelMetadata:
         produce, has not really answered the question.
         """
         return self.supports_pq and 40.0 <= self.peak_nits <= 10000.0
+
+
+def parse_chromaticity(edid: bytes) -> tuple[float, ...]:
+    """The display's primaries and white from EDID base-block bytes 0x19-0x22.
+
+    Each coordinate is 10 bits: eight in its own byte, with the low two packed
+    into one of two shared bytes. Returns rx, ry, gx, gy, bx, by, wx, wy, or an
+    empty tuple when the block cannot be read.
+
+    Resolution is 1/1024, about 0.001 in xy. That is coarser than the float DXGI
+    reports and unlike it describes the panel rather than the profile in force.
+    """
+    if len(edid) < 0x23:
+        return ()
+    low_rg, low_bw = edid[0x19], edid[0x1A]
+
+    def coordinate(high: int, low: int, shift: int) -> float:
+        return ((edid[high] << 2) | ((low >> shift) & 0x03)) / 1024.0
+
+    values = (
+        coordinate(0x1B, low_rg, 6), coordinate(0x1C, low_rg, 4),
+        coordinate(0x1D, low_rg, 2), coordinate(0x1E, low_rg, 0),
+        coordinate(0x1F, low_bw, 6), coordinate(0x20, low_bw, 4),
+        coordinate(0x21, low_bw, 2), coordinate(0x22, low_bw, 0),
+    )
+    # A panel that reports zeros, or coordinates outside the chromaticity
+    # diagram, has not answered. Each y also divides when converting to XYZ.
+    if any(not 0.0 < value < 1.0 for value in values):
+        return ()
+    if any(values[index] <= 0.0 for index in (1, 3, 5, 7)):
+        return ()
+    return values
 
 
 def _luminance_from_code(code: int) -> float:
@@ -99,6 +144,9 @@ def parse_hdr_static_metadata(edid: bytes) -> PanelMetadata | None:
                     max_frame_average_nits=frame_average,
                     min_nits=minimum,
                     supports_pq=bool(eotf & _EOTF_PQ_BIT),
+                    # From the base block, not this extension: the panel's own
+                    # gamut, which DXGI cannot be trusted to report.
+                    primaries=parse_chromaticity(edid),
                 )
             cursor += length + 1
     return None
