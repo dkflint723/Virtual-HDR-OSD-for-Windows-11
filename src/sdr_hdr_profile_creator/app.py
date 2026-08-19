@@ -1149,6 +1149,14 @@ class MainWindow(FluentWidget):
             self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
             self._set_status(f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.", "ok")
+            if self._prefill_luminance_from_panel(selected):
+                state = self.state.hdr
+                self._set_status(
+                    f"{selected.friendly_name} declares {state.peak_luminance_nits:g} nits peak "
+                    f"and {state.full_frame_luminance_nits:g} full-frame; using those until "
+                    "measured. They are the model's specification, not this panel measured.",
+                    "ok",
+                )
             self._warn_if_panel_gamut_changed(selected)
 
     def _display_selected(self, _index: int) -> None:
@@ -2207,6 +2215,41 @@ class MainWindow(FluentWidget):
 
     # ----------------------------------------------------------------------------------
     # Import / export
+
+    # What ModeState.neutral("HDR") carries. Matching all three exactly means nothing has
+    # ever set them: no measurement, no import from a profile that declared any. It is a
+    # heuristic, but a wrong guess only replaces a generic default with the panel's own
+    # figures, which is the better default either way.
+    UNSET_LUMINANCE = (0.0, 1000.0, 400.0)
+
+    def _prefill_luminance_from_panel(self, display: DisplayInfo) -> bool:
+        """Start from what the display declares rather than from generic defaults.
+
+        A profile generated before anyone opens the patterns used to claim 1000 nits peak
+        and 400 full-frame for every display in the world. The panel states its own
+        figures in its EDID, and 1015/265 describes this one; 1000/400 describes nothing.
+
+        Only fills values nobody has set. A measurement or an imported profile's own data
+        always wins, because both are about this display and the EDID is about the model.
+        """
+        state = self.state.hdr
+        current = (
+            state.minimum_luminance_nits,
+            state.peak_luminance_nits,
+            state.full_frame_luminance_nits,
+        )
+        if current != self.UNSET_LUMINANCE:
+            return False
+        panel = read_panel_metadata(display.device_path)
+        if panel is None or not panel.credible:
+            return False
+        state.minimum_luminance_nits = max(0.0, min(100.0, panel.min_nits))
+        state.peak_luminance_nits = max(80.0, min(10000.0, panel.peak_nits))
+        state.full_frame_luminance_nits = max(
+            80.0, min(state.peak_luminance_nits, panel.max_frame_average_nits or panel.peak_nits)
+        )
+        self._save_state_soon()
+        return True
 
     def _active_profile_overrides_metadata(self, display: DisplayInfo) -> bool:
         """Whether what DXGI reports could be this app's own output coming back.

@@ -142,6 +142,7 @@ def render_overlay(
     editing: str | None = None,
     tracks: list[tuple[str, int, int, int, int]] | None = None,
     probe_moved: bool = True,
+    declared: float | None = None,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -250,6 +251,13 @@ def render_overlay(
                 else f"{context.probe_nits:.4g} of white")
             painter.drawText(margin, y, f"Level  {shown}" + ("_" if editing is not None else ""))
             y += spacing(10)
+            if declared is not None:
+                # The panel's own claim, beside the reading rather than instead of it.
+                # Agreement is reassurance; a gap is the more interesting result, and
+                # either way the user should not have to remember the number.
+                painter.setPen(QColor(150, 150, 150, 255))
+                painter.drawText(margin, y + spacing(18), f"       panel declares {declared:.4g}")
+                y += spacing(22)
             # PQ, not nits: a linear bar would spend nearly all its length on highlights
             # and show no movement at all through the range where thresholds are found.
             draw_track(y, pq_inverse_eotf(context.probe_nits), True, key=PROBE_TRACK_KEY)
@@ -458,6 +466,7 @@ class PatternWindow(QWidget):
             and not capability.luminance_is_credible
             and not (panel is not None and panel.credible)
         )
+        self._panel = panel
         self._context = context_for(capability, sdr_white_nits, panel)
         self._controls = list(controls)
         self._active = 0
@@ -797,6 +806,17 @@ class PatternWindow(QWidget):
             scale = max(0.55, scale * (height / needed) * 0.97)
         return self.render_summary(width, height, scale)
 
+    def _declared_for(self, pattern: Pattern) -> float | None:
+        """What the panel claims for the figure this step measures, if it claims one."""
+        if self._panel is None or not self._panel.credible:
+            return None
+        value = {
+            "black-level": self._panel.min_nits,
+            "peak-white": self._panel.peak_nits,
+            "full-frame-white": self._panel.max_frame_average_nits,
+        }.get(pattern.key)
+        return value if value else None
+
     def show_summary(self) -> bool:
         """Return to the results after looking at a pattern."""
         if not self._complete:
@@ -899,6 +919,7 @@ class PatternWindow(QWidget):
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
             step=self.guided_step, total=len(GUIDED_SEQUENCE), editing=self._editing,
             tracks=self._tracks, probe_moved=self._probe_moved,
+            declared=self._declared_for(pattern),
         )
         # Where compose will put the strip, so a click can be matched to a track.
         self._overlay_origin = (

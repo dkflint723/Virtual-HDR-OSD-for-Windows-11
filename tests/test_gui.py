@@ -1795,3 +1795,53 @@ class BlackLevelPlausibilityTests(WindowTestCase):
     def test_peak_readings_are_not_subject_to_the_black_check(self):
         self.window._record_measurement("peak-white", 940.0)
         self.assertNotIn("darkest level you can see", self.window.status_label.text())
+
+
+class PanelPrefillTests(WindowTestCase):
+    """A profile generated before anyone opens the patterns used to claim 1000 nits peak
+    and 400 full-frame for every display in the world. The panel states its own figures;
+    1015/265 describes one, 1000/400 describes none."""
+
+    def panel(self, **overrides):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        base = dict(peak_nits=1015.24, max_frame_average_nits=265.05,
+                    min_nits=0.0002, supports_pq=True)
+        base.update(overrides)
+        return PanelMetadata(**base)
+
+    def test_untouched_defaults_are_replaced_by_the_declaration(self):
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: self.panel()):
+            self.assertTrue(self.window._prefill_luminance_from_panel(self.display))
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 1015.24, places=1)
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 265.05, places=1)
+
+    def test_a_measurement_is_never_overwritten(self):
+        """A measurement is about this display; the EDID is about the model."""
+        self.window._record_measurement("peak-white", 940.0)
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: self.panel()):
+            self.assertFalse(self.window._prefill_luminance_from_panel(self.display))
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 940.0)
+
+    def test_a_panel_that_declares_nothing_leaves_the_defaults(self):
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: None):
+            self.assertFalse(self.window._prefill_luminance_from_panel(self.display))
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 1000.0)
+
+    def test_an_incredible_declaration_is_ignored(self):
+        with mock.patch.object(app_module, "read_panel_metadata",
+                               lambda _p: self.panel(supports_pq=False)):
+            self.assertFalse(self.window._prefill_luminance_from_panel(self.display))
+
+    def test_full_frame_is_still_held_at_or_below_peak(self):
+        with mock.patch.object(app_module, "read_panel_metadata",
+                               lambda _p: self.panel(peak_nits=300.0, max_frame_average_nits=900.0)):
+            self.window._prefill_luminance_from_panel(self.display)
+        self.assertLessEqual(self.window.state.hdr.full_frame_luminance_nits,
+                             self.window.state.hdr.peak_luminance_nits)
+
+    def test_it_says_the_figures_are_a_specification(self):
+        """Presenting a manufacturer's claim as a measurement is the thing to avoid."""
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: self.panel()):
+            self.window._refresh_displays()
+        self.assertIn("specification", self.window.status_label.text())

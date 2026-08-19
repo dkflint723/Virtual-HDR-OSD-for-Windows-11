@@ -1465,3 +1465,60 @@ class PanelDeclarationTests(PatternViewTestCase):
         self.addCleanup(win.deleteLater)
         win.resize(800, 600)
         self.assertFalse(win._assumed_peak)
+
+
+class DeclaredBesideMeasuredTests(PatternViewTestCase):
+    """Agreement between the declaration and the reading is reassurance; a gap is the more
+    interesting result. Either way the user should not have to remember the number."""
+
+    def panel(self, **overrides):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        base = dict(peak_nits=1015.24, max_frame_average_nits=265.05,
+                    min_nits=0.0002, supports_pq=True)
+        base.update(overrides)
+        return PanelMetadata(**base)
+
+    def view(self, panel=True):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            panel=self.panel() if panel else None,
+                            measure=lambda *_: None)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        return win
+
+    def test_each_measured_step_is_paired_with_its_declaration(self):
+        win = self.view()
+        expected = {"black-level": 0.0002, "peak-white": 1015.24, "full-frame-white": 265.05}
+        for key, value in expected.items():
+            win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == key))
+            with self.subTest(step=key):
+                self.assertAlmostEqual(win._declared_for(win.pattern), value, places=2)
+
+    def test_a_step_the_panel_says_nothing_about_shows_nothing(self):
+        win = self.view()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "tone-tracking"))
+        self.assertIsNone(win._declared_for(win.pattern))
+
+    def test_no_declaration_at_all_shows_nothing(self):
+        win = self.view(panel=False)
+        self.assertIsNone(win._declared_for(win.pattern))
+
+    def test_the_declaration_reaches_the_overlay(self):
+        plain, _, _ = render_overlay(
+            460, 900, pattern_view.pattern_by_key("peak-white"),
+            context_for(capability(), 240.0), self.controls, 0)
+        with_claim, _, _ = render_overlay(
+            460, 900, pattern_view.pattern_by_key("peak-white"),
+            context_for(capability(), 240.0), self.controls, 0, declared=1015.24)
+        self.assertNotEqual(plain, with_claim)
+
+    def test_the_declaration_does_not_move_when_a_reading_replaces_the_context(self):
+        """It is the panel's claim; a measurement must not silently rewrite it."""
+        win = self.view()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        win.set_probe(1170.0)
+        win.accept_measurement()
+        self.assertAlmostEqual(win._declared_for(pattern_view.pattern_by_key("peak-white")),
+                               1015.24, places=2)
