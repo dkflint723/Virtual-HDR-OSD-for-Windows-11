@@ -200,6 +200,8 @@ Below that:
 - **Tone & Brightness** — fine tonal controls, plus the **SDR-in-HDR Gamma Correction** dropdown (optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys).
 - **Color & White Balance** — white-point, chroma, and RGB fine adjustments.
 - **Getting Started** — the step-by-step walkthrough, with live progress checks.
+- **Measure with Meter…** — measures the display with a colorimeter instead of by eye.
+  Needs ArgyllCMS installed separately; see *Measuring with a colorimeter* below.
 - **Keep Profile Locked** — the switch in row 3. Installs the independent association watchdog, which
   puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
   closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
@@ -637,6 +639,19 @@ instruments.
 Where no driver change is needed, other calibration software keeps working exactly as
 before. Only one program can hold the instrument open at a time, so close the other one
 before measuring.
+
+## Running a measurement
+
+**Measure with Meter…** in row 3. The display must be in HDR, because the patches are
+shown in absolute luminance. The first time, you will be asked where ArgyllCMS is; the
+answer is remembered per machine.
+
+The screen goes black and each patch appears in turn, centred. Put the meter over the
+middle of the screen and leave it there. Progress is reported in the status line, and
+Esc cancels -- a cancelled run changes nothing at all.
+
+When it finishes, the measured peak, black and primaries replace what the profile had.
+Press **Apply Edits** to write them out.
 
 ## What gets measured
 

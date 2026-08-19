@@ -45,7 +45,9 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
+from . import measure_view
 from .edid import read_panel_metadata
+from .meter import MeterError, find_spotread, list_instruments, read_emissive
 from .hdr_display import capability_for_device_name
 from .pattern_view import ControlBinding, PatternWindow
 from .icc import (
@@ -578,6 +580,15 @@ class MainWindow(FluentWidget):
         )
         self.patterns_button.clicked.connect(self._open_pattern_view)
         runtime_row.addWidget(self.patterns_button)
+        self.meter_button = PushButton("Measure with Meter…", bar)
+        self.meter_button.setToolTip(
+            "Measure this display with a colorimeter instead of by eye: black level, peak "
+            "white, and the three primaries, each read from a centred patch on black.\n\n"
+            "Needs ArgyllCMS installed separately; you will be asked for it the first time. "
+            "Most meters need no driver, and other calibration software keeps working."
+        )
+        self.meter_button.clicked.connect(self._measure_with_meter)
+        runtime_row.addWidget(self.meter_button)
         runtime_row.addStretch(1)
         self.refresh_profile_button = PushButton("Reapply", bar)
         self.refresh_profile_button.setToolTip("Force a full reinstall of the current settings. Use this if Windows has dropped the HDR association, typically after a mode change or resume from sleep.")
@@ -1711,6 +1722,161 @@ class MainWindow(FluentWidget):
         self._set_status(
             "Calibration patterns are on screen. Number keys switch pattern, Tab picks a "
             "control, arrows adjust, Esc exits.",
+            "ok",
+        )
+
+    def _spotread(self) -> Path | None:
+        """Where spotread is, or None. Honours a configured directory first."""
+        return find_spotread(self.state.argyll_path or None)
+
+    def _choose_argyll_path(self) -> bool:
+        """Ask for the Argyll bin directory. True once spotread is found there.
+
+        Argyll ships on Windows as a zip with no installer, so there is no
+        registry key or standard location to consult and PATH is usually unset.
+        Asking is more reliable than guessing.
+        """
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Select the ArgyllCMS bin folder (containing spotread.exe)",
+            self.state.argyll_path or str(Path.home()),
+        )
+        if not chosen:
+            return False
+        if find_spotread(chosen) is None:
+            QMessageBox.warning(
+                self,
+                "ArgyllCMS",
+                f"No spotread was found in:\n{chosen}\n\n"
+                "Choose the bin folder inside the unzipped ArgyllCMS distribution.",
+            )
+            return False
+        self.state.argyll_path = chosen
+        self._save_state_now()
+        return True
+
+    def _measure_with_meter(self) -> None:
+        """Measure this display with a colorimeter and adopt the readings."""
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a display first.", "error")
+            return
+        if display.current_mode != "HDR":
+            self._set_status(
+                f"Turn HDR on for {display.friendly_name} before measuring. The patches are "
+                "shown in absolute luminance, which only means anything in HDR.",
+                "warning",
+            )
+            return
+
+        spotread = self._spotread()
+        if spotread is None:
+            answer = QMessageBox.question(
+                self,
+                "ArgyllCMS not found",
+                "Measuring needs ArgyllCMS, a separate free download from argyllcms.com. "
+                "Get the executable distribution, unzip it somewhere without spaces in the "
+                "path, and point this at the bin folder inside it.\n\nLocate it now?",
+            )
+            if answer != QMessageBox.StandardButton.Yes or not self._choose_argyll_path():
+                return
+            spotread = self._spotread()
+            if spotread is None:
+                return
+
+        try:
+            instruments = list_instruments(spotread)
+        except MeterError as exc:
+            self._set_status(f"Could not ask Argyll what it can see: {exc}", "error")
+            return
+        if not instruments:
+            self._set_status(
+                "Argyll found no colorimeter. Check that it is plugged in, and that no other "
+                "calibration software is holding it open.",
+                "error",
+            )
+            return
+        instrument = instruments[0]
+
+        try:
+            sdr_white = get_sdr_white_level_nits(display)
+        except Exception:
+            sdr_white = 240.0
+        panel = read_panel_metadata(display.device_path)
+        capability = capability_for_device_name(display.gdi_name)
+        peak = self.state.hdr.peak_luminance_nits
+
+        window = measure_view.MeasureWindow(capability, sdr_white, panel)
+        screen = self._screen_for(display)
+        if screen is not None:
+            window.setGeometry(screen.geometry())
+        window.showFullScreen()
+        # The swapchain needs the real window handle and its final size, so it is
+        # created once the window is actually on screen.
+        QApplication.processEvents()
+        if not window.begin():
+            window.close()
+            self._set_status(
+                f"Measuring needs an HDR surface, which this display did not provide: "
+                f"{window.failure}",
+                "error",
+            )
+            return
+
+        self._measure_window = window
+        self._set_status(
+            f"Measuring {display.friendly_name} with {instrument.label}. Place the meter "
+            "over the centre of the screen. Esc cancels.",
+            "warning",
+        )
+
+        thread, worker = measure_view.start(
+            window,
+            lambda: read_emissive(spotread, port=instrument.port),
+            peak,
+            self._measure_progress,
+            self._measure_finished,
+        )
+        # Held on self so neither is collected mid-run: a QThread that goes out of
+        # scope takes its worker with it and reports nothing useful about why.
+        self._measure_thread = thread
+        self._measure_worker = worker
+
+    def _measure_progress(self, label: str, index: int, total: int) -> None:
+        self._set_status(
+            f"Measuring step {index + 1} of {total}: {label}. Keep the meter still.",
+            "warning",
+        )
+
+    def _measure_finished(self, result, message: str) -> None:
+        """Adopt a completed measurement, or explain why there is not one."""
+        window = getattr(self, "_measure_window", None)
+        if window is not None:
+            window.close()
+        self._measure_window = None
+        self._measure_thread = None
+        self._measure_worker = None
+
+        if result is None:
+            if message:
+                self._set_status(f"Measurement stopped: {message}", "error")
+            else:
+                self._set_status("Measurement cancelled. Nothing was changed.", "ok")
+            return
+
+        state = self.state.hdr
+        state.peak_luminance_nits = max(80.0, min(10000.0, result.peak_nits))
+        state.minimum_luminance_nits = max(0.0, min(100.0, result.black_nits))
+        state.panel_primaries = normalize_primaries(result.primaries)
+        self._save_state_now()
+        self._load_mode_into_controls()
+
+        contrast = result.contrast
+        contrast_text = "infinite" if contrast == float("inf") else f"{contrast:,.0f}:1"
+        self._set_status(
+            f"Measured {result.peak_nits:.1f} nits peak and {result.black_nits:.4f} black "
+            f"({contrast_text} contrast), with this panel's own primaries. "
+            "Press Apply Edits to put them into the profile.",
             "ok",
         )
 

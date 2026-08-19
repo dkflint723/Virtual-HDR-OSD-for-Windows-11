@@ -835,3 +835,45 @@ def compose(
             top=max(0, (height - overlay_height) // 2),
         )
     return bytes(frame)
+
+
+def measurement_frame(
+    width: int,
+    height: int,
+    rgb: tuple[float, float, float],
+    nits: float,
+    context: PatternContext,
+    *,
+    fraction: float = WINDOW_AREA_FRACTION,
+) -> bytes:
+    """A solid patch of ``rgb`` at ``nits``, centred on black, for a meter to read.
+
+    Deliberately plainer than the by-eye patterns: no shape, no markers, no guidance
+    text. Anything else on screen adds light the instrument would integrate, and a
+    patch that has to be judged by eye needs contrast a patch being measured does not.
+
+    ``nits`` is the level white would be shown at, and ``rgb`` scales each channel from
+    there, so a primary is driven exactly as hard as the white it is compared against.
+    Reading primaries at some other drive would measure a different point on the
+    panel's response and make the chromaticities incomparable.
+
+    The window covers a fixed fraction of screen *area* for the same reason it does
+    everywhere else here: on an emissive panel the brightness limiter responds to total
+    output, so a patch of changing size is not measuring one thing.
+    """
+    width, height = max(1, int(width)), max(1, int(height))
+    level = context.encode(nits)
+    red, green, blue = (max(0.0, float(channel)) * level for channel in rgb)
+
+    patch_width, patch_height = window_size(width, height, fraction)
+    left = (width - patch_width) // 2
+    top = (height - patch_height) // 2
+
+    black_row = _pixel(0.0) * width
+    patch_row = (
+        _pixel(0.0) * left
+        + _colour_pixel(red, green, blue) * patch_width
+        + _pixel(0.0) * (width - left - patch_width)
+    )
+    rows = [patch_row if top <= y < top + patch_height else black_row for y in range(height)]
+    return b"".join(rows)

@@ -2011,6 +2011,106 @@ class BuildFromPanelTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class MeterIntegrationTests(WindowTestCase):
+    """Driving a colorimeter from the window.
+
+    The instrument and ArgyllCMS are both replaced. What matters here is that a
+    measurement is adopted only when there is one, and that nothing is changed
+    when there is not -- a half-applied calibration is indistinguishable from a
+    real one once it is in the profile.
+    """
+
+    PRIMARIES = (0.674586, 0.314418, 0.269814, 0.685949, 0.151222, 0.060916, 0.3127, 0.3290)
+
+    def calibration(self, peak=1015.24, black=0.00016):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        return Calibration(peak_nits=peak, black_nits=black, primaries=self.PRIMARIES)
+
+    def test_the_button_is_offered(self):
+        self.assertTrue(hasattr(self.window, "meter_button"))
+
+    def test_refuses_to_measure_while_the_display_is_in_sdr(self):
+        """Patches are shown in absolute luminance, which means nothing in SDR."""
+        self.display.advanced_color_kind = "SDR"
+        self.window._current_display_snapshot = self.display
+        with mock.patch.object(app_module, "find_spotread") as finder:
+            self.window._measure_with_meter()
+        finder.assert_not_called()
+        self.assertIn("HDR", self.window.status_label.text())
+
+    def test_offers_to_locate_argyll_when_it_is_missing(self):
+        with mock.patch.object(app_module, "find_spotread", return_value=None):
+            with mock.patch.object(
+                app_module.QMessageBox, "question",
+                return_value=app_module.QMessageBox.StandardButton.No,
+            ) as ask:
+                self.window._measure_with_meter()
+        ask.assert_called_once()
+
+    def test_a_configured_argyll_directory_is_preferred(self):
+        self.window.state.argyll_path = r"D:\Argyll\bin"
+        with mock.patch.object(app_module, "find_spotread") as finder:
+            self.window._spotread()
+        finder.assert_called_once_with(r"D:\Argyll\bin")
+
+    def test_reports_when_no_instrument_is_connected(self):
+        with mock.patch.object(app_module, "find_spotread", return_value=Path("spotread")):
+            with mock.patch.object(app_module, "list_instruments", return_value=[]):
+                self.window._measure_with_meter()
+        self.assertIn("no colorimeter", self.window.status_label.text().lower())
+
+    def test_a_completed_measurement_is_adopted(self):
+        self.window._measure_finished(self.calibration(), "")
+        state = self.window.state.hdr
+        self.assertAlmostEqual(state.peak_luminance_nits, 1015.24, places=2)
+        self.assertAlmostEqual(state.minimum_luminance_nits, 0.00016, places=6)
+        self.assertEqual(state.panel_primaries, self.PRIMARIES)
+
+    def test_measured_values_outrank_whatever_was_there(self):
+        """A measurement describes this unit; everything else describes a model."""
+        self.window.state.hdr.peak_luminance_nits = 1019.5
+        self.window.state.hdr.minimum_luminance_nits = 0.0
+        self.window._measure_finished(self.calibration(), "")
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 1015.24, places=2)
+
+    def test_a_failed_measurement_changes_nothing(self):
+        before = (
+            self.window.state.hdr.peak_luminance_nits,
+            self.window.state.hdr.minimum_luminance_nits,
+            self.window.state.hdr.panel_primaries,
+        )
+        self.window._measure_finished(None, "The meter is in the wrong position.")
+        after = (
+            self.window.state.hdr.peak_luminance_nits,
+            self.window.state.hdr.minimum_luminance_nits,
+            self.window.state.hdr.panel_primaries,
+        )
+        self.assertEqual(before, after)
+        self.assertIn("wrong position", self.window.status_label.text())
+
+    def test_a_cancelled_measurement_is_not_reported_as_an_error(self):
+        self.window._measure_finished(None, "")
+        self.assertIn("cancelled", self.window.status_label.text().lower())
+
+    def test_the_reading_is_reported_with_its_contrast(self):
+        self.window._measure_finished(self.calibration(), "")
+        text = self.window.status_label.text()
+        self.assertIn("1015.2", text)
+        self.assertIn("contrast", text)
+
+    def test_a_true_black_reports_infinite_contrast_rather_than_dividing(self):
+        self.window._measure_finished(self.calibration(black=0.0), "")
+        self.assertIn("infinite", self.window.status_label.text())
+
+    def test_implausible_measurements_are_still_clamped_before_storage(self):
+        """derive already refuses these, so this is the second line rather than
+        the first -- but the profile fields have hard limits of their own."""
+        self.window._measure_finished(self.calibration(peak=99000.0), "")
+        self.assertLessEqual(self.window.state.hdr.peak_luminance_nits, 10000.0)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
 class ProfileLockSwitchTests(WindowTestCase):
     """The switch that keeps an applied HDR profile applied.
 

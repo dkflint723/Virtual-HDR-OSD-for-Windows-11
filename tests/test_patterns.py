@@ -18,6 +18,7 @@ from sdr_hdr_profile_creator.patterns import (
     TONE_TRACKING_DELTA_PQ,
     PatternContext,
     compose,
+    measurement_frame,
     pattern_by_key,
     render,
     window_size,
@@ -598,3 +599,81 @@ class InstructionVoiceTests(unittest.TestCase):
         for key in ("black-level", "peak-white", "full-frame-white", "solid-patch"):
             with self.subTest(pattern=key):
                 self.assertIn("1.", pattern_by_key(key).instructions)
+
+
+class MeasurementFrameTests(unittest.TestCase):
+    """The patch a colorimeter reads.
+
+    Plainer than the by-eye patterns on purpose: anything else on screen adds light
+    the instrument integrates along with the patch.
+    """
+
+    def setUp(self):
+        self.context = PatternContext(is_hdr=True, peak_nits=1015.0)
+        self.width, self.height = 320, 200
+
+    def frame(self, rgb=(1.0, 1.0, 1.0), nits=800.0, **kwargs):
+        return measurement_frame(
+            self.width, self.height, rgb, nits, self.context, **kwargs
+        )
+
+    def pixel(self, frame, x, y):
+        return struct.unpack_from("<4e", frame, (y * self.width + x) * 8)
+
+    def centre(self, frame):
+        return self.pixel(frame, self.width // 2, self.height // 2)
+
+    def test_frame_is_exactly_the_size_the_swapchain_expects(self):
+        """HdrSurface.present rejects any other length; stride is width * 8."""
+        self.assertEqual(len(self.frame()), self.width * self.height * 8)
+
+    def test_the_patch_carries_the_luminance_it_was_asked_for(self):
+        """scRGB 1.0 is 80 nits, so this is the whole measurement contract."""
+        self.assertAlmostEqual(self.centre(self.frame(nits=800.0))[0] * 80.0, 800.0, places=1)
+
+    def test_everything_outside_the_patch_is_black(self):
+        frame = self.frame()
+        for x, y in ((0, 0), (self.width - 1, 0), (0, self.height - 1), (self.width - 1, self.height - 1)):
+            self.assertEqual(self.pixel(frame, x, y)[:3], (0.0, 0.0, 0.0))
+
+    def test_the_patch_covers_the_requested_fraction_of_screen_area(self):
+        """An emissive panel's brightness limiter responds to total output, so a
+        patch of changing size is not measuring one thing between readings."""
+        frame = self.frame()
+        lit = sum(
+            1
+            for y in range(self.height)
+            for x in range(self.width)
+            if self.pixel(frame, x, y)[0] > 0.0
+        )
+        self.assertAlmostEqual(lit / (self.width * self.height), 0.10, delta=0.01)
+
+    def test_a_primary_is_driven_as_hard_as_the_white_it_is_compared_against(self):
+        """Measuring red at a different drive would sample a different point on the
+        panel's response and make the chromaticities incomparable."""
+        white = self.centre(self.frame((1.0, 1.0, 1.0), 800.0))
+        red = self.centre(self.frame((1.0, 0.0, 0.0), 800.0))
+        self.assertAlmostEqual(red[0], white[0], places=4)
+        self.assertEqual((red[1], red[2]), (0.0, 0.0))
+
+    def test_the_black_patch_emits_no_light_at_all(self):
+        """The black reading is the panel's floor, so any light this frame adds of
+        its own would be measured as part of it."""
+        frame = self.frame((0.0, 0.0, 0.0), 0.0)
+        for y in (0, self.height // 2, self.height - 1):
+            for x in (0, self.width // 2, self.width - 1):
+                self.assertEqual(self.pixel(frame, x, y)[:3], (0.0, 0.0, 0.0))
+
+    def test_the_patch_is_centred(self):
+        """A meter is placed in the middle of the screen; an off-centre patch would
+        be read partly off its edge."""
+        frame = self.frame()
+        rows = [
+            y
+            for y in range(self.height)
+            if self.pixel(frame, self.width // 2, y)[0] > 0.0
+        ]
+        self.assertAlmostEqual((rows[0] + rows[-1]) / 2.0, (self.height - 1) / 2.0, delta=1.0)
+
+    def test_survives_a_surface_smaller_than_the_patch_maths(self):
+        self.assertEqual(len(measurement_frame(1, 1, (1.0, 1.0, 1.0), 100.0, self.context)), 8)
