@@ -1414,3 +1414,54 @@ class UntouchedProbeTests(PatternViewTestCase):
         win, recorded = self.build()
         win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
         self.assertFalse(win.accept_measurement())
+
+
+class PanelDeclarationTests(PatternViewTestCase):
+    """The panel's own EDID outranks DXGI where both answer, because DXGI repeats peak in
+    place of maximum frame-average. On the display this was measured against that is 1010
+    nits where the panel declares 265 -- so the full-frame step opened four times too high
+    and every arrow press was spent climbing back down."""
+
+    def panel(self, **overrides):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        base = dict(peak_nits=1015.24, max_frame_average_nits=265.05,
+                    min_nits=0.0002, supports_pq=True)
+        base.update(overrides)
+        return PanelMetadata(**base)
+
+    def test_the_declaration_replaces_dxgis_repeated_peak(self):
+        context = context_for(capability(max_nits=1010.4, max_full_frame_nits=1010.4),
+                              240.0, self.panel())
+        self.assertAlmostEqual(context.peak_nits, 1015.24, places=1)
+        self.assertAlmostEqual(context.max_full_frame_nits, 265.05, places=1)
+
+    def test_dxgi_is_used_when_the_panel_declares_nothing(self):
+        context = context_for(capability(max_nits=1010.4, max_full_frame_nits=1010.4),
+                              240.0, None)
+        self.assertAlmostEqual(context.max_full_frame_nits, 1010.4, places=1)
+
+    def test_an_incredible_declaration_is_ignored(self):
+        context = context_for(capability(max_nits=1010.4, max_full_frame_nits=1010.4),
+                              240.0, self.panel(supports_pq=False))
+        self.assertAlmostEqual(context.peak_nits, 1010.4, places=1)
+
+    def test_the_full_frame_step_now_opens_near_the_right_answer(self):
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            panel=self.panel(), measure=lambda *_: None)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        for _ in range(2):
+            self.advance_step(win)
+        self.assertEqual(win.pattern.key, "full-frame-white")
+        self.assertLess(win.probe_nits, 300.0,
+                        "still opening near peak, so the step starts far above the answer")
+
+    def test_a_declared_peak_stops_the_assumed_label(self):
+        """A panel that answered is not an assumption, whatever DXGI managed."""
+        win = PatternWindow(capability(max_nits=0.0), 240.0, self.controls,
+                            panel=self.panel(), measure=lambda *_: None)
+        self.addCleanup(win.deleteLater)
+        win.resize(800, 600)
+        self.assertFalse(win._assumed_peak)

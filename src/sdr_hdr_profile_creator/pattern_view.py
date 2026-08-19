@@ -23,6 +23,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QWidget
 
+from .edid import PanelMetadata
 from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
 from .patterns import (
@@ -94,8 +95,17 @@ class ControlBinding:
         return True
 
 
-def context_for(capability: DisplayCapability | None, sdr_white_nits: float) -> PatternContext:
+def context_for(
+    capability: DisplayCapability | None,
+    sdr_white_nits: float,
+    panel: PanelMetadata | None = None,
+) -> PatternContext:
     """Build a pattern context from what the panel reports, with sane fallbacks.
+
+    The panel's own EDID outranks DXGI where both answer. DXGI gets maximum frame-average
+    wrong -- it repeats peak -- and on the display this was measured against that is 1010
+    nits where the panel declares 265. Starting the full-frame step four times too high
+    means every press of the arrow key is spent climbing back down.
 
     A display with no credible metadata still gets patterns; it gets them against a
     conservative peak instead of a fabricated one, and the view says the figure is assumed.
@@ -104,6 +114,10 @@ def context_for(capability: DisplayCapability | None, sdr_white_nits: float) -> 
         return PatternContext(is_hdr=False, sdr_white_nits=sdr_white_nits)
     peak = capability.max_nits if capability.luminance_is_credible else 400.0
     full_frame = capability.max_full_frame_nits if capability.luminance_is_credible else 250.0
+    if panel is not None and panel.credible:
+        peak = panel.peak_nits
+        if panel.max_frame_average_nits > 0.0:
+            full_frame = panel.max_frame_average_nits
     return PatternContext(
         is_hdr=capability.is_hdr,
         sdr_white_nits=sdr_white_nits,
@@ -423,6 +437,7 @@ class PatternWindow(QWidget):
         capability: DisplayCapability | None,
         sdr_white_nits: float,
         controls: Sequence[ControlBinding] = (),
+        panel: PanelMetadata | None = None,
         parent: QWidget | None = None,
         measure: Callable[[str, float], None] | None = None,
         guided: bool = True,
@@ -438,8 +453,12 @@ class PatternWindow(QWidget):
         self.setCursor(dim_cursor())
 
         self._capability = capability
-        self._assumed_peak = capability is not None and not capability.luminance_is_credible
-        self._context = context_for(capability, sdr_white_nits)
+        self._assumed_peak = (
+            capability is not None
+            and not capability.luminance_is_credible
+            and not (panel is not None and panel.credible)
+        )
+        self._context = context_for(capability, sdr_white_nits, panel)
         self._controls = list(controls)
         self._active = 0
         self._pattern_index = 0

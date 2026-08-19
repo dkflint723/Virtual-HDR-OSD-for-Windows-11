@@ -45,6 +45,7 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
+from .edid import read_panel_metadata
 from .hdr_display import capability_for_device_name
 from .pattern_view import ControlBinding, PatternWindow
 from .icc import (
@@ -1630,6 +1631,7 @@ class MainWindow(FluentWidget):
         self.state.live_mode = True
         window = PatternWindow(
             capability, sdr_white, self._pattern_view_bindings(),
+            panel=read_panel_metadata(display.device_path),
             measure=self._record_measurement,
             on_close=lambda: self._restore_live_mode(previous_live),
             apply=self._apply_from_pattern_view,
@@ -2248,13 +2250,22 @@ class MainWindow(FluentWidget):
             return False
         if self._active_profile_overrides_metadata(display):
             return False
+        panel = read_panel_metadata(display.device_path)
         capability = capability_for_device_name(display.gdi_name)
-        if capability is None or not capability.luminance_is_credible:
+        if panel is not None and panel.credible:
+            # The panel's own declaration, which unlike DXGI distinguishes maximum
+            # frame-average from peak. See edid.read_panel_metadata.
+            minimum, peak = panel.min_nits, panel.peak_nits
+            full_frame = panel.max_frame_average_nits or peak
+        elif capability is not None and capability.luminance_is_credible:
+            minimum, peak = capability.min_nits, capability.max_nits
+            full_frame = capability.max_full_frame_nits
+        else:
             return False
-        imported.state.minimum_luminance_nits = max(0.0, min(100.0, capability.min_nits))
-        imported.state.peak_luminance_nits = max(80.0, min(10000.0, capability.max_nits))
+        imported.state.minimum_luminance_nits = max(0.0, min(100.0, minimum))
+        imported.state.peak_luminance_nits = max(80.0, min(10000.0, peak))
         imported.state.full_frame_luminance_nits = max(
-            80.0, min(imported.state.peak_luminance_nits, capability.max_full_frame_nits)
+            80.0, min(imported.state.peak_luminance_nits, full_frame)
         )
         return True
 
