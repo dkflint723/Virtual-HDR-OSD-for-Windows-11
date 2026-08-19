@@ -115,6 +115,7 @@ class WindowTestCase(unittest.TestCase):
             "LIVE_ROOT": self.live_root,
             "LIVE_REGISTRY_PATH": self.temp / "live_registry.json",
             "GAMMA_HOTKEY_STATE_PATH": self.temp / "gamma_hotkeys.json",
+            "METER_LOG_PATH": self.temp / "meter_log.jsonl",
             "GAMMA_PROFILE_ROOT": self.temp / "gamma_profiles",
             "enumerate_displays": lambda: [self.display],
             "get_color_directory": lambda: self.color_dir,
@@ -189,6 +190,32 @@ class FixtureSafetyTests(WindowTestCase):
         "set_hdr_enabled",
         "send_hdr_toggle_shortcut",
     )
+
+    # Every module-level path app.py writes to. A new one added without being
+    # redirected here does not fail: it silently writes to the real profile
+    # directory under LOCALAPPDATA. METER_LOG_PATH did exactly that, and the
+    # evidence was a user's meter log full of this suite's fixtures -- peaks of
+    # 99000 nits and -60% channel trims, sitting where their own readings should
+    # have been.
+    WRITTEN_PATHS = (
+        "STATE_PATH",
+        "GAMMA_HOTKEY_STATE_PATH",
+        "METER_LOG_PATH",
+        "LIVE_REGISTRY_PATH",
+        "LOCAL_ROOT",
+        "LIVE_ROOT",
+        "GAMMA_PROFILE_ROOT",
+    )
+
+    def test_nothing_is_written_outside_the_temporary_directory(self):
+        for name in self.WRITTEN_PATHS:
+            with self.subTest(path=name):
+                self.assertTrue(hasattr(app_module, name), f"{name} no longer exists")
+                value = Path(str(getattr(app_module, name)))
+                self.assertTrue(
+                    self.temp in value.parents or value == self.temp,
+                    f"{name} points at {value}, outside the fixture's temp directory",
+                )
 
     def test_every_mutating_windows_call_is_faked(self):
         import inspect
