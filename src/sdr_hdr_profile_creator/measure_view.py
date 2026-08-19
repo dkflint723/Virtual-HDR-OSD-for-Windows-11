@@ -19,7 +19,7 @@ from __future__ import annotations
 import time
 from typing import Callable
 
-from PySide6.QtCore import Q_ARG, QMetaObject, QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QWidget
 
 from . import measure
@@ -109,24 +109,32 @@ class MeasureWindow(QWidget):
             self.close()
 
 
-class _WindowDisplay:
+class _WindowDisplay(QObject):
     """Shows patches on a MeasureWindow from a worker thread.
 
     ``BlockingQueuedConnection`` is what makes this correct: the worker stops
     until the UI thread has actually presented the frame. Returning sooner would
     let the meter read a patch that is still on its way to the screen.
+
+    The handoff is a ``Signal(object)`` rather than ``QMetaObject.invokeMethod``
+    with ``Q_ARG(object, step)``. That call does not merely fail to marshal a
+    plain Python object -- it raises ``qArgDataFromPyType: Unable to find a
+    QMetaType for "object"`` on the very first patch, which the worker caught and
+    reported as a failed measurement. On screen the window opened and shut again
+    at once. A signal carries an arbitrary Python object with no registered
+    meta-type, and keeps the blocking guarantee.
     """
 
+    patch = Signal(object)
+
     def __init__(self, window: MeasureWindow) -> None:
-        self._window = window
+        super().__init__()
+        self.patch.connect(
+            window.show_patch, Qt.ConnectionType.BlockingQueuedConnection
+        )
 
     def show(self, step: MeasurementStep) -> None:
-        QMetaObject.invokeMethod(
-            self._window,
-            "show_patch",
-            Qt.ConnectionType.BlockingQueuedConnection,
-            Q_ARG(object, step),
-        )
+        self.patch.emit(step)
 
 
 class MeasurementWorker(QObject):

@@ -91,7 +91,7 @@ HELP_SECTIONS: tuple[tuple[str, str], ...] = (
     ),
     (
         "If something looks wrong",
-        "Reset All returns every slider to neutral. Revert to Base reloads the untouched profile you imported, "
+        "Reset Sliders returns every slider to neutral. Revert reloads the untouched profile you imported, "
         "discarding your edits.\n\n"
         "To back out completely, open Windows Settings › System › Display › Advanced display, and pick your "
         "original profile as the default for HDR. The app-generated profiles are the two files named "
@@ -212,7 +212,7 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
     GuideStep(
         "6 · Lock the profile in place",
         "Windows drops the HDR profile association from time to time — after a display mode change, "
-        "a resume from sleep, or a graphics driver reset. Turn on Keep Profile Locked in row 3 and a "
+        "a resume from sleep, or a graphics driver reset. Turn on Lock Profile in row 3 and a "
         "small background program puts it back whenever that happens, and keeps Alt+1 / Alt+2 working "
         "once this window is closed."
         "\n\n"

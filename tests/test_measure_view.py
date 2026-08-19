@@ -233,5 +233,117 @@ class MeasurementWorkerTests(unittest.TestCase):
         self.assertEqual(seen[0][0], "Black level")
 
 
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class WindowDisplayTests(unittest.TestCase):
+    """The one object that crosses threads, and the one that had no coverage.
+
+    Every other test here injects a fake display, so nothing exercised the real
+    handoff. The first version used QMetaObject.invokeMethod with
+    Q_ARG(object, step), which does not merely fail to marshal a plain Python
+    object -- it raises qArgDataFromPyType on the first patch. The worker caught
+    that, reported a failed measurement, and the window opened and shut again at
+    once, which is exactly what a user saw.
+    """
+
+    qt_app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+        self.QThread = QThread
+        self.window = measure_view.MeasureWindow(hdr_capability(), 240.0, None)
+        self.window.resize(320, 200)
+        self.surface = FakeSurface()
+        self.window._surface = self.surface
+        self.addCleanup(self.window.deleteLater)
+
+        outcome = {}
+
+        class Caller(QObject):
+            done = Signal()
+
+            def __init__(self, display, step):
+                super().__init__()
+                self._display = display
+                self._step = step
+
+            @Slot()
+            def go(self):
+                import threading
+
+                outcome["thread"] = threading.get_ident()
+                try:
+                    self._display.show(self._step)
+                    outcome["raised"] = None
+                except Exception as exc:  # noqa: BLE001
+                    outcome["raised"] = repr(exc)
+                # Records whether the emit blocked until the frame was presented.
+                outcome["presented_before_return"] = len(self.parent_frames()) > 0
+                self.done.emit()
+
+            def parent_frames(self):
+                return outcome["frames_ref"]
+
+        self.Caller = Caller
+        self.outcome = outcome
+
+    def run_from_worker(self, step):
+        """Call display.show(step) on a real worker thread and drain the UI loop."""
+        import threading
+
+        display = measure_view._WindowDisplay(self.window)
+        self.outcome["frames_ref"] = self.surface.frames
+        self.ui_thread = threading.get_ident()
+
+        thread = self.QThread()
+        caller = self.Caller(display, step)
+        caller.moveToThread(thread)
+        thread.started.connect(caller.go)
+        caller.done.connect(thread.quit)
+        thread.start()
+
+        for _ in range(600):
+            self.qt_app.processEvents()
+            if thread.isFinished():
+                break
+            self.QThread.msleep(5)
+        thread.wait(3000)
+        return display
+
+    def test_a_patch_emitted_from_a_worker_thread_reaches_the_window(self):
+        step = MeasurementStep("white", "Peak white", (1.0, 1.0, 1.0), 800.0)
+        self.run_from_worker(step)
+        self.assertIsNone(self.outcome["raised"], self.outcome["raised"])
+        self.assertEqual(len(self.surface.frames), 1)
+
+    def test_the_frame_carries_the_luminance_the_step_asked_for(self):
+        """Proves the step survived the thread boundary intact rather than
+        arriving as something Qt could marshal but not represent."""
+        step = MeasurementStep("white", "Peak white", (1.0, 1.0, 1.0), 800.0)
+        self.run_from_worker(step)
+        frame = self.surface.frames[-1]
+        centre = struct.unpack_from("<4e", frame, ((200 // 2) * 320 + 320 // 2) * 8)
+        self.assertAlmostEqual(centre[0] * 80.0, 800.0, places=1)
+
+    def test_the_frame_is_presented_before_show_returns(self):
+        """A patch reported as shown before it is on screen would be read
+        mid-transition, which is the whole reason this connection blocks."""
+        step = MeasurementStep("white", "Peak white", (1.0, 1.0, 1.0), 800.0)
+        self.run_from_worker(step)
+        self.assertTrue(self.outcome["presented_before_return"])
+
+    def test_the_frame_is_built_on_the_ui_thread(self):
+        """Presenting from a worker thread is not allowed, and the swapchain
+        belongs to the thread that created it."""
+        step = MeasurementStep("black", "Black level", (0.0, 0.0, 0.0), 0.0)
+        self.run_from_worker(step)
+        self.assertNotEqual(self.outcome["thread"], self.ui_thread)
+        self.assertEqual(len(self.surface.frames), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

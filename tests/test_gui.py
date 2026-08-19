@@ -270,7 +270,7 @@ class EditorStructureTests(WindowTestCase):
     def test_every_documented_action_has_a_reachable_button(self):
         """A method with no button is dead to the user even though tests call it.
 
-        Rebuilding the top bar once dropped Revert to Base and Reset All Sliders
+        Rebuilding the top bar once dropped Revert and Reset Sliders
         while every test still passed, because the tests invoked the methods
         directly. Assert on the actual widget tree instead.
         """
@@ -281,7 +281,7 @@ class EditorStructureTests(WindowTestCase):
         }
         for expected in (
             "Refresh", "Display Settings", "Profile Folder",
-            "Import…", "Export Copy…", "Revert to Base", "Reset All Sliders",
+            "Import…", "Export Copy…", "Revert", "Reset Sliders",
             "Reapply", "Apply Edits",
             "Getting Started", "Watchdog Settings…", "Help",
         ):
@@ -2108,6 +2108,87 @@ class MeterIntegrationTests(WindowTestCase):
         the first -- but the profile fields have hard limits of their own."""
         self.window._measure_finished(self.calibration(peak=99000.0), "")
         self.assertLessEqual(self.window.state.hdr.peak_luminance_nits, 10000.0)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class ControlRowFitTests(WindowTestCase):
+    """Every control must fit at the smallest size the window allows itself.
+
+    Adding the meter button pushed row 3 to ten controls needing 2572px on one
+    line. At the shipped width the switches truncated to "Automatic Moc" and
+    "Keep Profile Lo" and the meter button lost its ellipsis -- and nothing
+    failed, because Qt elides silently. Splitting the row was not enough on its
+    own: the two halves still wanted 1196 and 1626 against a 1080 minimum.
+
+    Headroom is now about 30px per row, so this is the guard that catches the
+    next control before a user does.
+    """
+
+    SPACING = 12
+
+    def row_width(self, widgets, indent=0):
+        return indent + sum(w.sizeHint().width() + self.SPACING for w in widgets)
+
+    def button(self, text):
+        from PySide6.QtWidgets import QAbstractButton
+
+        found = [b for b in self.window.findChildren(QAbstractButton) if b.text() == text]
+        self.assertTrue(found, f"no button labelled {text!r}")
+        return found[0]
+
+    def test_the_switch_row_fits_at_the_minimum_window_width(self):
+        from qfluentwidgets import StrongBodyLabel
+
+        labels = [
+            w for w in self.window.findChildren(StrongBodyLabel)
+            if "Edits & Apply" in w.text()
+        ]
+        self.assertTrue(labels, "row 3 label missing")
+        switches = [
+            self.window.live_checkbox,
+            self.window.automatic_mode_checkbox,
+            self.window.lock_switch,
+        ]
+        required = self.row_width(switches, indent=labels[0].sizeHint().width() + self.SPACING)
+        self.assertLessEqual(required, self.window.minimumWidth(), f"switch row needs {required}px")
+
+    def test_the_action_row_fits_at_the_minimum_window_width(self):
+        buttons = [
+            self.button(text)
+            for text in ("Revert", "Reset Sliders", "Test Patterns…",
+                         "Measure…", "Reapply", "Apply Edits")
+        ]
+        required = self.row_width(buttons)
+        self.assertLessEqual(required, self.window.minimumWidth(), f"action row needs {required}px")
+
+    def test_the_elastic_widgets_are_the_ones_allowed_to_shrink(self):
+        """Row 2 is not covered by the rule above, and should not be.
+
+        Its two combo boxes are added with a stretch factor and hold profile
+        names of arbitrary length, so they are meant to shrink and elide. What
+        must not shrink is their floor -- 210px keeps a name readable -- and the
+        buttons beside them, whose labels are fixed and short.
+        """
+        for combo in (self.window.sdr_profile_combo, self.window.hdr_profile_combo):
+            self.assertGreaterEqual(combo.minimumWidth(), 200)
+        fixed = [self.button("Import…"), self.button("Export Copy…")]
+        floor = sum(combo.minimumWidth() for combo in
+                    (self.window.sdr_profile_combo, self.window.hdr_profile_combo))
+        required = floor + self.row_width(fixed)
+        self.assertLessEqual(
+            required, self.window.minimumWidth(),
+            f"row 2 cannot shrink below {required}px",
+        )
+    def test_terse_labels_still_explain_themselves_in_a_tooltip(self):
+        """The labels were shortened to fit, so the tooltip now carries the
+        meaning that used to be on the face of the button."""
+        for text, expected in (
+            ("Revert", "discard"),
+            ("Reset Sliders", "neutral"),
+            ("Measure…", "colorimeter"),
+        ):
+            with self.subTest(button=text):
+                self.assertIn(expected, self.button(text).toolTip().lower())
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")

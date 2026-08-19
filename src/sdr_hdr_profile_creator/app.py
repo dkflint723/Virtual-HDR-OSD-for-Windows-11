@@ -534,7 +534,8 @@ class MainWindow(FluentWidget):
         runtime_row.setSpacing(12)
         runtime_label = StrongBodyLabel("3 · Edits & Apply", bar)
         runtime_label.setToolTip(
-            "Manage your slider edits on the left; the two buttons on the right are the ones "
+            "Switches on this row are standing behaviour that stays on until you turn it off. "
+            "The row beneath holds one-off actions, with the two on its right being the ones "
             "that install and associate the generated profile with Windows."
         )
         runtime_row.addWidget(runtime_label)
@@ -545,16 +546,16 @@ class MainWindow(FluentWidget):
         self.live_checkbox.checkedChanged.connect(self._live_mode_toggled)
         runtime_row.addWidget(self.live_checkbox)
         self.automatic_mode_checkbox = SwitchButton(bar)
-        self.automatic_mode_checkbox.setOffText("Automatic Mode Switching")
-        self.automatic_mode_checkbox.setOnText("Automatic Mode Switching")
+        self.automatic_mode_checkbox.setOffText("Auto Mode Switching")
+        self.automatic_mode_checkbox.setOnText("Auto Mode Switching")
         self.automatic_mode_checkbox.setToolTip("Automatically follow Windows SDR/HDR transitions. On HDR → SDR the app restores the SDR profile pinned in row 2, or, on Auto, the one Windows previously had; with SDR set to Leave unmanaged it does nothing. On SDR → HDR it reapplies the active HDR profile. An SDR profile is never created, edited, or overwritten — only the association is set.")
         automatic_enabled = self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
         runtime_row.addWidget(self.automatic_mode_checkbox)
         self.lock_switch = SwitchButton(bar)
-        self.lock_switch.setOffText("Keep Profile Locked")
-        self.lock_switch.setOnText("Keep Profile Locked")
+        self.lock_switch.setOffText("Lock Profile")
+        self.lock_switch.setOnText("Lock Profile")
         self.lock_switch.setToolTip(
             "Install the standalone watchdog, which re-asserts this display's HDR profile "
             "whenever Windows drops it — after a mode change, a resume from sleep, or a "
@@ -565,22 +566,32 @@ class MainWindow(FluentWidget):
         )
         self.lock_switch.checkedChanged.connect(self._lock_toggled)
         runtime_row.addWidget(self.lock_switch)
-        revert_button = PushButton("Revert to Base", bar)
-        revert_button.setToolTip("Discard your slider edits and reload the selected HDR profile untouched.")
+        runtime_row.addStretch(1)
+        layout.addLayout(runtime_row)
+
+        # Ten controls on one row stopped fitting once the meter button arrived:
+        # the switches truncated to "Automatic Moc" and "Keep Profile Lo", and the
+        # meter button lost its ellipsis. The split follows what the controls are
+        # rather than where they happened to sit -- switches above are standing
+        # behaviour, buttons below are one-off actions.
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
+        revert_button = PushButton("Revert", bar)
+        revert_button.setToolTip("Revert to base: discard your slider edits and reload the selected HDR profile untouched.")
         revert_button.clicked.connect(self._revert_to_base)
-        runtime_row.addWidget(revert_button)
-        reset_button = PushButton("Reset All Sliders", bar)
-        reset_button.setToolTip("Return every slider to its neutral default without changing which profile is selected.")
+        action_row.addWidget(revert_button)
+        reset_button = PushButton("Reset Sliders", bar)
+        reset_button.setToolTip("Reset all sliders to their neutral defaults, without changing which profile is selected.")
         reset_button.clicked.connect(self._reset_all_controls)
-        runtime_row.addWidget(reset_button)
+        action_row.addWidget(reset_button)
         self.patterns_button = PushButton("Test Patterns…", bar)
         self.patterns_button.setToolTip(
             "Fill the display with calibration patterns and adjust from the keyboard.\n"
             "Number keys switch pattern, Tab picks a control, arrows adjust, Esc exits."
         )
         self.patterns_button.clicked.connect(self._open_pattern_view)
-        runtime_row.addWidget(self.patterns_button)
-        self.meter_button = PushButton("Measure with Meter…", bar)
+        action_row.addWidget(self.patterns_button)
+        self.meter_button = PushButton("Measure…", bar)
         self.meter_button.setToolTip(
             "Measure this display with a colorimeter instead of by eye: black level, peak "
             "white, and the three primaries, each read from a centred patch on black.\n\n"
@@ -588,17 +599,17 @@ class MainWindow(FluentWidget):
             "Most meters need no driver, and other calibration software keeps working."
         )
         self.meter_button.clicked.connect(self._measure_with_meter)
-        runtime_row.addWidget(self.meter_button)
-        runtime_row.addStretch(1)
+        action_row.addWidget(self.meter_button)
+        action_row.addStretch(1)
         self.refresh_profile_button = PushButton("Reapply", bar)
         self.refresh_profile_button.setToolTip("Force a full reinstall of the current settings. Use this if Windows has dropped the HDR association, typically after a mode change or resume from sleep.")
         self.refresh_profile_button.clicked.connect(lambda: self._apply_mode_profile("Reapply", force=True))
-        runtime_row.addWidget(self.refresh_profile_button)
+        action_row.addWidget(self.refresh_profile_button)
         self.apply_profile_button = PrimaryPushButton("Apply Edits", bar)
         self.apply_profile_button.setToolTip("Install and associate the profile described by the sliders as they are right now.")
         self.apply_profile_button.clicked.connect(lambda: self._apply_mode_profile("Apply Edits"))
-        runtime_row.addWidget(self.apply_profile_button)
-        layout.addLayout(runtime_row)
+        action_row.addWidget(self.apply_profile_button)
+        layout.addLayout(action_row)
         return bar
 
     def _scroll_page(self, content_layout: QVBoxLayout | QGridLayout) -> ScrollArea:

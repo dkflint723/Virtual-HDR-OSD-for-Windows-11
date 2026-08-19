@@ -137,7 +137,7 @@ of what is already installed -- no round trip through Windows Settings, no impor
 7. Make small tonal and color corrections. **Reset All Sliders** returns everything to neutral, and **Revert to Base** reloads the base profile untouched.
 8. Flip the **HDR** switch in row 1 off and on when you want to compare white balance, overall color appearance, and perceived brightness against the SDR desktop.
 9. Press **Apply Edits** to install and associate the result.
-10. Turn on **Keep Profile Locked** so Windows cannot drop the association on the next mode change.
+10. Turn on **Lock Profile** so Windows cannot drop the association on the next mode change.
 11. Use **Export Copy…** to save a backup.
 
 Virtual HDR OSD is best treated as the final fine-adjustment stage. A profile built from the
@@ -200,9 +200,9 @@ Below that:
 - **Tone & Brightness** — fine tonal controls, plus the **SDR-in-HDR Gamma Correction** dropdown (optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys).
 - **Color & White Balance** — white-point, chroma, and RGB fine adjustments.
 - **Getting Started** — the step-by-step walkthrough, with live progress checks.
-- **Measure with Meter…** — measures the display with a colorimeter instead of by eye.
+- **Measure…** — measures the display with a colorimeter instead of by eye.
   Needs ArgyllCMS installed separately; see *Measuring with a colorimeter* below.
-- **Keep Profile Locked** — the switch in row 3. Installs the independent association watchdog, which
+- **Lock Profile** — the switch in row 3. Installs the independent association watchdog, which
   puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
   closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
   dismissed administrator prompt leaves it off rather than lying about it.
@@ -642,7 +642,7 @@ before measuring.
 
 ## Running a measurement
 
-**Measure with Meter…** in row 3. The display must be in HDR, because the patches are
+**Measure…** in row 3. The display must be in HDR, because the patches are
 shown in absolute luminance. The first time, you will be asked where ArgyllCMS is; the
 answer is remembered per machine.
 
@@ -1070,7 +1070,7 @@ The watchdog exists specifically to make those mode transitions more determinist
 
 ## Watchdog Settings in the GUI
 
-The main window exposes the watchdog two ways. **Keep Profile Locked** in row 3 is a switch that
+The main window exposes the watchdog two ways. **Lock Profile** in row 3 is a switch that
 installs or removes it directly; **Watchdog Settings…** opens a dialog with the same **Install
 Watchdog** and **Uninstall Watchdog** actions and a fuller explanation.
 
