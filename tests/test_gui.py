@@ -25,6 +25,7 @@ try:
     from sdr_hdr_profile_creator.controls import ControlSpec, SliderControl
     from sdr_hdr_profile_creator.dialogs import GUIDE_STEPS, HELP_SECTIONS
     from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+    from sdr_hdr_profile_creator.edid import PanelMetadata
     from sdr_hdr_profile_creator.windows_api import DisplayInfo
 
     GUI_AVAILABLE = True
@@ -151,6 +152,17 @@ class WindowTestCase(unittest.TestCase):
         self.window.mode_timer.stop()
         self.window.gamma_runtime_timer.stop()
         self.window.live_timer.stop()
+
+    def choose_profile(self, combo, text):
+        """Simulate picking an item from a profile dropdown.
+
+        setCurrentText on its own is not a user selection. The handlers listen to
+        textActivated, which qfluentwidgets emits whenever an item is clicked --
+        including when the item clicked is the one already displayed, where
+        currentTextChanged stays silent because the index never moves.
+        """
+        combo.setCurrentText(text)
+        combo.textActivated.emit(text)
 
     def apply(self, reason="Apply Edits", **kwargs):
         self.window._apply_mode_profile(reason, **kwargs)
@@ -825,14 +837,14 @@ class ProfileBindingTests(WindowTestCase):
     def test_sdr_defaults_to_auto_and_never_applies_on_selection(self):
         self.assertEqual(self.window.sdr_profile_combo.currentText(), app_module.SDR_AUTO)
         self.associations.clear()
-        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
         self.assertEqual(
             self.associations, [],
             "choosing an SDR profile must not immediately re-associate anything",
         )
 
     def test_pinned_sdr_profile_is_restored_on_an_hdr_to_sdr_switch(self):
-        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
         self.default_profiles["SDR"] = "somethingelse.icm"
         self.associations.clear()
         self.window._restore_remembered_sdr_profile(self.display, "test")
@@ -840,7 +852,7 @@ class ProfileBindingTests(WindowTestCase):
 
     def test_unmanaged_sdr_is_never_touched(self):
         """Calman and friends own the SDR association; we must not fight them."""
-        self.window.sdr_profile_combo.setCurrentText(app_module.SDR_UNMANAGED)
+        self.choose_profile(self.window.sdr_profile_combo, app_module.SDR_UNMANAGED)
         self.default_profiles["SDR"] = "somethingelse.icm"
         self.associations.clear()
         self.window._restore_remembered_sdr_profile(self.display, "test")
@@ -849,7 +861,7 @@ class ProfileBindingTests(WindowTestCase):
 
     def test_restore_is_a_no_op_when_windows_already_has_the_pinned_profile(self):
         """A redundant association write is what breaks third-party loaders."""
-        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
         self.default_profiles["SDR"] = "Calman_SDR_Calibrated.icm"
         self.associations.clear()
         self.window._restore_remembered_sdr_profile(self.display, "test")
@@ -864,7 +876,7 @@ class ProfileBindingTests(WindowTestCase):
             self.third_party_bytes(state)
         )
         self.window._populate_profile_pickers()
-        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.choose_profile(self.window.hdr_profile_combo, "HDR Calibrated Profile.icc")
         self.assertEqual(
             Path(self.window.state.hdr.base_profile).name, "HDR Calibrated Profile.icc"
         )
@@ -946,7 +958,7 @@ class ProfileBindingTests(WindowTestCase):
         The pin is what the picker displays, so leaving it behind made the box
         name one profile while the sliders edited another.
         """
-        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.choose_profile(self.window.hdr_profile_combo, "HDR Calibrated Profile.icc")
         (self.color_dir / "PG32UCDM_120_Standard.icm").write_bytes(self.third_party_bytes())
         self.default_profiles["HDR"] = "PG32UCDM_120_Standard.icm"
 
@@ -960,7 +972,7 @@ class ProfileBindingTests(WindowTestCase):
         )
 
     def test_a_deliberate_pin_is_kept_but_the_divergence_is_reported(self):
-        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.choose_profile(self.window.hdr_profile_combo, "HDR Calibrated Profile.icc")
         (self.color_dir / "PG32UCDM_120_Standard.icm").write_bytes(self.third_party_bytes())
         self.default_profiles["HDR"] = "PG32UCDM_120_Standard.icm"
 
@@ -972,7 +984,7 @@ class ProfileBindingTests(WindowTestCase):
         self.assertIn("PG32UCDM_120_Standard.icm", self.window.status_label.text())
 
     def test_a_pinned_hdr_profile_survives_apply(self):
-        self.window.hdr_profile_combo.setCurrentText("HDR Calibrated Profile.icc")
+        self.choose_profile(self.window.hdr_profile_combo, "HDR Calibrated Profile.icc")
         self.default_profiles["HDR"] = "BaseCalibration.icm"
         self.apply()
         self.assertEqual(
@@ -983,7 +995,7 @@ class ProfileBindingTests(WindowTestCase):
         """Adapter LUIDs are reissued on reboot; bindings must not be lost."""
         self.display.device_path = r"\\?\DISPLAY#AUS32F2#5&2564#{guid}"
         self.window._populate_profile_pickers()
-        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
 
         stored = self.window.state.display_bindings
         self.assertIn(self.display.device_path, stored)
@@ -992,7 +1004,7 @@ class ProfileBindingTests(WindowTestCase):
     def test_bindings_round_trip_through_the_saved_state_file(self):
         from sdr_hdr_profile_creator.model import ApplicationState
 
-        self.window.sdr_profile_combo.setCurrentText("Calman_SDR_Calibrated.icm")
+        self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
         self.window._save_state_now()
         reloaded = ApplicationState.from_dict(
             json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
@@ -1399,7 +1411,7 @@ class RuntimeStateTests(WindowTestCase):
         self.apply()
         self.assertFalse(self.read_runtime()["displays"][self.display.key]["sdr_unmanaged"])
 
-        self.window.sdr_profile_combo.setCurrentText(app_module.SDR_UNMANAGED)
+        self.choose_profile(self.window.sdr_profile_combo, app_module.SDR_UNMANAGED)
         self.apply()
         self.assertTrue(self.read_runtime()["displays"][self.display.key]["sdr_unmanaged"])
 
@@ -1923,15 +1935,79 @@ class BuildFromPanelTests(WindowTestCase):
             self.apply()
         announce.assert_not_called()
 
-    def test_existing_measurements_are_not_overwritten_by_panel_claims(self):
-        """A measurement describes this unit; EDID describes the model."""
+    def use_edid(self, peak=1015.24, frame_average=265.05, minimum=0.0002):
+        panel = PanelMetadata(
+            peak_nits=peak,
+            max_frame_average_nits=frame_average,
+            min_nits=minimum,
+            supports_pq=True,
+        )
+        patcher = mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_luminance_is_replaced_with_what_the_panel_declares(self):
+        """Choosing this option is a request for the panel's own figures.
+
+        Whatever was there before generally came from DXGI, which reports this
+        panel's sustained full-frame luminance as equal to its peak -- impossible
+        on an emissive display, and the reason EDID is read at all."""
+        self.use_panel()
+        self.use_edid()
+        self.window.state.hdr.peak_luminance_nits = 1019.5
+        self.window.state.hdr.full_frame_luminance_nits = 1019.5
+        self.window.state.hdr.minimum_luminance_nits = 0.0
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        state = self.window.state.hdr
+        self.assertAlmostEqual(state.peak_luminance_nits, 1015.24, places=2)
+        self.assertAlmostEqual(state.full_frame_luminance_nits, 265.05, places=2)
+        self.assertAlmostEqual(state.minimum_luminance_nits, 0.0002, places=4)
+
+    def test_luminance_is_left_alone_when_the_panel_declares_nothing_usable(self):
+        """No EDID answer is not a reason to overwrite with defaults."""
         self.use_panel()
         self.window.state.hdr.peak_luminance_nits = 742.0
         self.window.state.hdr.minimum_luminance_nits = 0.004
-        self.window.state.hdr.full_frame_luminance_nits = 260.0
         self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
         self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 742.0)
         self.assertAlmostEqual(self.window.state.hdr.minimum_luminance_nits, 0.004)
+
+    def test_slider_corrections_survive_the_switch(self):
+        """They are relative trims, not colorimetry; discarding them silently
+        would throw away work with no warning."""
+        self.use_panel()
+        self.use_edid()
+        self.window.state.hdr.temperature = -180.0
+        self.window.state.hdr.contrast = 4.5
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertAlmostEqual(self.window.state.hdr.temperature, -180.0)
+        self.assertAlmostEqual(self.window.state.hdr.contrast, 4.5)
+    def test_selecting_the_entry_already_shown_still_applies_it(self):
+        """The picker put this entry at position 0, so it could already be the
+        displayed text before anyone touched it. qfluentwidgets emits
+        currentTextChanged only from inside setCurrentIndex, which returns early
+        when the index has not moved -- so listening to that signal made clicking
+        the visible entry do nothing at all, and Apply then silently used the old
+        base profile instead."""
+        self.use_panel()
+        self.window.hdr_profile_combo.textActivated.emit(app_module.HDR_FROM_PANEL)
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.PANEL_XY)
+        self.assertEqual(self.window.state.hdr.base_profile, "")
+
+    def test_picker_shows_the_profile_actually_in_force_when_nothing_is_pinned(self):
+        """A combo showing one thing while the state holds another is how the
+        build-from-panel entry appeared selected without ever being applied."""
+        binding = self.window._selected_binding()
+        binding.hdr_profile = ""
+        self.window.state.hdr.base_profile = ""
+        self.window._base_hdr_profiles[self.display.key] = {
+            "profile_name": "BaseCalibration.icm",
+            "profile_path": str(self.color_dir / "BaseCalibration.icm"),
+        }
+        self.window._populate_profile_pickers()
+        self.assertEqual(
+            self.window.hdr_profile_combo.currentText(), "BaseCalibration.icm"
+        )
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")

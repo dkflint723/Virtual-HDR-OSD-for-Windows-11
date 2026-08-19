@@ -501,7 +501,7 @@ class MainWindow(FluentWidget):
             "HDR → SDR switch instead of hoping it observed the right one earlier. "
             "This app never edits your SDR profile."
         )
-        self.sdr_profile_combo.currentTextChanged.connect(self._sdr_profile_chosen)
+        self.sdr_profile_combo.textActivated.connect(self._sdr_profile_chosen)
         profile_row.addWidget(self.sdr_profile_combo, 1)
 
         hdr_label = BodyLabel("HDR", bar)
@@ -515,7 +515,7 @@ class MainWindow(FluentWidget):
             "no import round trip. The app's own working profiles are excluded so your edits "
             "never compound on already-edited data."
         )
-        self.hdr_profile_combo.currentTextChanged.connect(self._hdr_profile_chosen)
+        self.hdr_profile_combo.textActivated.connect(self._hdr_profile_chosen)
         profile_row.addWidget(self.hdr_profile_combo, 1)
 
         import_button = PushButton("Import…", bar)
@@ -1359,6 +1359,12 @@ class MainWindow(FluentWidget):
                 self.hdr_profile_combo.clear()
                 entries = [HDR_FROM_PANEL, *installed]
                 chosen = binding.hdr_profile or Path(self.state.hdr.base_profile or "").name
+                if not chosen:
+                    # Nothing pinned and nothing loaded yet: show whatever Windows
+                    # actually has, which is what Apply would adopt.
+                    chosen = Path(
+                        self._base_hdr_profiles.get(display.key, {}).get("profile_name", "")
+                    ).name
                 # An imported file living outside the colour directory still needs a row.
                 if chosen and chosen not in entries:
                     entries.append(chosen)
@@ -2304,9 +2310,12 @@ class MainWindow(FluentWidget):
 
         Slider corrections are deliberately left alone: they are relative trims,
         and silently zeroing them when someone changes where the colorimetry
-        comes from would discard work with no warning. Measured luminance is
-        likewise kept -- the EDID figures describe the model, a measurement
-        describes this unit, and the measurement wins.
+        comes from would discard work with no warning.
+
+        Luminance is replaced rather than preserved, because choosing this option
+        is a request for the panel's own figures and keeping earlier ones would
+        describe the panel with numbers from elsewhere. The status line names what
+        was adopted, so a measurement worth keeping can be taken again.
         """
         display = self._selected_display()
         if display is None:
@@ -2329,7 +2338,7 @@ class MainWindow(FluentWidget):
             return
 
         got_primaries = self._capture_panel_primaries(display)
-        got_luminance = self._prefill_luminance_from_panel(display)
+        got_luminance = self._adopt_panel_luminance_from_edid(display)
         state = self.state.hdr
         if not state.panel_primaries:
             self._set_status(
@@ -2340,9 +2349,10 @@ class MainWindow(FluentWidget):
             )
         else:
             detail = (
-                f"{state.peak_luminance_nits:g} nits peak, {state.minimum_luminance_nits:g} black"
+                f"{state.peak_luminance_nits:g} nits peak, {state.full_frame_luminance_nits:g} "
+                f"full-frame, {state.minimum_luminance_nits:g} black"
                 if got_luminance
-                else f"keeping {state.peak_luminance_nits:g} nits peak already set"
+                else f"no usable EDID luminance, so {state.peak_luminance_nits:g} nits peak is unchanged"
             )
             self._set_status(
                 f"Building from {display.friendly_name}: its own primaries and {detail}. "
@@ -2381,6 +2391,32 @@ class MainWindow(FluentWidget):
         if not primaries or primaries == self.state.hdr.panel_primaries:
             return False
         self.state.hdr.panel_primaries = primaries
+        self._save_state_soon()
+        return True
+
+    def _adopt_panel_luminance_from_edid(self, display: DisplayInfo) -> bool:
+        """Replace the luminance figures with what the panel declares.
+
+        _prefill_luminance_from_panel deliberately fills only values nobody has
+        set, so a measurement is never overwritten by a specification. That is the
+        right rule everywhere except here: choosing to build from the display's own
+        panel data is a request for exactly these numbers, and leaving whatever was
+        there before would describe the panel with figures from somewhere else.
+
+        The values this replaces are usually DXGI's, which reports this panel's
+        sustained full-frame luminance as equal to its peak -- impossible on an
+        emissive display, and the reason EDID is read at all.
+        """
+        panel = read_panel_metadata(display.device_path)
+        if panel is None or not panel.credible:
+            return False
+        state = self.state.hdr
+        state.minimum_luminance_nits = max(0.0, min(100.0, panel.min_nits))
+        state.peak_luminance_nits = max(80.0, min(10000.0, panel.peak_nits))
+        state.full_frame_luminance_nits = max(
+            80.0,
+            min(state.peak_luminance_nits, panel.max_frame_average_nits or panel.peak_nits),
+        )
         self._save_state_soon()
         return True
 
