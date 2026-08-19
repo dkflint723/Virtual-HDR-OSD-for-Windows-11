@@ -1820,7 +1820,14 @@ class MainWindow(FluentWidget):
             sdr_white = 240.0
         panel = read_panel_metadata(display.device_path)
         capability = capability_for_device_name(display.gdi_name)
+        # Ask for what the panel claims it can do, not for what was measured last
+        # time. Driving the peak patch at the stored figure makes the measurement
+        # self-fulfilling: the first run asked for the EDID's 1015 nits and found
+        # 450, and every run after asked for 450 and found 450, confirming only
+        # that the display can produce what it was told to.
         peak = self.state.hdr.peak_luminance_nits
+        if panel is not None and panel.credible:
+            peak = max(peak, panel.peak_nits)
 
         window = measure_view.MeasureWindow(capability, sdr_white, panel)
         screen = self._screen_for(display)

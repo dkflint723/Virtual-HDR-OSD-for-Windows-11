@@ -35,6 +35,12 @@ except ImportError as exc:  # qfluentwidgets is a project dependency; skip if ab
     GUI_IMPORT_ERROR = str(exc)
 
 
+def app_module_instrument():
+    """A stand-in for one entry from Argyll's port list."""
+    from sdr_hdr_profile_creator.meter import Instrument
+
+    return Instrument(port=1, label="hid:/31 (X-Rite i1 DisplayPro)")
+
 def hdr_display(key: str = "AAAA:BBBB:0:1") -> "DisplayInfo":
     return DisplayInfo(
         key=key,
@@ -2471,3 +2477,80 @@ class ProfileLockSwitchTests(WindowTestCase):
         self.window.lock_switch.setChecked(True)
         self.window._sync_lock_switch()
         self.assertFalse(self.window.lock_switch.isChecked())
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class PeakPatchTargetTests(WindowTestCase):
+    """The peak patch has to ask for more than the display last managed.
+
+    Driving it at the stored peak makes the measurement self-fulfilling. The
+    first real run asked for the EDID's 1015 nits and found 450; every run after
+    asked for 450 and found 450, which confirms only that the display can produce
+    what it was told to and says nothing about its ceiling.
+    """
+
+    def panel(self, peak=1015.24):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        return PanelMetadata(
+            peak_nits=peak, max_frame_average_nits=265.05, min_nits=0.000156,
+            supports_pq=True, primaries=(),
+        )
+
+    def requested_peak(self, stored, panel):
+        captured = {}
+
+        def fake_start(window, read, peak, on_progress, on_finished, on_reading=None):
+            captured["peak"] = peak
+            raise RuntimeError("stop before the run begins")
+
+        class FakeWindow:
+            """The real one needs a D3D swapchain, which offscreen Qt cannot give."""
+
+            failure = ""
+
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def setGeometry(self, *args):
+                pass
+
+            def showFullScreen(self):
+                pass
+
+            def begin(self):
+                return True
+
+            def close(self):
+                pass
+
+        self.window.state.hdr.peak_luminance_nits = stored
+        patches = [
+            mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel),
+            mock.patch.object(app_module, "find_spotread", return_value=Path("spotread")),
+            mock.patch.object(app_module, "list_instruments",
+                              return_value=[app_module_instrument()]),
+            mock.patch.object(app_module.measure_view, "MeasureWindow", FakeWindow),
+            mock.patch.object(app_module.measure_view, "start", fake_start),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        try:
+            self.window._measure_with_meter()
+        except RuntimeError:
+            pass
+        return captured.get("peak")
+
+    def test_asks_for_the_panels_declared_peak_not_the_last_measurement(self):
+        peak = self.requested_peak(stored=450.49, panel=self.panel(1015.24))
+        self.assertAlmostEqual(peak, 1015.24, places=2)
+
+    def test_a_measurement_above_the_panels_claim_is_still_honoured(self):
+        """A panel that beats its own specification must not be capped to it."""
+        peak = self.requested_peak(stored=1200.0, panel=self.panel(1015.24))
+        self.assertAlmostEqual(peak, 1200.0, places=2)
+
+    def test_an_unreadable_panel_falls_back_to_the_stored_figure(self):
+        peak = self.requested_peak(stored=450.49, panel=None)
+        self.assertAlmostEqual(peak, 450.49, places=2)

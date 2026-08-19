@@ -653,6 +653,19 @@ Esc cancels -- a cancelled run changes nothing at all.
 When it finishes, the measured peak, black and primaries replace what the profile had.
 Press **Apply Edits** to write them out.
 
+## Measuring more than once
+
+Each measurement is folded into the correction already applied rather than replacing it,
+because it describes the display *as currently corrected*. That makes a second run a
+verification: a calibration that worked re-measures as neutral, leaves the correction
+untouched and reports "verified", while one that fell short tightens and converges.
+
+It also means the correction in force has to still be valid. **If you change anything on
+the monitor -- picture mode, colour temperature, brightness, HDR mode -- press Reset
+Sliders before measuring again.** The old correction was solved for a display that no
+longer exists, and folding a new measurement into it gives a result that describes
+neither. Reset, rebuild from the panel, apply, then measure.
+
 ## What gets measured
 
 Five patches, each shown in the same centred window covering a tenth of the screen, on
