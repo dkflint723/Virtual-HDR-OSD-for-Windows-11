@@ -862,7 +862,7 @@ class PatternWindow(QWidget):
         and lumi tag of the next generated profile. Nothing is measured that the profile
         does not then carry.
         """
-        if not self.pattern.level_driven or self._measure is None:
+        if not self.pattern.level_driven or not self.pattern.records or self._measure is None:
             return False
         if not self._probe_moved:
             # Every step opens somewhere plausible so the first press moves towards the

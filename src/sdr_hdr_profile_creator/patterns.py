@@ -134,6 +134,11 @@ class Pattern:
     render: Callable[[int, int, PatternContext], bytes]
     markers: Callable[[PatternContext], tuple[Marker, ...]] = lambda _context: ()
     level_driven: bool = False
+    # Whether the level this pattern is driven to is an answer worth keeping. Full-frame
+    # white is driven exactly like a measurement and is not one: what it finds is where the
+    # signal clips, which is the same wherever the window size, so recording it would put a
+    # clipping point in a field meaning sustained luminance.
+    records: bool = True
     # Overrides the standard window. Only maximum full-frame luminance needs this: it is
     # defined as the whole screen lit, so measuring it in a tenth of one measures nothing.
     window_fraction: float | None = None
@@ -532,6 +537,7 @@ PATTERNS: tuple[Pattern, ...] = (
         render=_render_peak_clip,
         markers=_probe_markers,
         level_driven=True,
+        records=False,
         window_fraction=1.0,
     ),
     Pattern(
@@ -634,7 +640,13 @@ PATTERNS: tuple[Pattern, ...] = (
 # The measured steps, in the order they must be taken. Black first because a wrong black
 # level changes what every later judgement looks like, and full-frame last because it is
 # the only one that floods the screen and wrecks dark adaptation for anything after it.
-MEASUREMENT_SEQUENCE: tuple[str, ...] = ("black-level", "peak-white", "full-frame-white")
+# Full-frame white is deliberately absent. It cannot measure what it was added to measure:
+# the brightness limiter dims the shape and its surround together, so their ratio survives
+# and they separate until the *signal* clips -- at the same level as a small window, because
+# what clips is the display's tone-mapping curve and that does not move with window size.
+# Measured on one panel: peak and full-frame both merged around 1010 nits, against a
+# declared sustained figure of 265. Sustained full-screen luminance needs a meter.
+MEASUREMENT_SEQUENCE: tuple[str, ...] = ("black-level", "peak-white")
 
 # The whole guided run. The three measurements establish what the panel does; tone tracking
 # is where the user then sets the curve, so leaving it out ended the run halfway through

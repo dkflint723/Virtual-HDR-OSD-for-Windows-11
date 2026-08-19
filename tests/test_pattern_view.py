@@ -731,12 +731,20 @@ class MeasuredPeakFeedbackTests(PatternViewTestCase):
         self.advance_step(win, 1127.0)   # peak white
         self.assertAlmostEqual(win._context.peak_nits, 1127.0)
 
-    def test_a_measured_full_frame_replaces_it_too(self):
+    def test_full_frame_is_not_part_of_the_run_and_records_nothing(self):
+        """It finds a clipping point, not sustained luminance: the limiter dims the shape
+        and its surround together, so they separate until the signal clips -- at the same
+        level a small window clips. Measured on one panel: 1010 for both, against 265
+        declared sustained."""
+        from sdr_hdr_profile_creator.patterns import MEASUREMENT_SEQUENCE
+
+        self.assertNotIn("full-frame-white", MEASUREMENT_SEQUENCE)
+        self.assertNotIn("full-frame-white", GUIDED_SEQUENCE)
         win = self.build()
-        self.advance_step(win, 0.004)
-        self.advance_step(win, 1127.0)
-        self.advance_step(win, 280.0)    # full frame
-        self.assertAlmostEqual(win._context.max_full_frame_nits, 280.0)
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "full-frame-white"))
+        win.set_probe(1010.0)
+        self.assertFalse(win.accept_measurement())
+        self.assertNotIn("full-frame-white", win.accepted)
 
     def test_later_patterns_use_the_measured_ceiling(self):
         """Otherwise the staircase and tracking cells would still be scaled to the claim."""
@@ -1446,17 +1454,12 @@ class PanelDeclarationTests(PatternViewTestCase):
                               240.0, self.panel(supports_pq=False))
         self.assertAlmostEqual(context.peak_nits, 1010.4, places=1)
 
-    def test_the_full_frame_step_now_opens_near_the_right_answer(self):
-        win = PatternWindow(capability(), 240.0, self.controls,
-                            panel=self.panel(), measure=lambda *_: None)
-        win.resize(800, 600)
-        self.addCleanup(win.deleteLater)
-        win._apply_guided_step()
-        for _ in range(2):
-            self.advance_step(win)
-        self.assertEqual(win.pattern.key, "full-frame-white")
-        self.assertLess(win.probe_nits, 300.0,
-                        "still opening near peak, so the step starts far above the answer")
+    def test_the_declared_sustained_figure_reaches_the_profile_without_measuring(self):
+        """Nobody can measure sustained full-screen luminance by eye, so the declaration
+        is the only source short of a meter -- it has to arrive on its own."""
+        context = context_for(capability(max_nits=1010.4, max_full_frame_nits=1010.4),
+                              240.0, self.panel())
+        self.assertAlmostEqual(context.max_full_frame_nits, 265.05, places=1)
 
     def test_a_declared_peak_stops_the_assumed_label(self):
         """A panel that answered is not an assumption, whatever DXGI managed."""

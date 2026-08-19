@@ -1055,7 +1055,6 @@ class MeasurementRecordingTests(WindowTestCase):
         for key, field, value in (
             ("black-level", "minimum_luminance_nits", 0.004),
             ("peak-white", "peak_luminance_nits", 1043.0),
-            ("full-frame-white", "full_frame_luminance_nits", 248.0),
         ):
             with self.subTest(pattern=key):
                 self.window._record_measurement(key, value)
@@ -1072,14 +1071,13 @@ class MeasurementRecordingTests(WindowTestCase):
         self.window._record_measurement("peak-white", 99999.0)
         self.assertLessEqual(self.window.state.hdr.peak_luminance_nits, 10000.0)
 
-    def test_full_frame_can_never_exceed_peak(self):
-        """A panel reporting otherwise is reporting fiction; ours must not write it."""
-        self.window._record_measurement("peak-white", 1000.0)
+    def test_full_frame_is_no_longer_written_by_a_pattern(self):
+        """It found a clipping point, not sustained luminance, and writing one into a
+        field meaning the other made a profile claim 1010 nits full-screen on a panel
+        declaring 265. The figure comes from the EDID now."""
+        before = self.window.state.hdr.full_frame_luminance_nits
         self.window._record_measurement("full-frame-white", 4000.0)
-        self.assertLessEqual(
-            self.window.state.hdr.full_frame_luminance_nits,
-            self.window.state.hdr.peak_luminance_nits,
-        )
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, before)
 
     def test_a_measurement_reaches_the_generated_profile(self):
         """The point of measuring: MHC2 carries min and peak, lumi carries full frame."""
@@ -1090,7 +1088,6 @@ class MeasurementRecordingTests(WindowTestCase):
 
         self.window._record_measurement("black-level", 0.0012)
         self.window._record_measurement("peak-white", 1043.0)
-        self.window._record_measurement("full-frame-white", 248.0)
 
         state = self.window.state.hdr
         data = build_profile("HDR", state, build_transform(state, hdr=True))
@@ -1099,8 +1096,7 @@ class MeasurementRecordingTests(WindowTestCase):
             struct.unpack_from(">i", tags[b"MHC2"], 12)[0] / 65536.0, 0.0012, places=4)
         self.assertAlmostEqual(
             struct.unpack_from(">i", tags[b"MHC2"], 16)[0] / 65536.0, 1043.0, places=1)
-        self.assertAlmostEqual(
-            struct.unpack_from(">i", tags[b"lumi"], 12)[0] / 65536.0, 248.0, places=1)
+
 
 
 class PanelGamutWarningTests(WindowTestCase):
@@ -1485,38 +1481,6 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ClippingPointReportingTests(WindowTestCase):
-    """These steps find where the display stops separating two values -- a clipping point,
-    which is what Windows HDR Calibration records too. It is not the same quantity as
-    sustained full-field luminance, and equal readings are a real result about the
-    display's tone-mapping curve rather than a failed measurement."""
-
-    def test_a_full_frame_reading_near_peak_is_explained_not_doubted(self):
-        self.window._record_measurement("peak-white", 1080.0)
-        self.window._record_measurement("full-frame-white", 1050.0)
-        text = self.window.status_label.text()
-        self.assertIn("genuine clipping point", text)
-        self.assertNotIn("guess", text.lower())
-
-    def test_a_plausible_reading_is_not_flagged(self):
-        """QD-OLED full-field really is a fraction of peak; that must read as success."""
-        self.window._record_measurement("peak-white", 1080.0)
-        self.window._record_measurement("full-frame-white", 250.0)
-        self.assertNotIn("clipping point", self.window.status_label.text())
-        self.assertIn("Recorded", self.window.status_label.text())
-
-    def test_the_reading_is_still_stored_rather_than_discarded(self):
-        """It is the user's measurement; the app says it is doubtful, not that it is void."""
-        self.window._record_measurement("peak-white", 1080.0)
-        self.window._record_measurement("full-frame-white", 1050.0)
-        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 1050.0)
-
-    def test_peak_alone_is_never_flagged(self):
-        """Only the pair is suspicious; a high peak on its own is just a bright panel."""
-        self.window._record_measurement("peak-white", 1500.0)
-        self.assertNotIn("clipping point", self.window.status_label.text())
-
-
 class PatternViewLiveApplyTests(WindowTestCase):
     """Live Apply is forced off at startup, so without this the tone steps in the pattern
     view moved sliders that rebuilt nothing and changed nothing on screen."""
@@ -1698,8 +1662,8 @@ class ClampedMeasurementTests(WindowTestCase):
     measurement step must never do."""
 
     def test_a_reading_below_the_floor_is_reported(self):
-        """60 nits full-frame is plausible on a dim panel and became 80 in silence."""
-        self.window._record_measurement("full-frame-white", 60.0)
+        """60 nits peak is plausible on a dim panel and became 80 in silence."""
+        self.window._record_measurement("peak-white", 60.0)
         text = self.window.status_label.text()
         self.assertIn("60", text)
         self.assertIn("80", text)

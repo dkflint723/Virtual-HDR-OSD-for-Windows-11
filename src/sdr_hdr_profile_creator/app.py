@@ -1503,10 +1503,13 @@ class MainWindow(FluentWidget):
     # Each threshold pattern answers exactly one of the three luminance figures a
     # generated profile carries: minimum and peak go into the MHC2 header, full frame into
     # the lumi tag. Measuring something the profile does not then record would be pointless.
+    # full-frame-white is absent on purpose: it finds a clipping point, not sustained
+    # luminance, and writing one into a field meaning the other is how a profile ends up
+    # claiming a display holds 1010 nits full-screen when the panel declares 265. That
+    # figure comes from the EDID, or from a meter. See patterns.MEASUREMENT_SEQUENCE.
     MEASUREMENT_FIELDS = {
         "black-level": "minimum_luminance_nits",
         "peak-white": "peak_luminance_nits",
-        "full-frame-white": "full_frame_luminance_nits",
     }
 
     def _record_measurement(self, pattern_key: str, nits: float) -> None:
@@ -1551,18 +1554,11 @@ class MainWindow(FluentWidget):
                 self._set_status(note, "warning")
                 return
 
-        warning = self._implausible_measurement(pattern_key)
-        if warning:
-            self._set_status(warning, "warning")
-            return
         self._set_status(
             f"Recorded {value:g} nits as {field.replace('_', ' ')}. Apply Edits writes it "
             "into the profile.",
             "ok",
         )
-
-    # A full-frame reading this close to peak means the display never actually clipped.
-    FULL_FRAME_IMPLAUSIBLE_RATIO = 0.85
 
     # Above this, a by-eye black reading is far more likely to describe the room than the
     # panel. An emissive display's black is effectively zero, and even a good LCD sits
@@ -1590,36 +1586,6 @@ class MainWindow(FluentWidget):
             "brighter than the darkest the panel can show -- and it is the panel's figure "
             "a profile is meant to carry. On an emissive display black is effectively "
             "zero. Re-measure in the dark, or set it to zero, if that is the case here."
-        )
-
-    def _implausible_measurement(self, pattern_key: str) -> str:
-        """Say what a full-frame reading equal to peak actually means.
-
-        These steps find the level at which the display stops separating two adjacent
-        values -- a clipping point. That is a real measurement and it is what Windows HDR
-        Calibration records too, but it is not the same quantity as sustained full-field
-        luminance. What clips is usually the display's own tone-mapping curve, and that
-        curve does not move with window size, so a panel whose full-field output is a
-        fraction of its peak can still clip at the same signal level either way.
-
-        Reporting the two as equal is therefore not a failed measurement and must not be
-        called one. It does mean the number describes signal handling rather than how much
-        light the panel sustains, which is worth saying before it goes into a profile.
-        """
-        if pattern_key != "full-frame-white":
-            return ""
-        peak = self.state.hdr.peak_luminance_nits
-        full_frame = self.state.hdr.full_frame_luminance_nits
-        if peak <= 0 or full_frame < peak * self.FULL_FRAME_IMPLAUSIBLE_RATIO:
-            return ""
-        return (
-            f"Recorded {full_frame:g} nits full-frame, close to the {peak:g} peak. That is "
-            "a genuine clipping point, but it means this display clips at the same level "
-            "whatever the window size -- its tone-mapping curve, not the panel running out "
-            "of light. An emissive panel sustains far less than peak across a whole screen, "
-            "so treat this as signal handling rather than brightness. A meter would read "
-            "lower, and an HGIG or tone-mapping-off mode in the monitor's menu would "
-            "separate the two."
         )
 
     def _open_pattern_view(self) -> None:
