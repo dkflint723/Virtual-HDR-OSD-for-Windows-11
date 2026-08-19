@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable
 
 from .curves import CalibrationTransform, _inverse3, estimate_curve_gamma
-from .model import DisplayMode, ModeState
+from .model import DisplayMode, ModeState, normalize_primaries
 
 D50_XYZ = (0.9642, 1.0, 0.8249)
 D65_XYZ = (0.95047, 1.0, 1.08883)
@@ -135,6 +135,31 @@ def _chromaticities_to_xyz(
     )
 
 
+def _display_primaries_xyz(
+    mode: DisplayMode, state: ModeState
+) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float, float]]:
+    """The panel's own primaries where they are known, else the generic table.
+
+    This matters most when there is no base profile to inherit rXYZ/gXYZ/bXYZ
+    from, because the HDR entry in PRIMARIES is BT.2020 and virtually no display
+    covers it. Describing a P3 panel as BT.2020 misplaces every saturated colour.
+    """
+    measured = normalize_primaries(state.panel_primaries)
+    if measured:
+        # Take only the R/G/B chromaticities and scale them to the same D65 the
+        # wtpt tag declares. The panel's native white is typically a hair off
+        # D65, but that is a calibration error for the MHC2 transform to remove,
+        # not part of the gamut description -- and scaling to it here would
+        # leave rXYZ+gXYZ+bXYZ disagreeing with the profile's own white.
+        white = PRIMARIES[mode][6:]
+        try:
+            return _chromaticities_to_xyz(measured[:6] + white)
+        except (ValueError, ZeroDivisionError):
+            # Coordinates that pass range checks can still be collinear.
+            pass
+    return _chromaticities_to_xyz(PRIMARIES[mode])
+
+
 def _matrix_vector(
     matrix: tuple[float, ...], vector: tuple[float, float, float]
 ) -> tuple[float, float, float]:
@@ -231,7 +256,7 @@ def _apply_profile_id(profile: bytes) -> bytes:
 
 def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTransform) -> bytes:
     hdr = mode == "HDR"
-    red_xyz, green_xyz, blue_xyz = _chromaticities_to_xyz(PRIMARIES[mode])
+    red_xyz, green_xyz, blue_xyz = _display_primaries_xyz(mode, state)
     if hdr:
         # Match the D65-adapted convention used by Windows HDR Calibration:
         # physical D65 colorimetry plus identity chad and an MSCA marker.

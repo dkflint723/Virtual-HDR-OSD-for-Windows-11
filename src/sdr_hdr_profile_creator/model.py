@@ -7,6 +7,31 @@ from typing import Any, Literal
 DisplayMode = Literal["SDR", "HDR"]
 
 
+def normalize_primaries(values: Any) -> tuple[float, ...]:
+    """Eight CIE xy coordinates, or an empty tuple if they are not usable.
+
+    Primaries reach us from display drivers and from state embedded in profiles
+    written by older builds, so neither the length nor the numbers can be taken
+    on trust. Anything rejected here falls back to the generic per-mode table,
+    which is merely inexact; letting a degenerate set through instead yields a
+    profile describing an impossible display.
+    """
+    try:
+        numbers = tuple(float(value) for value in values)
+    except (TypeError, ValueError):
+        return ()
+    if len(numbers) != 8:
+        return ()
+    for number in numbers:
+        # NaN fails every comparison, so this rejects it too.
+        if not 0.0 <= number <= 1.0:
+            return ()
+    # Each y divides in the conversion to XYZ, and a zero would raise there.
+    if any(numbers[index] <= 0.0 for index in (1, 3, 5, 7)):
+        return ()
+    return numbers
+
+
 @dataclass(slots=True)
 class ModeState:
     profile_name: str
@@ -42,6 +67,13 @@ class ModeState:
     imported_profile: str = ""
     base_profile: str = ""
     base_profile_name: str = ""
+
+    # The display's own primaries and white point as CIE xy, ordered
+    # rx, ry, gx, gy, bx, by, wx, wy. Empty means "not known", and the generic
+    # per-mode table in icc.PRIMARIES stands in. Capturing them matters because
+    # a profile built without a base profile to inherit from would otherwise
+    # claim BT.2020 on a panel that is nothing of the sort.
+    panel_primaries: tuple[float, ...] = ()
 
     @classmethod
     def neutral(cls, mode: DisplayMode) -> "ModeState":
@@ -100,6 +132,8 @@ class ModeState:
             except Exception:
                 value = float(getattr(base, key))
             merged[key] = max(low, min(high, value))
+
+        merged["panel_primaries"] = normalize_primaries(merged.get("panel_primaries"))
 
         # Removed controls are neutralized when legacy profiles are imported.
         merged["exposure"] = 0.0

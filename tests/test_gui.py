@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -125,6 +126,13 @@ class WindowTestCase(unittest.TestCase):
             "remove_profile": fake_remove,
             # Registering real global hotkeys from a test would be antisocial.
             "GammaHotkeyListener": mock.MagicMock(),
+            # Both of these read the real monitor. Building the window called them,
+            # so tests inherited whatever panel the developer happened to have --
+            # and once the window started recording panel primaries, assertions
+            # about "no panel data" passed or failed depending on the hardware.
+            # Individual tests still override these where they need real values.
+            "capability_for_device_name": lambda _name: None,
+            "read_panel_metadata": lambda _path: None,
         }
         for name, value in patches.items():
             patcher = mock.patch.object(app_module, name, value)
@@ -1809,3 +1817,113 @@ class PanelPrefillTests(WindowTestCase):
         with mock.patch.object(app_module, "read_panel_metadata", lambda _p: self.panel()):
             self.window._refresh_displays()
         self.assertIn("specification", self.window.status_label.text())
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class BuildFromPanelTests(WindowTestCase):
+    """Generating a profile with no base profile at all.
+
+    This is the path that removes the dependency on Microsoft's separate HDR
+    Calibration app: with nothing to inherit ICC tags from, the panel's own
+    reported primaries and luminance are all the profile has to go on.
+    """
+
+    PANEL_XY = (0.674586, 0.314418, 0.269814, 0.685949, 0.151222, 0.060916, 0.313786, 0.329268)
+
+    def fake_capability(self, is_hdr=True):
+        return SimpleNamespace(
+            device_name=r"\.\DISPLAY1",
+            is_hdr=is_hdr,
+            red_primary=self.PANEL_XY[0:2],
+            green_primary=self.PANEL_XY[2:4],
+            blue_primary=self.PANEL_XY[4:6],
+            white_point=self.PANEL_XY[6:8],
+        )
+
+    def use_panel(self, *, is_hdr=True, capability=True):
+        patcher = mock.patch.object(
+            app_module, "capability_for_device_name",
+            lambda name: self.fake_capability(is_hdr) if capability else None,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_option_is_offered_in_the_picker(self):
+        self.window._populate_profile_pickers()
+        items = [self.window.hdr_profile_combo.itemText(i)
+                 for i in range(self.window.hdr_profile_combo.count())]
+        self.assertIn(app_module.HDR_FROM_PANEL, items)
+
+    def test_choosing_it_clears_the_base_profile(self):
+        self.use_panel()
+        self.window.state.hdr.base_profile = str(self.color_dir / "BaseCalibration.icm")
+        self.window.state.hdr.base_profile_name = "BaseCalibration.icm"
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertEqual(self.window.state.hdr.base_profile, "")
+        self.assertEqual(self.window.state.hdr.imported_profile, "")
+
+    def test_captures_the_panels_primaries_in_hdr(self):
+        self.use_panel()
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertEqual(self.window.state.hdr.panel_primaries, self.PANEL_XY)
+
+    def test_refuses_to_capture_primaries_while_the_display_is_in_sdr(self):
+        """The driver reports BT.709 for a wide-gamut panel while HDR is off.
+
+        A profile built from that would describe a P3 display as sRGB, which is
+        exactly how one of the reference profiles on the development machine
+        came to claim 0.640/0.330 for red.
+        """
+        self.use_panel()
+        # current_mode reads advanced_color_kind, not advanced_color_enabled.
+        self.display.advanced_color_kind = "SDR"
+        self.display.advanced_color_enabled = False
+        self.window._current_display_snapshot = self.display
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertEqual(self.window.state.hdr.panel_primaries, ())
+        self.assertIn("HDR", self.window.status_label.text())
+
+    def test_survives_a_display_that_reports_no_capability(self):
+        self.use_panel(capability=False)
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertEqual(self.window.state.hdr.panel_primaries, ())
+        self.assertEqual(self.window.state.hdr.base_profile, "")
+
+    def test_applied_profile_describes_the_panel_not_bt2020(self):
+        self.use_panel()
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.apply()
+        installed = [n for n in self.installed if n.lower().endswith((".icm", ".icc"))]
+        self.assertTrue(installed, "nothing was installed")
+        described = app_module.profile_primaries_xy(
+            (self.color_dir / installed[-1]).read_bytes()
+        )
+        flat = [v for pair in described[:3] for v in pair]
+        for index, expected in enumerate(self.PANEL_XY[:6]):
+            self.assertAlmostEqual(flat[index], expected, places=3)
+
+    def test_applying_does_not_readopt_a_base_behind_the_users_back(self):
+        """_capture_current_hdr_base runs on every Apply and adopts the Windows
+        default when no base is pinned. The sentinel is a deliberate choice of
+        'no base', so it must outrank that."""
+        self.use_panel()
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.apply()
+        self.assertEqual(self.window.state.hdr.base_profile, "")
+
+    def test_no_divergence_warning_for_a_mode_that_is_not_a_filename(self):
+        self.use_panel()
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        with mock.patch.object(self.window, "_announce_diverged_base") as announce:
+            self.apply()
+        announce.assert_not_called()
+
+    def test_existing_measurements_are_not_overwritten_by_panel_claims(self):
+        """A measurement describes this unit; EDID describes the model."""
+        self.use_panel()
+        self.window.state.hdr.peak_luminance_nits = 742.0
+        self.window.state.hdr.minimum_luminance_nits = 0.004
+        self.window.state.hdr.full_frame_luminance_nits = 260.0
+        self.window._hdr_profile_chosen(app_module.HDR_FROM_PANEL)
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 742.0)
+        self.assertAlmostEqual(self.window.state.hdr.minimum_luminance_nits, 0.004)

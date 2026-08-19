@@ -56,7 +56,7 @@ from .icc import (
     primaries_disagree,
     profile_primaries_xy,
 )
-from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState
+from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState, normalize_primaries
 from .windows_api import (
     DisplayInfo,
     enumerate_displays,
@@ -97,6 +97,13 @@ GAMMA_RUNTIME_SCHEMA = "virtual-hdr-osd-gamma-hotkeys-v2"
 # UNMANAGED tells this app to keep its hands off SDR entirely.
 SDR_AUTO = "Auto — restore whatever Windows had"
 SDR_UNMANAGED = "Leave unmanaged (third-party calibration owns SDR)"
+
+# Editing an existing HDR profile is the normal path, but it requires already
+# having one -- which is why the guide sent people to Microsoft's separate
+# calibration app first. This sentinel says "there is no base profile; describe
+# the panel from what it reports about itself", which the display can answer
+# directly: EDID carries its luminance and DXGI its primaries.
+HDR_FROM_PANEL = "Build from this display's own panel data (no base profile)"
 
 # Filename prefixes this app has ever used for its own managed HDR profiles.
 # Cleanup matches on these only, so a user's own profile is never removed.
@@ -1157,6 +1164,7 @@ class MainWindow(FluentWidget):
                     "measured. They are the model's specification, not this panel measured.",
                     "ok",
                 )
+            self._capture_panel_primaries(selected)
             self._warn_if_panel_gamut_changed(selected)
 
     def _display_selected(self, _index: int) -> None:
@@ -1285,7 +1293,7 @@ class MainWindow(FluentWidget):
 
             with QSignalBlocker(self.hdr_profile_combo):
                 self.hdr_profile_combo.clear()
-                entries = list(installed)
+                entries = [HDR_FROM_PANEL, *installed]
                 chosen = binding.hdr_profile or Path(self.state.hdr.base_profile or "").name
                 # An imported file living outside the colour directory still needs a row.
                 if chosen and chosen not in entries:
@@ -1332,6 +1340,9 @@ class MainWindow(FluentWidget):
         if binding is None:
             return
         binding.hdr_profile = text
+        if text == HDR_FROM_PANEL:
+            self._build_from_panel(binding)
+            return
         candidate = Path(text)
         if not candidate.is_file():
             try:
@@ -1750,7 +1761,10 @@ class MainWindow(FluentWidget):
             # Windows currently happens to have as the default. Say so when the two
             # diverge, or recalibrating in Calman or Windows HDR Calibration looks
             # like the app quietly ignoring the new profile.
-            if Path(profile_name).name != Path(binding.hdr_profile).name:
+            if (
+                binding.hdr_profile != HDR_FROM_PANEL
+                and Path(profile_name).name != Path(binding.hdr_profile).name
+            ):
                 self._announce_diverged_base(binding.hdr_profile, profile_name)
             self._save_state_now()
             return
@@ -2214,6 +2228,95 @@ class MainWindow(FluentWidget):
         state.full_frame_luminance_nits = max(
             80.0, min(state.peak_luminance_nits, panel.max_frame_average_nits or panel.peak_nits)
         )
+        self._save_state_soon()
+        return True
+
+    def _build_from_panel(self, binding: DisplayBinding) -> None:
+        """Describe the display from what it reports, with no base profile.
+
+        With no base, build_profile falls back to a self-contained set of tags,
+        so the panel's own primaries and luminance are the only thing standing
+        between that and a profile describing a display that does not exist.
+
+        Slider corrections are deliberately left alone: they are relative trims,
+        and silently zeroing them when someone changes where the colorimetry
+        comes from would discard work with no warning. Measured luminance is
+        likewise kept -- the EDID figures describe the model, a measurement
+        describes this unit, and the measurement wins.
+        """
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a detected display first.", "error")
+            return
+
+        self.state.hdr.base_profile = ""
+        self.state.hdr.base_profile_name = ""
+        self.state.hdr.imported_profile = ""
+        self._base_is_user_selected = True
+
+        if display.current_mode != "HDR":
+            self._set_status(
+                f"Turn HDR on for {display.friendly_name} first. While it is in SDR the driver "
+                "reports BT.709 for this panel, and building now would describe a wide-gamut "
+                "display as sRGB.",
+                "warning",
+            )
+            self._save_state_now()
+            return
+
+        got_primaries = self._capture_panel_primaries(display)
+        got_luminance = self._prefill_luminance_from_panel(display)
+        state = self.state.hdr
+        if not state.panel_primaries:
+            self._set_status(
+                f"Could not read the primaries {display.friendly_name} reports, so the profile "
+                "will claim the generic BT.2020 gamut. Pick an existing HDR profile as the base "
+                "instead if colour accuracy matters.",
+                "warning",
+            )
+        else:
+            detail = (
+                f"{state.peak_luminance_nits:g} nits peak, {state.minimum_luminance_nits:g} black"
+                if got_luminance
+                else f"keeping {state.peak_luminance_nits:g} nits peak already set"
+            )
+            self._set_status(
+                f"Building from {display.friendly_name}: its own primaries and {detail}. "
+                "These are what the panel reports, not this unit measured. Press Apply Edits to install.",
+                "ok",
+            )
+        _ = got_primaries
+        self._save_state_now()
+        self._load_mode_into_controls()
+
+    def _capture_panel_primaries(self, display: DisplayInfo) -> bool:
+        """Record the panel's own gamut, for profiles generated without a base.
+
+        Only meaningful while the display is actually in HDR mode. With HDR off,
+        the driver reports BT.709 for this same panel, and storing that would
+        describe a wide-gamut display as sRGB.
+
+        This is only ever consulted when there is no base profile to inherit
+        rXYZ/gXYZ/bXYZ from. The alternative in that case is the generic table,
+        whose HDR entry is BT.2020 -- a gamut essentially no display covers.
+        """
+        if display.current_mode != "HDR":
+            return False
+        try:
+            capability = capability_for_device_name(display.gdi_name)
+        except Exception:
+            return False
+        if capability is None or not capability.is_hdr:
+            return False
+        primaries = normalize_primaries(
+            tuple(capability.red_primary)
+            + tuple(capability.green_primary)
+            + tuple(capability.blue_primary)
+            + tuple(capability.white_point)
+        )
+        if not primaries or primaries == self.state.hdr.panel_primaries:
+            return False
+        self.state.hdr.panel_primaries = primaries
         self._save_state_soon()
         return True
 

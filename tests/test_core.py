@@ -13,7 +13,7 @@ from unittest import mock
 
 from sdr_hdr_profile_creator import icc as icc_module
 from sdr_hdr_profile_creator.icc import _parse_mhc2, _read_tags, build_profile, content_digest, import_profile
-from sdr_hdr_profile_creator.model import ApplicationState, ModeState
+from sdr_hdr_profile_creator.model import ApplicationState, ModeState, normalize_primaries
 
 
 class CoreTests(unittest.TestCase):
@@ -653,3 +653,96 @@ class RetiredCorrectionOptionTests(unittest.TestCase):
 
     def test_an_unknown_name_falls_back_rather_than_raising(self):
         self.assertEqual(resolve_white_level("something else entirely", None), 200.0)
+
+
+class PanelPrimariesTests(unittest.TestCase):
+    """Profiles built with no base profile must describe the real panel.
+
+    Without a base to inherit rXYZ/gXYZ/bXYZ from, the fallback is the generic
+    per-mode table, and its HDR entry is BT.2020 -- a gamut no shipping display
+    covers. On the panel this was developed against the green primary alone was
+    out by 0.11 in xy, which misplaces every saturated colour.
+    """
+
+    PANEL = (0.674586, 0.314418, 0.269814, 0.685949, 0.151222, 0.060916, 0.313786, 0.329268)
+
+    def _profile(self, primaries):
+        state = ModeState.neutral("HDR")
+        state.panel_primaries = primaries
+        return build_profile("HDR", state, build_transform(state, hdr=True))
+
+    def test_panel_primaries_survive_the_round_trip(self):
+        described = icc_module.profile_primaries_xy(self._profile(self.PANEL))
+        flat = [value for pair in described[:3] for value in pair]
+        for index, expected in enumerate(self.PANEL[:6]):
+            # s15Fixed16 quantisation is the only permitted difference.
+            self.assertAlmostEqual(flat[index], expected, places=4)
+
+    def test_without_panel_primaries_the_generic_table_is_used(self):
+        described = icc_module.profile_primaries_xy(self._profile(()))
+        self.assertAlmostEqual(described[0][0], icc_module.PRIMARIES["HDR"][0], places=4)
+        self.assertAlmostEqual(described[1][1], icc_module.PRIMARIES["HDR"][3], places=4)
+
+    def test_primaries_are_scaled_to_the_declared_white(self):
+        """rXYZ+gXYZ+bXYZ must agree with wtpt, or the profile contradicts itself.
+
+        The panel's native white sits slightly off D65. Scaling the primaries to
+        it while wtpt still declares D65 would leave the two disagreeing.
+        """
+        tags = _read_tags(self._profile(self.PANEL))
+        channels = [icc_module._parse_xyz(tags[key]) for key in (b"rXYZ", b"gXYZ", b"bXYZ")]
+        white = icc_module._parse_xyz(tags[b"wtpt"])
+        for axis in range(3):
+            self.assertAlmostEqual(sum(c[axis] for c in channels), white[axis], places=3)
+
+    def test_generated_profile_carries_every_tag_windows_writes(self):
+        """Microsoft's HDR Calibration output is the compatibility reference."""
+        required = {b"MHC2", b"MSCA", b"bTRC", b"bXYZ", b"chad", b"cprt",
+                    b"desc", b"gTRC", b"gXYZ", b"lumi", b"rTRC", b"rXYZ", b"wtpt"}
+        self.assertLessEqual(required, set(_read_tags(self._profile(self.PANEL))))
+
+    def test_degenerate_primaries_fall_back_rather_than_raise(self):
+        """Range-valid coordinates can still be collinear and have no inverse."""
+        state = ModeState.neutral("HDR")
+        object.__setattr__(state, "panel_primaries", (0.3, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3127, 0.329))
+        described = icc_module.profile_primaries_xy(
+            build_profile("HDR", state, build_transform(state, hdr=True))
+        )
+        self.assertAlmostEqual(described[0][0], icc_module.PRIMARIES["HDR"][0], places=4)
+
+
+class NormalizePrimariesTests(unittest.TestCase):
+    """Primaries arrive from display drivers and from profiles written by older
+    builds, so neither their length nor their values can be taken on trust."""
+
+    def test_accepts_a_plausible_set(self):
+        values = (0.674, 0.314, 0.269, 0.685, 0.151, 0.060, 0.3127, 0.329)
+        self.assertEqual(normalize_primaries(values), values)
+
+    def test_rejects_wrong_length(self):
+        self.assertEqual(normalize_primaries((0.1, 0.2)), ())
+
+    def test_rejects_zero_y_which_would_divide_by_zero(self):
+        self.assertEqual(normalize_primaries((0.6, 0.0, 0.3, 0.6, 0.15, 0.06, 0.31, 0.33)), ())
+
+    def test_rejects_nan(self):
+        self.assertEqual(normalize_primaries((float("nan"),) * 8), ())
+
+    def test_rejects_out_of_range(self):
+        self.assertEqual(normalize_primaries((1.4, 0.3, 0.3, 0.6, 0.15, 0.06, 0.31, 0.33)), ())
+
+    def test_rejects_non_numeric(self):
+        self.assertEqual(normalize_primaries(None), ())
+        self.assertEqual(normalize_primaries("abcdefgh"), ())
+
+    def test_round_trips_through_state_serialization(self):
+        values = (0.674, 0.314, 0.269, 0.685, 0.151, 0.060, 0.3127, 0.329)
+        state = ModeState.neutral("HDR")
+        state.panel_primaries = values
+        self.assertEqual(ModeState.from_dict(state.to_dict(), "HDR").panel_primaries, values)
+
+    def test_corrupt_serialized_primaries_are_dropped_on_load(self):
+        state = ModeState.neutral("HDR")
+        payload = state.to_dict()
+        payload["panel_primaries"] = [0.5, 0.5]
+        self.assertEqual(ModeState.from_dict(payload, "HDR").panel_primaries, ())
