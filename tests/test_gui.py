@@ -1808,3 +1808,33 @@ class MetadataEchoTests(WindowTestCase):
         writes a fabricated figure into a profile."""
         self.default_profiles["HDR"] = "gone-from-disk.icm"
         self.assertTrue(self.window._active_profile_overrides_metadata(self.display))
+
+
+class BlackLevelPlausibilityTests(WindowTestCase):
+    """The pattern asks whether a shape is visible, which cannot separate "the panel
+    cannot show it" from "I cannot see it". Only the first belongs in a profile: recorded
+    as minimum luminance it tells Windows the display cannot go darker, and Windows
+    tone-maps against that."""
+
+    def test_a_black_reading_that_looks_like_room_lighting_is_flagged(self):
+        self.window._record_measurement("black-level", 0.1956)
+        self.assertIn("darkest level you can see", self.window.status_label.text())
+
+    def test_a_credible_black_reading_is_not_flagged(self):
+        self.window._record_measurement("black-level", 0.004)
+        self.assertIn("Recorded", self.window.status_label.text())
+        self.assertNotIn("darkest level you can see", self.window.status_label.text())
+
+    def test_zero_is_accepted_without_complaint(self):
+        """Effectively zero is the right answer on an emissive panel."""
+        self.window._record_measurement("black-level", 0.0)
+        self.assertNotIn("darkest level you can see", self.window.status_label.text())
+
+    def test_the_reading_is_still_stored(self):
+        """It is the user's measurement; the app doubts it, it does not discard it."""
+        self.window._record_measurement("black-level", 0.1956)
+        self.assertAlmostEqual(self.window.state.hdr.minimum_luminance_nits, 0.1956)
+
+    def test_peak_readings_are_not_subject_to_the_black_check(self):
+        self.window._record_measurement("peak-white", 940.0)
+        self.assertNotIn("darkest level you can see", self.window.status_label.text())

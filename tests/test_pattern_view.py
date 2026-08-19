@@ -91,6 +91,27 @@ class PatternViewTestCase(unittest.TestCase):
     def press(self, win, key):
         win.keyPressEvent(QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier))
 
+    def advance_step(self, win, level=None):
+        """Complete one guided step the way a user would.
+
+        A level-driven step will not record an untouched probe -- a starting value is not
+        a reading -- so the level has to actually move first.
+        """
+        if win.pattern.level_driven:
+            if level is None:
+                win.step_probe(1)
+            else:
+                win.set_probe(level)
+        return win.confirm_step()
+
+    def complete_run(self, win, levels=(0.004, 940.0, 612.0)):
+        """Walk the whole guided sequence, measuring at each step."""
+        supplied = list(levels)
+        while win.guided_step is not None:
+            level = supplied.pop(0) if (supplied and win.pattern.level_driven) else None
+            self.advance_step(win, level)
+        return win
+
 
 class ContextTests(PatternViewTestCase):
     def test_a_credible_panel_supplies_its_own_peak(self):
@@ -501,27 +522,25 @@ class GuidedSequenceTests(PatternViewTestCase):
 
     def test_recording_advances_to_the_next_step(self):
         win, _ = self.build()
-        win.accept_measurement()
+        self.advance_step(win)
         self.assertEqual(win.guided_step, 2)
         self.assertEqual(win.pattern.key, MEASUREMENT_SEQUENCE[1])
 
     def test_the_whole_sequence_records_every_figure_once(self):
         win, recorded = self.build()
-        for _ in GUIDED_SEQUENCE:
-            win.confirm_step()
+        self.complete_run(win)
         self.assertEqual([key for key, _ in recorded], list(MEASUREMENT_SEQUENCE))
 
     def test_the_run_ends_rather_than_looping(self):
         win, _ = self.build()
-        for _ in GUIDED_SEQUENCE:
-            win.confirm_step()
+        self.complete_run(win)
         self.assertIsNone(win.guided_step)
 
     def test_the_last_step_sets_the_tone_controls(self):
         """Three measurements and no adjustment ends the run halfway through the job."""
         win, _ = self.build()
         for _ in MEASUREMENT_SEQUENCE:
-            win.confirm_step()
+            self.advance_step(win)
         self.assertEqual(win.pattern.key, "tone-tracking")
         self.assertEqual(win.guided_step, len(GUIDED_SEQUENCE))
 
@@ -529,7 +548,7 @@ class GuidedSequenceTests(PatternViewTestCase):
         """Otherwise the run stalls on it with no way forward the overlay mentions."""
         win, _ = self.build()
         for _ in MEASUREMENT_SEQUENCE:
-            win.confirm_step()
+            self.advance_step(win)
         self.assertTrue(win.confirm_step())
         self.assertIsNone(win.guided_step)
 
@@ -538,7 +557,7 @@ class GuidedSequenceTests(PatternViewTestCase):
         before anything happened."""
         win, _ = self.build()
         self.assertLess(win.probe_nits, 1.0, "black level should start near black")
-        win.accept_measurement()
+        self.advance_step(win)
         self.assertGreater(win.probe_nits, 100.0, "peak should start high")
 
     def test_choosing_a_pattern_by_hand_leaves_the_sequence(self):
@@ -576,8 +595,7 @@ class CompletionTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in GUIDED_SEQUENCE:
-            win.confirm_step()
+        self.complete_run(win)
         return win
 
     def test_the_run_ends_in_a_stated_finished_state(self):
@@ -709,26 +727,22 @@ class MeasuredPeakFeedbackTests(PatternViewTestCase):
     def test_a_measured_peak_replaces_the_panels_claim(self):
         win = self.build()
         self.assertEqual(win._context.peak_nits, 1080.0)
-        win.confirm_step()               # black level
-        win.set_probe(1127.0)
-        win.confirm_step()               # peak white
+        self.advance_step(win, 0.004)    # black level
+        self.advance_step(win, 1127.0)   # peak white
         self.assertAlmostEqual(win._context.peak_nits, 1127.0)
 
     def test_a_measured_full_frame_replaces_it_too(self):
         win = self.build()
-        win.confirm_step()
-        win.set_probe(1127.0)
-        win.confirm_step()
-        win.set_probe(280.0)
-        win.confirm_step()               # full frame
+        self.advance_step(win, 0.004)
+        self.advance_step(win, 1127.0)
+        self.advance_step(win, 280.0)    # full frame
         self.assertAlmostEqual(win._context.max_full_frame_nits, 280.0)
 
     def test_later_patterns_use_the_measured_ceiling(self):
         """Otherwise the staircase and tracking cells would still be scaled to the claim."""
         win = self.build()
-        win.confirm_step()
-        win.set_probe(600.0)
-        win.confirm_step()
+        self.advance_step(win, 0.004)
+        self.advance_step(win, 600.0)
         self.assertAlmostEqual(win._context.ceiling_nits, 600.0)
 
     def test_measuring_clears_an_assumed_peak_warning(self):
@@ -739,9 +753,8 @@ class MeasuredPeakFeedbackTests(PatternViewTestCase):
         win.resize(800, 600)
         win._apply_guided_step()
         self.assertTrue(win._assumed_peak)
-        win.confirm_step()
-        win.set_probe(700.0)
-        win.confirm_step()
+        self.advance_step(win, 0.004)
+        self.advance_step(win, 700.0)
         self.assertFalse(win._assumed_peak)
 
 
@@ -839,10 +852,7 @@ class ApplyFromTheSummaryTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for value in (0.004, 940.0, 612.0):
-            win.set_probe(value)
-            win.confirm_step()
-        win.confirm_step()
+        self.complete_run(win)
         return win
 
     def test_enter_on_the_finished_screen_applies(self):
@@ -879,7 +889,7 @@ class ApplyFromTheSummaryTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        self.press(win, Qt.Key.Key_Return)
+        self.advance_step(win)
         self.assertEqual(calls, [], "Enter applied instead of advancing the run")
         self.assertEqual(win.guided_step, 2)
 
@@ -1017,8 +1027,7 @@ class TypedEntryTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in range(len(GUIDED_SEQUENCE)):
-            win.confirm_step()
+        self.complete_run(win)
         self.assertFalse(win.begin_edit())
 
     def test_the_overlay_shows_what_is_being_typed(self):
@@ -1223,8 +1232,7 @@ class LastStepGuidanceTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in range(len(GUIDED_SEQUENCE)):
-            self.press(win, Qt.Key.Key_Return)
+        self.complete_run(win)
         self.assertTrue(win._complete, "Enter did not finish the run")
         raw, width, height = win.render_summary(600, 500, 1.0)
         self.assertGreater(pattern_view._ink_extent(raw, width, height), 0)
@@ -1261,8 +1269,7 @@ class SummaryReturnTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in range(len(GUIDED_SEQUENCE)):
-            win.confirm_step()
+        self.complete_run(win)
         return win
 
     def test_the_summary_is_showing_when_the_run_ends(self):
@@ -1295,8 +1302,7 @@ class SummaryReturnTests(PatternViewTestCase):
         win.resize(800, 600)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for _ in range(len(GUIDED_SEQUENCE)):
-            win.confirm_step()
+        self.complete_run(win)
         win.select_pattern(0)
         self.press(win, Qt.Key.Key_S)
         self.press(win, Qt.Key.Key_Return)
@@ -1320,10 +1326,7 @@ class SummaryFittingTests(PatternViewTestCase):
         win.resize(width, height)
         self.addCleanup(win.deleteLater)
         win._apply_guided_step()
-        for value in (0.004, 940.0, 612.0):
-            win.set_probe(value)
-            win.confirm_step()
-        win.confirm_step()
+        self.complete_run(win)
         return win
 
     def test_the_summary_fits_at_every_common_shape(self):
@@ -1354,3 +1357,60 @@ class SummaryFittingTests(PatternViewTestCase):
         if run:
             bands.append(run)
         self.assertGreaterEqual(len(bands), 5, f"only {len(bands)} lines survived")
+
+
+class UntouchedProbeTests(PatternViewTestCase):
+    """Every step opens somewhere plausible so the first press moves towards the answer.
+    That convenience made an untouched step look exactly like a completed one: three
+    starting values were once recorded and reported back as measurements."""
+
+    def build(self):
+        recorded: list[tuple[str, float]] = []
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda key, nits: recorded.append((key, nits)))
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        return win, recorded
+
+    def test_enter_on_an_untouched_step_records_nothing(self):
+        win, recorded = self.build()
+        self.assertFalse(win.accept_measurement())
+        self.assertEqual(recorded, [])
+
+    def test_it_does_not_advance_either(self):
+        """Skipping forward would leave a gap that looks like a completed run."""
+        win, _ = self.build()
+        self.press(win, Qt.Key.Key_Return)
+        self.assertEqual(win.guided_step, 1)
+
+    def test_moving_the_level_makes_it_recordable(self):
+        win, recorded = self.build()
+        self.press(win, Qt.Key.Key_Right)
+        self.assertTrue(win.accept_measurement())
+        self.assertEqual(len(recorded), 1)
+
+    def test_typing_a_value_counts_as_moving_it(self):
+        win, recorded = self.build()
+        win.set_probe(0.004)
+        self.assertTrue(win.accept_measurement())
+        self.assertEqual(len(recorded), 1)
+
+    def test_each_new_step_starts_untouched_again(self):
+        """Otherwise one adjustment would authorise every later step."""
+        win, _ = self.build()
+        self.press(win, Qt.Key.Key_Right)
+        win.accept_measurement()
+        self.assertEqual(win.guided_step, 2)
+        self.assertFalse(win.accept_measurement())
+
+    def test_the_overlay_says_why_nothing_happened(self):
+        win, _ = self.build()
+        untouched = win.build_frame()
+        self.press(win, Qt.Key.Key_Right)
+        self.assertNotEqual(win.build_frame(), untouched)
+
+    def test_a_pattern_reached_by_number_key_also_starts_untouched(self):
+        win, recorded = self.build()
+        win.select_pattern(next(i for i, p in enumerate(PATTERNS) if p.key == "peak-white"))
+        self.assertFalse(win.accept_measurement())

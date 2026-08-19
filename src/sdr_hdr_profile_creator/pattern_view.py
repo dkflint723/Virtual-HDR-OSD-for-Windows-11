@@ -127,6 +127,7 @@ def render_overlay(
     total: int = 0,
     editing: str | None = None,
     tracks: list[tuple[str, int, int, int, int]] | None = None,
+    probe_moved: bool = True,
 ) -> tuple[bytes, int, int]:
     """Paint the guidance strip with Qt and hand back raw RGBA8.
 
@@ -240,7 +241,10 @@ def render_overlay(
             draw_track(y, pq_inverse_eotf(context.probe_nits), True, key=PROBE_TRACK_KEY)
             y += spacing(22)
             recorded = accepted.get(pattern.key) if accepted else None
-            if recorded is not None:
+            if not probe_moved and recorded is None:
+                painter.setPen(QColor(230, 190, 130, 255))
+                painter.drawText(margin, y, "Move the level before recording")
+            elif recorded is not None:
                 painter.setPen(QColor(150, 220, 150, 255))
                 unit = " nits" if context.absolute else ""
                 painter.drawText(margin, y, f"recorded {recorded:.4g}{unit}")
@@ -456,6 +460,7 @@ class PatternWindow(QWidget):
         self._step = 0
         self._complete = False
         self._showing_summary = False
+        self._probe_moved = False
         self.accepted: dict[str, float] = {}
         self.failure = ""
 
@@ -591,6 +596,7 @@ class PatternWindow(QWidget):
         code = max(0.0, min(1.0, code))
         nits = min(pq_eotf(code), PQ_MAX_NITS)
         self._context = replace(self._context, probe_nits=nits)
+        self._probe_moved = True
         self.refresh()
 
     @property
@@ -600,6 +606,7 @@ class PatternWindow(QWidget):
     def set_probe(self, nits: float) -> None:
         """Place the probe at an exact level, for a meter loop to drive the sequence."""
         self._context = replace(self._context, probe_nits=max(0.0, float(nits)))
+        self._probe_moved = True
         self.refresh()
 
     @property
@@ -618,6 +625,7 @@ class PatternWindow(QWidget):
         # level would mean holding an arrow for several seconds before anything happened.
         if self.pattern.levels is not None:
             self._start_level()
+            self._probe_moved = False
             self.refresh()
             return
         start = {
@@ -626,6 +634,7 @@ class PatternWindow(QWidget):
             "full-frame-white": max(80.0, self._context.max_full_frame_nits * 0.6),
         }.get(key, self._context.probe_nits)
         self._context = replace(self._context, probe_nits=start)
+        self._probe_moved = False
         self.refresh()
 
     def advance(self) -> bool:
@@ -816,6 +825,13 @@ class PatternWindow(QWidget):
         """
         if not self.pattern.level_driven or self._measure is None:
             return False
+        if not self._probe_moved:
+            # Every step opens somewhere plausible so the first press moves towards the
+            # answer. That convenience makes an untouched step look exactly like a
+            # completed one, and three starting values were once recorded and reported as
+            # readings. A measurement nobody took is worse than no measurement.
+            self.refresh()
+            return False
         measured = self._context.probe_nits
         self.accepted[self.pattern.key] = measured
         self._measure(self.pattern.key, measured)
@@ -863,7 +879,7 @@ class PatternWindow(QWidget):
             pattern, self._context, self._controls, self._active,
             assumed_peak=self._assumed_peak, accepted=self.accepted, scale=scale,
             step=self.guided_step, total=len(GUIDED_SEQUENCE), editing=self._editing,
-            tracks=self._tracks,
+            tracks=self._tracks, probe_moved=self._probe_moved,
         )
         # Where compose will put the strip, so a click can be matched to a track.
         self._overlay_origin = (

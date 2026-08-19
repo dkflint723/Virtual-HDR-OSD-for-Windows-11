@@ -1536,6 +1536,13 @@ class MainWindow(FluentWidget):
         self._save_state_soon()
         self._update_activity_bar()
 
+        display = self._selected_display()
+        if pattern_key == "black-level" and display is not None:
+            note = self._black_level_note(value, display)
+            if note:
+                self._set_status(note, "warning")
+                return
+
         warning = self._implausible_measurement(pattern_key)
         if warning:
             self._set_status(warning, "warning")
@@ -1548,6 +1555,34 @@ class MainWindow(FluentWidget):
 
     # A full-frame reading this close to peak means the display never actually clipped.
     FULL_FRAME_IMPLAUSIBLE_RATIO = 0.85
+
+    # Above this, a by-eye black reading is far more likely to describe the room than the
+    # panel. An emissive display's black is effectively zero, and even a good LCD sits
+    # around 0.05; anything higher is usually stray light or eyes that have not adapted.
+    SUSPICIOUS_BLACK_NITS = 0.05
+
+    def _black_level_note(self, measured: float, display: DisplayInfo) -> str:
+        """Say when a black reading looks like the room rather than the display.
+
+        The pattern asks whether a shape is visible, which cannot separate "the panel
+        cannot show it" from "I cannot see it" -- and only the first belongs in a profile.
+        Recorded as minimum luminance it tells Windows the display cannot go darker, and
+        Windows tone-maps against that.
+        """
+        if measured <= self.SUSPICIOUS_BLACK_NITS:
+            return ""
+        claimed = ""
+        if not self._active_profile_overrides_metadata(display):
+            capability = capability_for_device_name(display.gdi_name)
+            if capability is not None and capability.min_nits < measured / 4.0:
+                claimed = f" The display itself reports {capability.min_nits:g}."
+        return (
+            f"Recorded {measured:g} nits as the black level.{claimed} This test finds the "
+            "darkest level you can see, which in a lit room or with unadapted eyes is "
+            "brighter than the darkest the panel can show -- and it is the panel's figure "
+            "a profile is meant to carry. On an emissive display black is effectively "
+            "zero. Re-measure in the dark, or set it to zero, if that is the case here."
+        )
 
     def _implausible_measurement(self, pattern_key: str) -> str:
         """Say what a full-frame reading equal to peak actually means.
