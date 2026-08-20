@@ -2554,3 +2554,67 @@ class PeakPatchTargetTests(WindowTestCase):
     def test_an_unreadable_panel_falls_back_to_the_stored_figure(self):
         peak = self.requested_peak(stored=450.49, panel=None)
         self.assertAlmostEqual(peak, 450.49, places=2)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class FullscreenSurfaceLifetimeTests(WindowTestCase):
+    """Only one fullscreen swapchain at a time, and it must be released.
+
+    Both the pattern view and the measurement window are fullscreen
+    WA_PaintOnScreen windows owning a D3D swapchain on the display. The pattern
+    window's reference was assigned and never closed anywhere, so every open
+    leaked one; after enough of them the display stops handing them out and the
+    next open appears to freeze.
+    """
+
+    class FakeSurface:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    def test_opening_the_patterns_twice_does_not_leak_the_first(self):
+        first = self.FakeSurface()
+        self.window._pattern_window = first
+        self.window._close_fullscreen_surfaces()
+        self.assertTrue(first.closed)
+        self.assertIsNone(self.window._pattern_window)
+
+    def test_a_measurement_window_is_released_too(self):
+        surface = self.FakeSurface()
+        self.window._measure_window = surface
+        self.window._close_fullscreen_surfaces()
+        self.assertTrue(surface.closed)
+        self.assertIsNone(self.window._measure_window)
+
+    def test_closing_the_app_releases_a_fullscreen_surface(self):
+        """Otherwise it outlives the window that could have closed it, leaving a
+        black screen with no way back."""
+        from PySide6.QtGui import QCloseEvent
+
+        surface = self.FakeSurface()
+        self.window._pattern_window = surface
+        self.window.closeEvent(QCloseEvent())
+        self.assertTrue(surface.closed)
+
+    def test_the_patterns_refuse_to_open_during_a_measurement(self):
+        self.window._measure_window = self.FakeSurface()
+        self.window._open_pattern_view()
+        self.assertIn("measurement", self.window.status_label.text().lower())
+
+    def test_a_measurement_refuses_to_start_while_the_patterns_are_open(self):
+        self.window._pattern_window = self.FakeSurface()
+        with mock.patch.object(app_module, "find_spotread") as finder:
+            self.window._measure_with_meter()
+        finder.assert_not_called()
+        self.assertIn("patterns", self.window.status_label.text().lower())
+
+    def test_a_window_qt_already_destroyed_does_not_raise(self):
+        class Destroyed:
+            def close(self):
+                raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        self.window._pattern_window = Destroyed()
+        self.window._close_fullscreen_surfaces()
+        self.assertIsNone(self.window._pattern_window)

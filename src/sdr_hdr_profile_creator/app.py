@@ -1696,10 +1696,45 @@ class MainWindow(FluentWidget):
             "zero. Re-measure in the dark, or set it to zero, if that is the case here."
         )
 
+    def _close_fullscreen_surfaces(self) -> None:
+        """Release any pattern or measurement window still holding a swapchain.
+
+        Both are fullscreen WA_PaintOnScreen windows owning a D3D swapchain on
+        the display. Replacing the attribute without closing the old one leaks
+        that swapchain, and the leak is cumulative -- open the patterns a few
+        times over a session and the display eventually stops handing them out.
+        """
+        for attribute in ("_pattern_window", "_measure_window"):
+            window = getattr(self, attribute, None)
+            if window is None:
+                continue
+            setattr(self, attribute, None)
+            try:
+                window.close()
+            except Exception:
+                # A window already destroyed by Qt is not worth failing over.
+                pass
+
+    def _fullscreen_surface_busy(self) -> str:
+        """Why a fullscreen surface cannot be opened right now, or an empty string.
+
+        Two swapchains on one display is not a supported arrangement, and the
+        second one silently failing to present looks exactly like a freeze.
+        """
+        if getattr(self, "_measure_window", None) is not None:
+            return "A measurement is still running. Let it finish, or press Esc, first."
+        if getattr(self, "_pattern_window", None) is not None:
+            return "The calibration patterns are still open. Close them with Esc first."
+        return ""
+
     def _open_pattern_view(self) -> None:
         display = self._selected_display()
         if display is None:
             self._set_status("Select a display first.", "error")
+            return
+        busy = self._fullscreen_surface_busy()
+        if busy:
+            self._set_status(busy, "warning")
             return
         capability = capability_for_device_name(display.gdi_name)
         try:
@@ -1715,7 +1750,7 @@ class MainWindow(FluentWidget):
             capability, sdr_white, self._pattern_view_bindings(),
             panel=read_panel_metadata(display.device_path),
             measure=self._record_measurement,
-            on_close=lambda: self._restore_live_mode(previous_live),
+            on_close=lambda: self._pattern_view_closed(previous_live),
             apply=self._apply_from_pattern_view,
         )
         screen = self._screen_for(display)
@@ -1783,6 +1818,10 @@ class MainWindow(FluentWidget):
                 "shown in absolute luminance, which only means anything in HDR.",
                 "warning",
             )
+            return
+        busy = self._fullscreen_surface_busy()
+        if busy:
+            self._set_status(busy, "warning")
             return
 
         spotread = self._spotread()
@@ -2011,6 +2050,11 @@ class MainWindow(FluentWidget):
             f"({contrast_text}). {white_note}. Press Apply Edits to store it.",
             level,
         )
+
+    def _pattern_view_closed(self, previous_live: bool) -> None:
+        """Forget the window as it closes, so the next open is not refused."""
+        self._pattern_window = None
+        self._restore_live_mode(previous_live)
 
     def _apply_from_pattern_view(self) -> bool:
         """Apply without leaving the patterns, so the readings are not lost on exit."""
@@ -2886,6 +2930,9 @@ class MainWindow(FluentWidget):
         self.status_card.setStyleSheet(f"SimpleCardWidget {{ background: {colors.get(level, colors['ok'])}; }}")
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # A fullscreen surface outlives this window otherwise, holding a swapchain
+        # and leaving a black screen with nothing left to close it.
+        self._close_fullscreen_surfaces()
         self.live_timer.stop()
         self.mode_timer.stop()
         self.watchdog_timer.stop()
