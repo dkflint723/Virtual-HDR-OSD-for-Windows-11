@@ -174,7 +174,7 @@ def render_overlay(
             small.setPointSize(points(10))
             small.setBold(True)
             painter.setFont(small)
-            painter.drawText(margin, y + spacing(14), f"STEP {step} OF {total}")
+            pass  # MUTANT: step counter never drawn
             y += spacing(30)
 
         heading = QFont()

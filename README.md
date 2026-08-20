@@ -10,14 +10,27 @@ Most HDR monitors lock or substantially reduce access to their physical OSD cont
 
 It began as a replacement for those OSD controls, and still does that: correcting a warm or cool cast, reducing a green or magenta bias, or making tonal changes the monitor's HDR menu does not expose.
 
-It now also generates its own calibration patterns. A guided sequence measures black level, peak luminance and maximum full-frame luminance by the same disappearing-shape method Windows HDR Calibration uses, and writes those figures into the profile's MHC2 header. A further pattern sets the tone controls against a near-threshold target rather than by impression. Patterns are presented through a Direct3D swapchain in scRGB, so they address absolute luminance across the full ST.2084 range instead of being limited to the SDR white level.
+It now also generates its own calibration patterns. A guided sequence measures black level and peak luminance by the same disappearing-shape method Windows HDR Calibration uses, and writes those figures into the profile's MHC2 header. Sustained full-frame luminance is not among them: the brightness limiter dims a shape and its surround together, so that pattern found the signal's clipping point rather than a luminance. It is read from the panel's EDID instead. A further pattern sets the tone controls against a near-threshold target rather than by impression. Patterns are presented through a Direct3D swapchain in scRGB, so they address absolute luminance across the full ST.2084 range instead of being limited to the SDR white level.
 
 **In addition to the app, a watchdog has been integrated that fixes the bug causing incorrect switching between SDR and HDR profiles in Windows 11. This watchdog is standalone and can be distributed without the app. Feel free to use it. Below is a detailed explanation of how it works.**
 
 > [!NOTE]
-> Every measurement this tool takes is made by eye. That is the same basis Windows HDR Calibration works on, and it is genuinely useful, but it is not metrology: it depends on the room, on adaptation, and on the observer. Where a figure matters, verify it with a meter.
+> The figures this tool writes come from three places, and they are not equally strong.
 >
-> Nothing here characterises a display's colour. Gamut, primaries and white point are read from the profile and the panel, never measured.
+> **Read from the panel.** Peak, sustained and black luminance, and the display's primaries,
+> all come from its EDID. These are what the model was specified at, not your individual
+> unit measured, and they do not notice drift -- but they are exact, need no judgement, and
+> are the default.
+>
+> **By eye.** The optional test patterns work the way Windows HDR Calibration does. A
+> reading made by eye is genuinely useful, but it is not metrology: it depends on the
+> room, on adaptation, and on the observer.
+>
+> **Measured with an instrument.** The optional colorimeter path measures luminance and
+> white balance. It does not characterise the gamut and cannot: the patches are presented
+> in scRGB, so they report the encoding rather than the panel. A colorimeter also needs a
+> spectral correction matched to the panel type, and without one its chromaticity readings
+> can be several hundred kelvin out on a quantum-dot display.
 
 ---
 
@@ -110,9 +123,17 @@ reproduces the original behaviour exactly.
 A profile needs to know what the display can do. There are two ways to supply that, and either
 produces a complete profile.
 
-- **Build it from the display itself.** Pick the first entry in the **HDR** dropdown,
-  *Build from this display's own panel data*. The panel reports its own primaries through DXGI
-  and its luminance through EDID, and both go straight into the profile. Nothing to download.
+- **Build it from the display itself.** Press **Calibrate Display** in the top bar, or pick
+  the first entry in the **HDR** dropdown, *Build from this display's own panel data*. The
+  panel's luminance *and* its primaries are read from its EDID, and both go straight into
+  the profile. Nothing to download.
+
+  Primaries come from EDID rather than DXGI on purpose. `DXGI_OUTPUT_DESC1` reports
+  whatever ICC profile is currently associated, not the panel: on one display it answered
+  (0.6746, 0.3144) for red under one profile and (0.6486, 0.3312) under the next, each
+  matching that profile's own colorant tags, while the EDID said (0.6836, 0.3047)
+  throughout. A profile written from DXGI's answer becomes DXGI's next answer. DXGI is
+  kept only as a fallback for a panel whose EDID cannot be read.
 - **Start from a profile you already have.** Anything from Microsoft's free **Windows HDR
   Calibration**, or from calibration software such as Calman or DisplayCAL, works as the base.
 
@@ -134,7 +155,7 @@ of what is already installed -- no round trip through Windows Settings, no impor
 4. Set the **SDR** dropdown (see below). If another program calibrates your SDR, choose *Leave unmanaged*.
 5. Use **Import…** only for a file that is not installed in the Windows colour folder.
 6. Enable **Live Apply** if you want every adjustment to be reflected on the display automatically.
-7. Make small tonal and color corrections. **Reset All Sliders** returns everything to neutral, and **Revert to Base** reloads the base profile untouched.
+7. Make small tonal and color corrections. **Reset Sliders** returns everything to neutral, and **Revert** reloads the base profile untouched.
 8. Flip the **HDR** switch in row 1 off and on when you want to compare white balance, overall color appearance, and perceived brightness against the SDR desktop.
 9. Press **Apply Edits** to install and associate the result.
 10. Turn on **Lock Profile** so Windows cannot drop the association on the next mode change.
@@ -188,7 +209,8 @@ The builder intentionally does **not** create a second standalone-folder distrib
 
 # Interface overview
 
-The top bar is numbered. Everything that writes to your Windows colour
+The top bar is numbered. **Calibrate Display**, above it, writes a profile and makes it the
+Windows default on its own; everything else that writes to your Windows colour
 configuration lives at the right-hand end of row 3:
 
 - **1 · Target Display** — selects the display, and turns its HDR on or off without leaving the app.
@@ -206,7 +228,8 @@ Below that:
   puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
   closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
   dismissed administrator prompt leaves it off rather than lying about it.
-- **Watchdog Settings…** — the same install/remove actions with a fuller explanation.
+- **Watchdog…** — the same install/remove actions with a fuller explanation, and the only
+  way to force a reinstall while the watchdog is already running.
 - **Help** — the full usage guide, control reference, and recovery notes.
 
 Two bars run along the bottom:
@@ -470,7 +493,7 @@ Use this once the desired appearance has been reached. Because the exported file
 embeds your exact slider positions, re-importing it restores them precisely,
 which makes an export a reliable backup before experimenting further.
 
-## Revert to Base
+## Revert
 
 Discards your slider edits and reloads the base profile you imported, exactly as
 it is on disk. Asks for confirmation first, and cannot be undone.
@@ -479,12 +502,12 @@ Use it when a session of adjustments has drifted somewhere you do not want, and
 you would rather restart from the Windows HDR Calibration result than try to
 reverse each control.
 
-## Reset All Sliders
+## Reset Sliders
 
 Returns every control to its neutral default, keeping the loaded base profile.
 Asks for confirmation first, and cannot be undone.
 
-The difference from **Revert to Base**: this neutralises your correction layer
+The difference from **Revert**: this neutralises your correction layer
 while leaving the base profile selected, whereas Revert re-reads the file and
 restores whatever slider state that file implies.
 
@@ -501,7 +524,7 @@ Use this when **Live Apply** is disabled or whenever an explicit final applicati
 > **Apply Edits** applies the sliders exactly as they currently stand. It does not
 > re-read the profile selected in the HDR picker, so clicking it can never
 > silently discard adjustments you have just made. To deliberately go back to the
-> file on disk, use **Revert to Base**.
+> file on disk, use **Revert**.
 
 If Windows is not in HDR mode for the selected display, applying is refused with
 an explanatory message rather than silently doing nothing.
@@ -611,10 +634,10 @@ While the GUI is open, **Auto** reads the current Windows SDR white level and re
 
 # Measuring with a colorimeter
 
-Everything the app can work out on its own is *declared* rather than measured. EDID
-carries the luminance the panel's model was specified at and DXGI reports its primaries;
-neither is your individual unit measured, and neither notices that a panel drifts.
-A colorimeter closes that gap.
+Everything the app can work out on its own is *declared* rather than measured: the EDID
+carries the luminance and the primaries the panel's model was specified at. That is not
+your individual unit measured, and it does not notice that a panel drifts. A colorimeter
+closes part of that gap -- luminance and white balance, but not the gamut; see below.
 
 ## What you need
 
@@ -650,8 +673,13 @@ The screen goes black and each patch appears in turn, centred. Put the meter ove
 middle of the screen and leave it there. Progress is reported in the status line, and
 Esc cancels -- a cancelled run changes nothing at all.
 
-When it finishes, the measured peak, black and primaries replace what the profile had.
-Press **Apply Edits** to write them out.
+When it finishes, the measured peak, black and white balance replace what the profile had.
+The primaries are deliberately left alone: the patches are presented in scRGB, which is
+defined on BT.709, so a measured "red" is BT.709 red as the display renders it rather than
+the display's own primary. On a P3 panel whose native green is (0.2698, 0.6859) the green
+patch read (0.3141, 0.5892) -- 0.0141 from BT.709 and 0.0967 from the panel. Those readings
+are exactly right for white balance, which acts on the signal this app sends, and useless
+as a description of the gamut. Press **Apply Edits** to write the result out.
 
 ## Measuring more than once
 
@@ -668,7 +696,7 @@ neither. Reset, rebuild from the panel, apply, then measure.
 
 ## What gets measured
 
-Five patches, each shown in the same centred window covering a tenth of the screen, on
+Six patches, each shown in the same centred window covering a tenth of the screen, on
 black. Holding the window size constant matters on an emissive panel, where the
 brightness limiter responds to total output and a full-screen patch would not measure the
 same thing as a small one.
@@ -676,8 +704,8 @@ same thing as a small one.
 | Patch | What it establishes |
 |---|---|
 | Black | The panel's real black floor, and with peak white its contrast |
-| Peak white | Actual peak luminance, and the white point |
-| Red, green, blue | The real primaries, replacing the ones DXGI reports |
+| Peak white | Actual peak luminance, at the window size stated beside it |
+| Reference white, red, green, blue | The white balance correction, shown at 100 nits so the brightness limiter is not engaged |
 
 Black is measured first, while the panel is still cool: a long bright sequence warms an
 emissive display, and the black floor is the reading most disturbed by that.
@@ -735,7 +763,7 @@ destroys the property that pattern depends on.
 
 ## The guided run
 
-The view opens on a four-step sequence and states which step it is on.
+The view opens on a 3-step sequence and states which step it is on.
 
 | step | what it measures | how |
 | --- | --- | --- |
@@ -1017,7 +1045,7 @@ This is the recommended method for very fine visual matching.
 Returns only that individual control to its neutral/default value.
 
 It does not reset the other controls or replace the imported base profile. To
-neutralise every control at once, use **Reset All Sliders** in the top bar.
+neutralise every control at once, use **Reset Sliders** in the top bar.
 
 ---
 
@@ -1081,10 +1109,10 @@ Win + Alt + B
 
 The watchdog exists specifically to make those mode transitions more deterministic.
 
-## Watchdog Settings in the GUI
+## The watchdog in the GUI
 
 The main window exposes the watchdog two ways. **Lock Profile** in row 3 is a switch that
-installs or removes it directly; **Watchdog Settings…** opens a dialog with the same **Install
+installs or removes it directly; **Watchdog…** opens a dialog with the same **Install
 Watchdog** and **Uninstall Watchdog** actions and a fuller explanation.
 
 The switch is driven by the watchdog's own singleton mutex, so it reflects whether the process is

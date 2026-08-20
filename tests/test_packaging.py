@@ -199,9 +199,25 @@ class ReadmeAccuracyTests(unittest.TestCase):
         the by-eye measurements already exist."""
         self.assertNotIn("colorimeter/spectrophotometer workflow", self.text())
 
-    def test_the_by_eye_limitation_is_still_stated_plainly(self):
-        """Broadening the claims must not quietly drop the caveat that matters."""
-        self.assertIn("made by eye", self.text())
+    def test_every_source_of_a_figure_is_still_caveated(self):
+        """Broadening the claims must not quietly drop the caveats that matter.
+
+        There are three sources now, not one, and each is weak in its own way:
+        EDID describes the model rather than the unit, the patterns are judged by
+        eye, and a colorimeter without a spectral correction matched to the panel
+        can be hundreds of kelvin out on a quantum-dot display."""
+        text = self.text()
+        self.assertIn("made by eye", text)
+        self.assertIn("not metrology", text)
+        self.assertIn("spectral correction", text)
+
+    def test_the_gamut_is_not_claimed_as_measured(self):
+        """The colorimeter path cannot characterise a gamut: the patches are
+        presented in scRGB, so they report the encoding rather than the panel.
+        Claiming otherwise sent a wrong gamut into a profile once already."""
+        text = self.text()
+        self.assertNotIn("The real primaries, replacing the ones DXGI reports", text)
+        self.assertNotIn("primaries through DXGI", text)
 
 
 class InstallerWriteVerificationTests(unittest.TestCase):

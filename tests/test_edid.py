@@ -13,6 +13,7 @@ import unittest
 from sdr_hdr_profile_creator.edid import (
     PanelMetadata,
     parse_hdr_static_metadata,
+    _luminance_from_code,
     parse_chromaticity,
     read_panel_metadata,
 )
@@ -50,8 +51,18 @@ class LuminanceDecodingTests(unittest.TestCase):
         self.assertAlmostEqual(panel.peak_nits, 1015.24, places=1)
         self.assertAlmostEqual(panel.max_frame_average_nits, 265.05, places=1)
 
-    def test_code_zero_is_the_fifty_nit_base(self):
-        self.assertAlmostEqual(self.parsed(peak=0).peak_nits, 50.0, places=4)
+    def test_a_zero_byte_is_an_unfilled_field_rather_than_fifty_nits(self):
+        """The formula really does give 50 for code 0, and _luminance_from_code
+        still says so. But a panel that sends the full block and leaves the byte
+        at 0x00 has stated nothing -- CTA-861's way of declining is a shorter
+        block, which the parser handles by length. Reading it literally was
+        actively harmful: 50 cleared the 40-nit credibility floor so the figure
+        was believed, it is truthy so every `frame_average or peak` fallback was
+        skipped, and the 80-nit clamps turned peak and sustained alike into
+        exactly 80 on a 1000-nit display."""
+        self.assertAlmostEqual(_luminance_from_code(0), 50.0, places=4)
+        self.assertEqual(self.parsed(peak=0).peak_nits, 0.0)
+        self.assertFalse(self.parsed(peak=0, frame_average=0).credible)
 
     def test_thirty_two_codes_is_a_doubling(self):
         self.assertAlmostEqual(self.parsed(peak=32).peak_nits, 100.0, places=4)
@@ -195,3 +206,58 @@ class ChromaticityTests(unittest.TestCase):
         area = abs((gx - rx) * (by - ry) - (bx - rx) * (gy - ry)) / 2
         self.assertGreater(area, 0.1520)   # DCI-P3
         self.assertLess(area, 0.2119)      # BT.2020, which bounds anything real
+
+
+class UnstatedLuminanceTests(unittest.TestCase):
+    """A panel that carries the block but leaves the luminance bytes at zero.
+
+    Those three bytes are optional, so zero means "not stated". Read literally
+    through 50 * 2^(code/32) it came out as 50 nits, which cleared the 40-nit
+    credibility floor, was truthy so every ``frame_average or peak`` fallback was
+    skipped, and was then raised to exactly 80 by the clamps. A 1000-nit panel
+    would have been calibrated as an 80-nit one, with Windows tone-mapping
+    everything to a twelfth of what it can do.
+    """
+
+    def synthetic(self, peak_code, average_code, minimum_code, length=6):
+        base = bytearray(128)
+        extension = bytearray(128)
+        extension[0] = 0x02          # CTA-861 extension
+        extension[2] = 20            # first detailed timing descriptor
+        extension[4] = (7 << 5) | length
+        extension[5] = 0x06          # HDR static metadata
+        extension[6] = 0x04          # ET_2 = PQ
+        extension[7] = 0x00
+        extension[8] = peak_code
+        extension[9] = average_code
+        extension[10] = minimum_code
+        return bytes(base + extension)
+
+    def test_the_formula_stays_faithful_to_the_specification(self):
+        """50 * 2^(0/32) really is 50. The judgement about an unfilled byte
+        belongs in the parser, not in the arithmetic."""
+        self.assertAlmostEqual(_luminance_from_code(0), 50.0, places=4)
+
+    def test_a_nonzero_code_is_unaffected(self):
+        self.assertAlmostEqual(_luminance_from_code(1), 51.095, places=2)
+        self.assertAlmostEqual(_luminance_from_code(0x9A), 1405.0, places=0)
+
+    def test_a_block_with_no_luminance_declared_is_not_credible(self):
+        panel = parse_hdr_static_metadata(self.synthetic(0, 0, 0))
+        self.assertIsNotNone(panel)
+        self.assertEqual(panel.peak_nits, 0.0)
+        self.assertEqual(panel.max_frame_average_nits, 0.0)
+        self.assertFalse(panel.credible)
+
+    def test_a_panel_that_does_declare_figures_is_credible(self):
+        panel = parse_hdr_static_metadata(self.synthetic(0x9A, 0x76, 0x08))
+        self.assertTrue(panel.credible)
+        self.assertGreater(panel.peak_nits, 1000.0)
+        self.assertGreater(panel.max_frame_average_nits, 100.0)
+
+    def test_the_development_panels_own_figures_still_parse(self):
+        """1015.24 / 265.05 / 0.000156, read from the real display."""
+        panel = parse_hdr_static_metadata(self.synthetic(0x92, 0x6D, 0x0A))
+        self.assertTrue(panel.credible)
+        self.assertGreater(panel.peak_nits, 900.0)
+        self.assertLess(panel.max_frame_average_nits, panel.peak_nits / 2)

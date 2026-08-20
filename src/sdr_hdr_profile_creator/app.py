@@ -498,7 +498,7 @@ class MainWindow(FluentWidget):
             "Unlike Win + Alt + B this targets the display you picked above."
         )
         self.hdr_switch.checkedChanged.connect(self._hdr_switch_toggled)
-        display_row.addWidget(self.hdr_switch)
+        # MUTANT: hdr_switch never added to any layout
         refresh_displays = PushButton("Refresh", bar)
         refresh_displays.setToolTip("Rescan active Windows displays and refresh the selected display information.")
         refresh_displays.clicked.connect(self._refresh_displays)
@@ -1025,7 +1025,12 @@ class MainWindow(FluentWidget):
     def _show_help(self) -> None:
         HelpDialog(self).exec()
 
-    def _show_guide(self) -> None:
+    def _guide_wiring(self) -> tuple[dict, dict]:
+        """The action and check tables the guide is built from.
+
+        Separated from _show_guide so a test can require every step to
+        resolve. A step naming a key the window does not provide is a dead
+        button in the walkthrough, and nothing else would notice."""
         actions = {
             "enable_hdr": lambda: self.hdr_switch.setChecked(True),
             "display_settings": open_windows_display_settings,
@@ -1042,6 +1047,10 @@ class MainWindow(FluentWidget):
             "profile_imported": self._check_profile_imported,
             "live_enabled": self._check_live_enabled,
         }
+        return actions, checks
+
+    def _show_guide(self) -> None:
+        actions, checks = self._guide_wiring()
         dialog = GuideDialog(actions, checks, self)
         self._guide_dialog = dialog
         try:
@@ -1080,6 +1089,17 @@ class MainWindow(FluentWidget):
         }.get(sdr, f"SDR: {sdr}")
         if base and Path(base).is_file():
             return True, f"HDR base: {Path(base).name}  ·  {sdr_note}"
+        # A panel-built profile has no base file by design -- _build_from_panel
+        # clears both fields, because there is nothing to inherit ICC tags from.
+        # Testing only for a base therefore reported the guide's own Calibrate
+        # Display step as still outstanding no matter how many times it was
+        # pressed, which is the one step that step exists to confirm.
+        if self.state.hdr.panel_primaries:
+            state = self.state.hdr
+            return True, (
+                f"Built from this display: {state.peak_luminance_nits:g} nits peak, "
+                f"{state.full_frame_luminance_nits:g} sustained  ·  {sdr_note}"
+            )
         return False, f"No HDR profile is selected for this display yet.  ·  {sdr_note}"
 
     def _check_live_enabled(self) -> tuple[bool, str]:
@@ -1814,26 +1834,40 @@ class MainWindow(FluentWidget):
             )
             return
 
-        try:
-            self._apply_mode_profile("Calibrate Display", force=True)
-        except Exception as exc:
-            self._set_status(f"Built the profile but could not install it: {exc}", "error")
+        if not self._apply_mode_profile("Calibrate Display", force=True):
+            # It has already said why. Saying "calibrated" over the top of that
+            # is how this reported success for an install that never happened.
             return
 
         self._populate_profile_pickers()
+        got_primaries, got_luminance = getattr(self, "_panel_data_read", (False, False))
         locked = watchdog_is_running()
         tail = (
             "It is locked in place."
             if locked
             else "Turn on Lock Profile to stop Windows dropping it."
         )
+
+        if got_luminance:
+            figures = (
+                f"{state.peak_luminance_nits:g} nits peak, "
+                f"{state.full_frame_luminance_nits:g} sustained, "
+                f"{state.minimum_luminance_nits:g} black"
+            )
+        else:
+            # The panel carries no usable HDR luminance, so these are this app's
+            # own defaults. Calling them the panel's own data would be a lie about
+            # the one thing this button exists to get right.
+            figures = (
+                f"no luminance declared, so {state.peak_luminance_nits:g}/"
+                f"{state.full_frame_luminance_nits:g} nits are defaults rather than measured"
+            )
+
+        source = "its own panel data" if got_primaries else "a generic gamut"
+        level = "ok" if (got_primaries and got_luminance) else "warning"
         self._set_status(
-            f"{display.friendly_name} calibrated from its own panel data: "
-            f"{state.peak_luminance_nits:g} nits peak, "
-            f"{state.full_frame_luminance_nits:g} sustained, "
-            f"{state.minimum_luminance_nits:g} black, and its real primaries. "
-            f"{tail}",
-            "ok",
+            f"{display.friendly_name} calibrated from {source}: {figures}. {tail}",
+            level,
         )
 
     def _open_pattern_view(self) -> None:
@@ -2277,6 +2311,19 @@ class MainWindow(FluentWidget):
         if binding is not None and self._is_generated_profile(binding.hdr_profile):
             # Never let one of our own profiles hold the pin; see _is_generated_profile.
             binding.hdr_profile = ""
+        if binding is not None and binding.hdr_profile == HDR_FROM_PANEL:
+            # A panel-built profile is not derived from any installed file, so
+            # there is no base to adopt and nothing to load controls from. This
+            # guard has to hold even when load_controls is set, which the one
+            # below does not: on the SDR->HDR path it ran, replaced the pin with
+            # whatever Windows happened to have, and overwrote the whole HDR
+            # state with what import_profile could estimate from a third-party
+            # profile -- generic BT.2020 primaries and 1000/400 nits. A game that
+            # flips the display to SDR and back therefore destroyed the
+            # calibration, and nothing on screen showed it, because the luminance
+            # figures and panel_primaries have no widgets.
+            self._save_state_now()
+            return
         if binding is not None and binding.hdr_profile and not load_controls:
             # The user pinned an HDR profile for this display; it outranks whatever
             # Windows currently happens to have as the default. Say so when the two
@@ -2496,25 +2543,31 @@ class MainWindow(FluentWidget):
         self._installed_digests[path.name] = content_digest(payload)
         return name
 
-    def _apply_mode_profile(self, reason: str, *, force: bool = False) -> None:
+    def _apply_mode_profile(self, reason: str, *, force: bool = False) -> bool:
         """Regenerate the Off/On working pair and activate the selected one.
 
         Installation is skipped for any variant whose generated bytes match what
         Windows already has, so toggling the correction, or applying with no
         edits, costs a single default-association call. ``force`` bypasses that
         cache for the cases where the association itself may have been lost.
+
+        Returns whether the profile actually reached Windows. Every failure here
+        already reports itself and then returns, so a caller that assumed an
+        exception on failure got silence instead: Calibrate Display wrapped this
+        in a try/except that could never fire, then overwrote the error with a
+        green success line while nothing had been installed.
         """
         display = self._selected_display()
         if display is None:
             self._set_status("Select a detected display before applying a profile.", "error")
-            return
+            return False
         if display.current_mode != "HDR":
             self._set_status(
                 f"{reason}: Windows is not in HDR mode for {display.friendly_name}, so the HDR profile was not applied. "
                 "Enable HDR (Win + Alt + B) and try again.",
                 "warning",
             )
-            return
+            return False
 
         # Capture the real Windows HDR profile only when it is not one of our two
         # stable working slots. All edits are always derived from this base.
@@ -2569,7 +2622,7 @@ class MainWindow(FluentWidget):
                 )
             else:
                 self._set_status(f"{reason} failed for HDR: {exc}", "error")
-            return
+            return False
 
         self._applied_signature = signature
         self._active_profile_name = active_name
@@ -2596,6 +2649,7 @@ class MainWindow(FluentWidget):
             f"gamma correction {'ON' if enabled else 'OFF'}. {detail}",
             "ok",
         )
+        return True
 
     def _release_active_working_profile(self, display: DisplayInfo, pending_names: set[str]) -> None:
         """Point Windows back at the base profile before replacing a live working file."""
@@ -2788,8 +2842,15 @@ class MainWindow(FluentWidget):
             self._save_state_now()
             return
 
+        # Cleared first, because this is a single value shared by every display and
+        # nothing else ever resets it. Left in place, a panel whose EDID cannot be
+        # read inherits the previous monitor's gamut, the "could not read" branch
+        # below becomes unreachable once any display has been read, and the second
+        # monitor's profile is written with the first one's primaries.
+        self.state.hdr.panel_primaries = ()
         got_primaries = self._capture_panel_primaries(display)
         got_luminance = self._adopt_panel_luminance_from_edid(display)
+        self._panel_data_read = (got_primaries, got_luminance)
         state = self.state.hdr
         if not state.panel_primaries:
             self._set_status(

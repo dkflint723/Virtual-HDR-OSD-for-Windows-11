@@ -2740,3 +2740,151 @@ class DeferredCallbackTests(WindowTestCase):
     # exists, and asserts a guarantee the context object does not make: Qt
     # cancels the *scheduled call*, it does not make the method safe to invoke
     # by hand afterwards. A test that did was written, failed, and was wrong.
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class CalibrationDurabilityTests(WindowTestCase):
+    """Findings from a review pass, each of which silently produced a wrong profile."""
+
+    PANEL_XY = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
+                0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
+
+    def use_panel(self, primaries=None, peak=1015.24, frame_average=265.05, pq=True):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        panel = PanelMetadata(
+            peak_nits=peak, max_frame_average_nits=frame_average, min_nits=0.000156,
+            supports_pq=pq, primaries=self.PANEL_XY if primaries is None else primaries,
+        )
+        patcher = mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return panel
+
+    # -- reporting the truth ---------------------------------------------------
+
+    def test_a_failed_install_is_not_reported_as_success(self):
+        """_apply_mode_profile catches everything internally, so a caller that
+        expected an exception got silence and painted a green line over the
+        error it had already written."""
+        self.use_panel()
+        with mock.patch.object(self.window, "_apply_mode_profile", return_value=False):
+            self.window._calibrate_display()
+        self.assertNotIn("calibrated", self.window.status_label.text().lower())
+
+    def test_apply_reports_failure_when_the_display_is_not_in_hdr(self):
+        self.display.advanced_color_kind = "SDR"
+        self.window._current_display_snapshot = self.display
+        self.assertFalse(self.window._apply_mode_profile("test"))
+
+    def test_apply_reports_success_when_it_installs(self):
+        self.assertTrue(self.window._apply_mode_profile("test"))
+
+    def test_a_panel_that_declares_no_luminance_is_not_called_panel_data(self):
+        """Otherwise the defaults 1000/400 are reported as the display's own."""
+        self.use_panel(peak=0.0, frame_average=0.0, pq=False)
+        self.window._calibrate_display()
+        text = self.window.status_label.text().lower()
+        self.assertIn("defaults rather than measured", text)
+
+    # -- not inheriting another display's gamut --------------------------------
+
+    def test_primaries_do_not_survive_a_display_that_cannot_be_read(self):
+        """panel_primaries is one value shared by every display. Left in place,
+        a second monitor is calibrated with the first one's gamut."""
+        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        self.use_panel(primaries=())
+        with mock.patch.object(app_module, "capability_for_device_name", lambda _n: None):
+            self.window._build_from_panel(self.window._selected_binding())
+        self.assertEqual(self.window.state.hdr.panel_primaries, ())
+
+    def test_the_could_not_read_branch_is_reachable(self):
+        """It was unreachable once any display had ever been read."""
+        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        self.use_panel(primaries=())
+        with mock.patch.object(app_module, "capability_for_device_name", lambda _n: None):
+            self.window._build_from_panel(self.window._selected_binding())
+        self.assertIn("could not read", self.window.status_label.text().lower())
+
+    # -- surviving a display mode change ---------------------------------------
+
+    def test_an_sdr_to_hdr_transition_does_not_wipe_a_panel_calibration(self):
+        """A game that flips the display to SDR and back ran the load_controls
+        path, which replaced the pin and overwrote the whole HDR state with what
+        could be estimated from a third-party profile: generic primaries and
+        1000/400 nits."""
+        self.use_panel()
+        self.window._calibrate_display()
+        before = (
+            self.window.state.hdr.panel_primaries,
+            self.window.state.hdr.peak_luminance_nits,
+            self.window.state.hdr.full_frame_luminance_nits,
+        )
+        self.assertEqual(before[0], self.PANEL_XY)
+
+        # What the SDR->HDR branch does: adopt whatever Windows now reports.
+        self.default_profiles["HDR"] = "BaseCalibration.icm"
+        self.window._capture_current_hdr_base(self.display, load_controls=True)
+
+        after = (
+            self.window.state.hdr.panel_primaries,
+            self.window.state.hdr.peak_luminance_nits,
+            self.window.state.hdr.full_frame_luminance_nits,
+        )
+        self.assertEqual(after, before)
+
+    def test_the_from_panel_pin_survives_the_transition(self):
+        self.use_panel()
+        self.window._calibrate_display()
+        self.default_profiles["HDR"] = "BaseCalibration.icm"
+        self.window._capture_current_hdr_base(self.display, load_controls=True)
+        binding = self.window._selected_binding()
+        self.assertEqual(binding.hdr_profile, app_module.HDR_FROM_PANEL)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class GuideProgressTests(WindowTestCase):
+    """The guide reports progress; it has to be able to see the work being done."""
+
+    PANEL_XY = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
+                0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
+
+    def test_calibrating_from_the_panel_satisfies_the_step_that_asks_for_it(self):
+        """_build_from_panel clears base_profile and imported_profile by design,
+        so a check that tested only for those reported the guide's own Calibrate
+        Display step as outstanding however many times it was pressed."""
+        self.window.state.hdr.base_profile = ""
+        self.window.state.hdr.imported_profile = ""
+        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        satisfied, detail = self.window._check_profile_imported()
+        self.assertTrue(satisfied, detail)
+        self.assertIn("Built from this display", detail)
+
+    def test_a_display_with_nothing_chosen_is_still_reported_as_outstanding(self):
+        self.window.state.hdr.base_profile = ""
+        self.window.state.hdr.imported_profile = ""
+        self.window.state.hdr.panel_primaries = ()
+        satisfied, detail = self.window._check_profile_imported()
+        self.assertFalse(satisfied)
+        self.assertIn("No HDR profile", detail)
+
+    def test_an_installed_base_profile_still_satisfies_it(self):
+        self.window.state.hdr.panel_primaries = ()
+        self.window.state.hdr.base_profile = str(self.color_dir / "BaseCalibration.icm")
+        satisfied, detail = self.window._check_profile_imported()
+        self.assertTrue(satisfied)
+        self.assertIn("BaseCalibration.icm", detail)
+
+    def test_every_guide_step_action_and_check_resolves(self):
+        """A step naming an action or check the window does not provide is a
+        dead button in the walkthrough."""
+        from sdr_hdr_profile_creator.dialogs import GUIDE_STEPS
+
+        actions, checks = self.window._guide_wiring()
+        for step in GUIDE_STEPS:
+            if step.action_key:
+                with self.subTest(action=step.action_key):
+                    self.assertIn(step.action_key, actions)
+            if step.check_key:
+                with self.subTest(check=step.check_key):
+                    self.assertIn(step.check_key, checks)

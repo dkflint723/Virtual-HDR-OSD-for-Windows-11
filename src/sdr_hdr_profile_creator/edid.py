@@ -106,6 +106,24 @@ def _luminance_from_code(code: int) -> float:
     return 50.0 * (2.0 ** (code / 32.0))
 
 
+def _declared_luminance(code: int) -> float:
+    """The same, except that a zero byte in a full-length block means nothing.
+
+    CTA-861 lets a panel decline to state these by making the block shorter,
+    which the caller already handles by length. A panel that sends the full
+    block and leaves the bytes at 0x00 has filled in nothing, and reading that
+    literally gives 50 nits -- which no HDR display is, and which is worse than
+    useless downstream: it clears the 40-nit credibility floor so the figure is
+    believed, it is truthy so every ``frame_average or peak`` fallback is
+    skipped, and the 80-nit clamps then turn peak and sustained alike into
+    exactly 80. A 1000-nit panel came out of Calibrate Display declaring 80.
+
+    The arithmetic above stays faithful to the specification; this is a
+    judgement about an unfilled field, which is a different thing.
+    """
+    return 0.0 if code == 0 else _luminance_from_code(code)
+
+
 def parse_hdr_static_metadata(edid: bytes) -> PanelMetadata | None:
     """Pull the HDR static metadata data block out of a raw EDID, if it carries one."""
     if len(edid) < 256:
@@ -132,9 +150,9 @@ def parse_hdr_static_metadata(edid: bytes) -> PanelMetadata | None:
                 eotf = edid[payload + 1]
                 # Only the maximum is mandatory once the block is present; a panel may
                 # stop after it, so each later field is read only if it is really there.
-                peak = _luminance_from_code(edid[payload + 3]) if length >= 4 else 0.0
+                peak = _declared_luminance(edid[payload + 3]) if length >= 4 else 0.0
                 frame_average = (
-                    _luminance_from_code(edid[payload + 4]) if length >= 5 else 0.0
+                    _declared_luminance(edid[payload + 4]) if length >= 5 else 0.0
                 )
                 minimum = (
                     peak * ((edid[payload + 5] / 255.0) ** 2) / 100.0 if length >= 6 else 0.0
