@@ -162,34 +162,30 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
         "hdr_active",
     ),
     GuideStep(
-        "2 · Decide where the colour data comes from",
-        "A profile needs to know what the display can actually do. There are two ways to supply that, "
-        "and either produces a complete profile."
-        "\n\n"
-        "Build it from the display itself. In row 2, choose the first entry in the HDR profile list. "
-        "The panel reports its own primaries and peak brightness, and those are used directly. Nothing "
-        "to install, and no measurements to take."
-        "\n\n"
-        "Or start from a profile you already have. Anything from Microsoft's free Windows HDR "
-        "Calibration app, or from calibration software such as Calman or DisplayCAL, can be used as "
-        "the base. That is worth doing if the profile was made with a meter, because a measurement "
-        "describes your individual unit where the panel's own figures describe the model.",
-        "Get Windows HDR Calibration",
-        "hdr_calibration_app",
+        "2 · Press Calibrate Display",
+        "This is the whole calibration. It reads what the panel declares about itself -- peak "
+        "brightness, the brightness it can sustain across the whole screen, its black level and "
+        "its primaries -- builds an HDR profile from those, and makes it the Windows default.\n\n"
+        "Nothing is guessed and nothing needs judging by eye. It is also more accurate than "
+        "Microsoft's HDR Calibration app in one specific way: that app writes the panel's peak "
+        "into the sustained-brightness field, which on an emissive display is several times too "
+        "high, and tells Windows to tone-map for a display that cannot exist.",
+        "Calibrate Display",
+        "calibrate",
+        "profile_imported",
     ),
     GuideStep(
-        "3 · Pin the SDR and HDR profiles for this display",
-        "Row 2 lists every colour profile installed on this PC. Pick which one is this display's HDR profile "
-        "and the sliders start editing it immediately — no import, no restart.\n\n"
-        "The SDR box is about what happens when Windows drops back to SDR. Leave it on Auto to restore "
-        "whatever Windows had, pin a specific profile to make that reliable, or choose "
-        "\"Leave unmanaged\" if Calman, DisplayCAL or similar owns your SDR calibration — this app will then "
-        "never touch the SDR association at all.\n\n"
-        "Both choices are remembered per monitor and survive restarts, so this is a one-time setup. Use "
-        "Import… only for a file that is not installed in the Windows colour folder.",
+        "3 · Optional — start from a profile you already have",
+        "Row 2 lists every colour profile installed on this PC. Picking one uses it as the base "
+        "instead of the panel's own figures, which is worth doing when it was made with a meter: "
+        "a measurement describes your individual unit, where the panel's figures describe the "
+        "model.\n\n"
+        "The SDR box is about what happens when Windows drops back to SDR. Leave it on Auto to "
+        "restore whatever Windows had, pin a specific profile to make that reliable, or choose "
+        "\"Leave unmanaged\" if Calman, DisplayCAL or similar owns your SDR calibration -- this "
+        "app will then never touch the SDR association at all.",
         "Show me the profile list",
         "focus_profiles",
-        "profile_imported",
     ),
     GuideStep(
         "4 · Switch on Live Apply and adjust by eye",

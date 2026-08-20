@@ -316,7 +316,10 @@ class EditorStructureTests(WindowTestCase):
             "Refresh", "Display Settings", "Profile Folder",
             "Import…", "Export Copy…", "Revert", "Reset Sliders",
             "Reapply", "Apply Edits",
-            "Getting Started", "Watchdog Settings…", "Help",
+            "Getting Started", "Watchdog…", "Help",
+            # One action rather than three: find the right entry among every
+            # installed profile, apply, then know those were separate steps.
+            "Calibrate Display",
         ):
             with self.subTest(button=expected):
                 self.assertIn(expected, labels, f"no button labelled {expected!r} in the window")
@@ -2618,3 +2621,122 @@ class FullscreenSurfaceLifetimeTests(WindowTestCase):
         self.window._pattern_window = Destroyed()
         self.window._close_fullscreen_surfaces()
         self.assertIsNone(self.window._pattern_window)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class CalibrateDisplayTests(WindowTestCase):
+    """One action, because three decisions were three too many.
+
+    Reaching a correct profile previously meant finding one entry among every
+    profile installed on the machine, then applying, then knowing those were
+    separate steps. Everything it needs is already declared by the panel.
+    """
+
+    PRIMARIES = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
+                 0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
+
+    def use_panel(self, primaries=None, peak=1015.24, frame_average=265.05):
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        panel = PanelMetadata(
+            peak_nits=peak, max_frame_average_nits=frame_average,
+            min_nits=0.000156, supports_pq=True,
+            primaries=self.PRIMARIES if primaries is None else primaries,
+        )
+        patcher = mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_button_exists(self):
+        self.assertTrue(hasattr(self.window, "calibrate_button"))
+
+    def test_one_click_reads_the_panel_and_installs(self):
+        self.use_panel()
+        self.window._calibrate_display()
+        state = self.window.state.hdr
+        self.assertEqual(state.panel_primaries, self.PRIMARIES)
+        self.assertAlmostEqual(state.peak_luminance_nits, 1015.24, places=2)
+        self.assertAlmostEqual(state.full_frame_luminance_nits, 265.05, places=2)
+        self.assertTrue(self.installed, "nothing was installed")
+
+    def test_it_builds_from_the_panel_rather_than_any_installed_profile(self):
+        """The whole point: no choosing between fifty profiles."""
+        self.use_panel()
+        self.window.state.hdr.base_profile = str(self.color_dir / "BaseCalibration.icm")
+        self.window._calibrate_display()
+        self.assertEqual(self.window.state.hdr.base_profile, "")
+
+    def test_the_sustained_figure_is_the_panels_not_its_peak(self):
+        """Windows HDR Calibration writes peak into this field -- 1000 against the
+        265 this panel declares -- which tells Windows to tone-map for a display
+        that cannot exist."""
+        self.use_panel()
+        self.window._calibrate_display()
+        state = self.window.state.hdr
+        self.assertLess(state.full_frame_luminance_nits, state.peak_luminance_nits / 2)
+
+    def test_it_turns_hdr_on_rather_than_asking_the_user_to(self):
+        self.display.advanced_color_kind = "SDR"
+        self.window._current_display_snapshot = self.display
+        self.use_panel()
+        self.window._calibrate_display()
+        self.assertIn((self.display.key, True), self.hdr_switch_calls)
+
+    def test_a_panel_that_declares_nothing_says_so_rather_than_inventing(self):
+        self.use_panel(primaries=())
+        with mock.patch.object(app_module, "capability_for_device_name", lambda _n: None):
+            self.window._calibrate_display()
+        self.assertIn("could not read", self.window.status_label.text().lower())
+
+    def test_the_result_is_reported_in_the_panels_own_figures(self):
+        self.use_panel()
+        self.window._calibrate_display()
+        text = self.window.status_label.text()
+        self.assertIn("1015", text)
+        self.assertIn("265", text)
+
+    def test_it_says_whether_the_profile_is_locked(self):
+        self.use_panel()
+        self.watchdog_running = True
+        self.window._calibrate_display()
+        self.assertIn("locked in place", self.window.status_label.text())
+
+    def test_it_offers_the_lock_when_the_watchdog_is_not_running(self):
+        self.use_panel()
+        self.watchdog_running = False
+        self.window._calibrate_display()
+        self.assertIn("Lock Profile", self.window.status_label.text())
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class DeferredCallbackTests(WindowTestCase):
+    """A deferred callback must not outlive the widgets it touches.
+
+    Pressing Calibrate Display with HDR off schedules a continuation 1.2 seconds
+    later. Closing the window inside that window ran it against deleted widgets:
+    "Internal C++ object (ComboBox) already deleted", raised from inside a Qt
+    timer -- where Qt prints the traceback and carries on, so the suite stayed
+    green while an unhandled exception went through it on every run.
+    """
+
+    def test_every_deferred_callback_passes_a_context_object(self):
+        """QTimer.singleShot cancels the call when its context is destroyed.
+        Without one it fires regardless, which is the bug."""
+        import re
+        from pathlib import Path
+
+        source = Path(app_module.__file__).read_text(encoding="utf-8")
+        calls = re.findall(r"QTimer\.singleShot\(\s*\d+\s*,\s*([^\n]{0,20})", source)
+        self.assertTrue(calls, "no deferred callbacks found; has the API changed?")
+        for call in calls:
+            with self.subTest(call=call.strip()[:40]):
+                self.assertTrue(
+                    call.lstrip().startswith("self,"),
+                    f"singleShot without a context object: {call.strip()[:40]}",
+                )
+
+    # There is deliberately no test calling the continuation directly on a
+    # destroyed window. That bypasses the timer, which is the only path that
+    # exists, and asserts a guarantee the context object does not make: Qt
+    # cancels the *scheduled call*, it does not make the method safe to invoke
+    # by hand afterwards. A test that did was written, failed, and was wrong.

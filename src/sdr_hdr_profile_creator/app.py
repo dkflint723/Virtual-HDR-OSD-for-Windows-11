@@ -129,6 +129,14 @@ EDIT_FIELDS = (
 )
 
 
+# Every deferred callback below passes ``self`` as QTimer.singleShot's context
+# object, so Qt cancels it if this window is destroyed first. Without one the
+# callback still runs and reaches into deleted widgets: closing the window within
+# 1.2 seconds of pressing Calibrate Display raised
+# "Internal C++ object (ComboBox) already deleted" from inside a timer, where Qt
+# prints the traceback and carries on -- so the test suite stayed green while an
+# unhandled exception went through it on every run.
+
 class MainWindow(FluentWidget):
     def __init__(self) -> None:
         setTheme(Theme.AUTO)
@@ -232,7 +240,7 @@ class MainWindow(FluentWidget):
         self._update_activity_bar()
 
         if self._first_run:
-            QTimer.singleShot(400, self._show_guide)
+            QTimer.singleShot(400, self, self._show_guide)
 
     # ----------------------------------------------------------------------------------
     # State persistence
@@ -323,12 +331,29 @@ class MainWindow(FluentWidget):
         title_box.addWidget(CaptionLabel("A lightweight HDR pseudo-calibration OSD for Windows 11", self))
         heading.addLayout(title_box)
         heading.addStretch(1)
-        guide_button = PrimaryPushButton("Getting Started", self)
+        self.calibrate_button = PrimaryPushButton("Calibrate Display", self)
+        self.calibrate_button.setToolTip(
+            "Describe this display from its own data and install the result, in one step.\n\n"
+            "Turns HDR on if it is off, reads the panel's peak, sustained and black luminance "
+            "and its primaries from its EDID, builds an HDR profile from them, and makes it "
+            "the Windows default.\n\n"
+            "Nothing here is guessed and nothing needs judging by eye. Use the sliders "
+            "afterwards only if you want to depart from what the panel reports."
+        )
+        self.calibrate_button.clicked.connect(self._calibrate_display)
+        heading.addWidget(self.calibrate_button)
+        guide_button = PushButton("Getting Started", self)
         guide_button.setToolTip("Open the step-by-step walkthrough of the recommended calibration workflow.")
         guide_button.clicked.connect(self._show_guide)
         heading.addWidget(guide_button)
-        watchdog_button = PushButton("Watchdog Settings…", self)
-        watchdog_button.setToolTip("Install or remove the independent profile-association watchdog and persistent Alt+1 / Alt+2 gamma-correction hotkeys.")
+        watchdog_button = PushButton("Watchdog…", self)
+        watchdog_button.setToolTip(
+            "Install, remove or reinstall the standalone watchdog, with an explanation of "
+            "what it does.\n\n"
+            "The Lock Profile switch in row 3 covers turning it on and off. This is here for "
+            "the case that switch cannot express: forcing a reinstall while it is already "
+            "running, which is needed after you change which profile Windows falls back to."
+        )
         watchdog_button.clicked.connect(self._show_watchdog_settings)
         heading.addWidget(watchdog_button)
         help_button = PushButton("Help", self)
@@ -981,7 +1006,7 @@ class MainWindow(FluentWidget):
             # A one-shot kick, deliberately not live_timer.start(120): QTimer.start(int)
             # reassigns the interval property, which would permanently shorten the
             # debounce for every later edit in this session.
-            QTimer.singleShot(120, self._apply_live_edit)
+            QTimer.singleShot(120, self, self._apply_live_edit)
         else:
             self.live_timer.stop()
             self._set_status("Live Apply disabled. Use Apply Edits when you are ready to install your changes.", "ok")
@@ -1009,6 +1034,7 @@ class MainWindow(FluentWidget):
             "import_profile": self._import_profile,
             "enable_live": lambda: self.live_checkbox.setChecked(True),
             "watchdog": self._show_watchdog_settings,
+            "calibrate": self._calibrate_display,
             "export_profile": self._export_profile,
         }
         checks = {
@@ -1171,7 +1197,7 @@ class MainWindow(FluentWidget):
             "reported here when it finishes.",
             "warning",
         )
-        QTimer.singleShot(9000, lambda: self._report_watchdog_outcome(installing, before))
+        QTimer.singleShot(9000, self, lambda: self._report_watchdog_outcome(installing, before))
 
     @staticmethod
     def _watchdog_script_stamp() -> float:
@@ -1321,7 +1347,7 @@ class MainWindow(FluentWidget):
         self._set_status(f"Windows mode changed from {previous} to {detected}.", "warning")
         if detected == "SDR":
             if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
-                QTimer.singleShot(650, lambda d=selected: self._restore_remembered_sdr_profile(d, "Automatic Mode Switching"))
+                QTimer.singleShot(650, self, lambda d=selected: self._restore_remembered_sdr_profile(d, "Automatic Mode Switching"))
             else:
                 self._set_status("Windows switched to SDR. Automatic Mode Switching is disabled; Windows keeps its current SDR association.", "ok")
             return
@@ -1332,7 +1358,7 @@ class MainWindow(FluentWidget):
         if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
             # Windows can drop the association across the transition, so force a
             # full reinstall rather than trusting the installed-content cache.
-            QTimer.singleShot(650, lambda: self._apply_mode_profile("Automatic Mode Switching", force=True))
+            QTimer.singleShot(650, self, lambda: self._apply_mode_profile("Automatic Mode Switching", force=True))
 
     # ----------------------------------------------------------------------------------
     # Per-display profile bindings
@@ -1472,7 +1498,7 @@ class MainWindow(FluentWidget):
             "warning",
         )
         # Let the mode poller pick the transition up and run the normal handling.
-        QTimer.singleShot(700, self._refresh_displays)
+        QTimer.singleShot(700, self, self._refresh_displays)
 
     def _remember_current_sdr_profile(self, display: DisplayInfo) -> None:
         """Remember Windows' existing STANDARD profile without modifying any association."""
@@ -1726,6 +1752,89 @@ class MainWindow(FluentWidget):
         if getattr(self, "_pattern_window", None) is not None:
             return "The calibration patterns are still open. Close them with Esc first."
         return ""
+
+    def _calibrate_display(self) -> None:
+        """Describe the display from its own data and install it, in one action.
+
+        The three decisions this replaces -- find the right entry among every
+        profile installed on the machine, apply, and know that applying is a
+        separate step from building -- are decisions nobody should have to make.
+        Everything it needs is already declared by the panel.
+        """
+        display = self._selected_display()
+        if display is None:
+            self._set_status("No display detected to calibrate.", "error")
+            return
+
+        if display.current_mode != "HDR":
+            # An HDR profile cannot be built or judged while Windows is in SDR,
+            # and the alternative is telling the user to go and do it themselves.
+            try:
+                set_hdr_enabled(display, True)
+            except Exception as exc:
+                self._set_status(
+                    f"Could not turn HDR on for {display.friendly_name}: {exc}", "error"
+                )
+                return
+            self._set_status(
+                f"Turning HDR on for {display.friendly_name}…", "warning"
+            )
+            QTimer.singleShot(1200, self, lambda: self._calibrate_after_hdr(display))
+            return
+
+        self._calibrate_now(display)
+
+    def _calibrate_after_hdr(self, display: DisplayInfo) -> None:
+        """Continue once Windows has actually switched the display over."""
+        self._refresh_displays()
+        current = self._selected_display()
+        if current is None or current.current_mode != "HDR":
+            self._set_status(
+                "HDR did not come on, so there is nothing to calibrate yet. Turn it on "
+                "with the switch in row 1 and press Calibrate Display again.",
+                "warning",
+            )
+            return
+        self._calibrate_now(current)
+
+    def _calibrate_now(self, display: DisplayInfo) -> None:
+        """Read the panel, build from it, install it."""
+        binding = self._selected_binding()
+        if binding is not None:
+            binding.hdr_profile = HDR_FROM_PANEL
+        self._build_from_panel(binding)
+
+        state = self.state.hdr
+        if not state.panel_primaries:
+            self._set_status(
+                f"Could not read {display.friendly_name}'s own colour data, so there is "
+                "nothing better than a generic profile to build. Pick an existing HDR "
+                "profile as the base instead.",
+                "error",
+            )
+            return
+
+        try:
+            self._apply_mode_profile("Calibrate Display", force=True)
+        except Exception as exc:
+            self._set_status(f"Built the profile but could not install it: {exc}", "error")
+            return
+
+        self._populate_profile_pickers()
+        locked = watchdog_is_running()
+        tail = (
+            "It is locked in place."
+            if locked
+            else "Turn on Lock Profile to stop Windows dropping it."
+        )
+        self._set_status(
+            f"{display.friendly_name} calibrated from its own panel data: "
+            f"{state.peak_luminance_nits:g} nits peak, "
+            f"{state.full_frame_luminance_nits:g} sustained, "
+            f"{state.minimum_luminance_nits:g} black, and its real primaries. "
+            f"{tail}",
+            "ok",
+        )
 
     def _open_pattern_view(self) -> None:
         display = self._selected_display()
