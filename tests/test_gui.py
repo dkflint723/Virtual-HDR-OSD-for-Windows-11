@@ -2888,3 +2888,37 @@ class GuideProgressTests(WindowTestCase):
             if step.check_key:
                 with self.subTest(check=step.check_key):
                     self.assertIn(step.check_key, checks)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class HotkeyOwnershipTests(WindowTestCase):
+    """Losing the hotkeys to the watchdog is the normal outcome, not a fault.
+
+    RegisterHotKey is exclusive, so turning on Lock Profile -- which the guide
+    tells you to do -- means this window cannot hold Alt+1 / Alt+2. They still
+    work; the watchdog owns them, which is the entire point of installing it.
+    Reporting that as an amber "unavailable" greeted the user with a broken
+    feature once per launch because they had followed the instructions.
+    """
+
+    def test_losing_them_to_the_watchdog_is_not_a_warning(self):
+        self.watchdog_running = True
+        self.window._set_status("baseline", "ok")
+        self.window._hotkey_registration_changed(False, "already registered by another process")
+        self.assertNotIn("unavailable", self.window.status_label.text().lower())
+
+    def test_the_label_says_who_has_them(self):
+        self.watchdog_running = True
+        self.window._hotkey_registration_changed(False, "already registered")
+        self.assertIn("watchdog", self.window.hotkey_status_label.text().lower())
+
+    def test_a_real_refusal_is_still_reported(self):
+        """With no watchdog running, failing to register is a genuine fault."""
+        self.watchdog_running = False
+        self.window._hotkey_registration_changed(False, "Win32 error 1409")
+        self.assertIn("unavailable", self.window.status_label.text().lower())
+        self.assertIn("1409", self.window.status_label.text())
+
+    def test_holding_them_is_reported_plainly(self):
+        self.window._hotkey_registration_changed(True, "registered")
+        self.assertIn("active", self.window.hotkey_status_label.text().lower())
