@@ -45,10 +45,6 @@ def _s15fixed16(value: float) -> bytes:
     return struct.pack(">i", int(round(value * 65536.0)))
 
 
-def _u16fixed16(value: float) -> bytes:
-    return struct.pack(">I", max(0, min(0xFFFFFFFF, int(round(value * 65536.0)))))
-
-
 def _xyz_type(xyz: tuple[float, float, float]) -> bytes:
     return b"XYZ " + b"\0" * 4 + b"".join(_s15fixed16(value) for value in xyz)
 

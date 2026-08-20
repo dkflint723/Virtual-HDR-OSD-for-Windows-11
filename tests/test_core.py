@@ -490,9 +490,23 @@ class TemplateMergeTests(unittest.TestCase):
                 self.assertIn(signature, out)
 
     def test_coupled_groups_are_declared_for_every_multi_tag_set(self):
+        """The loop alone is vacuous: emptying COUPLED_TAG_GROUPS runs no
+        assertions and passes, which is exactly the change that would silently
+        re-enable splicing half-inherited colorant and TRC sets."""
+        self.assertTrue(icc_module.COUPLED_TAG_GROUPS, "no coupled groups declared")
         for group in icc_module.COUPLED_TAG_GROUPS:
             with self.subTest(group=group):
                 self.assertGreaterEqual(len(group), 2)
+
+        # The sets that must never be spliced apart, named rather than counted,
+        # so removing one is a failure rather than a smaller loop.
+        declared = {frozenset(group) for group in icc_module.COUPLED_TAG_GROUPS}
+        for required in (
+            {b"rXYZ", b"gXYZ", b"bXYZ"},
+            {b"rTRC", b"gTRC", b"bTRC"},
+        ):
+            with self.subTest(group=sorted(required)):
+                self.assertIn(frozenset(required), declared)
 
 
 @unittest.skipUnless(sys.platform == "win32", "DisplayConfig structs are Windows-only")

@@ -532,8 +532,6 @@ def get_default_profile(display: DisplayInfo, mode: str) -> str:
         kernel32.LocalFree(allocated.value)
 
 
-
-
 def reapply_existing_default_profile(display: DisplayInfo, mode: str, profile_name: str) -> str:
     """Re-set an already-associated Windows display profile as default.
 
@@ -742,13 +740,6 @@ def get_sdr_white_level_nits(display: DisplayInfo) -> float:
     if result != ERROR_SUCCESS:
         raise _hresult_error("SDR white-level query failed", result)
     return float(packet.SDRWhiteLevel) / 1000.0 * 80.0
-
-
-def open_windows_hdr_settings() -> None:
-    """Open Settings › System › Display › HDR."""
-    if not IS_WINDOWS:
-        return
-    os.startfile("ms-settings:display-advancedcolor")  # type: ignore[attr-defined]
 
 
 def open_windows_display_settings() -> None:

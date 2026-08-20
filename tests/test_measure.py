@@ -369,10 +369,36 @@ class RunTests(unittest.TestCase):
         self.assertAlmostEqual(self.run_sequence(self.good_reader()).peak_nits, PEAK, places=2)
 
     def test_lets_the_panel_settle_before_each_reading(self):
-        """A patch read the instant it appears is read mid-transition."""
-        self.run_sequence(self.good_reader())
+        """A patch read the instant it appears is read mid-transition.
+
+        Counting the sleeps does not establish that any of them happened before
+        a reading -- moving the sleep to after ``read()`` left the count at six
+        and the test passing. The order is what matters, so it is recorded.
+        """
+        order = []
+        self.display.shown = order          # show() appends the patch key
+        readings = iter([NEUTRAL[key] for key in self.ORDER])
+
+        def read():
+            order.append("read")
+            return next(readings)
+
+        def sleep(seconds):
+            order.append("settle")
+            self.slept.append(seconds)
+
+        run(self.display, read, peak_nits=1015.24, sleep=sleep)
+
         self.assertEqual(len(self.slept), 6)
         self.assertTrue(all(delay > 0 for delay in self.slept))
+
+        # Every read must be preceded by a settle for the patch just shown.
+        for index, entry in enumerate(order):
+            if entry == "read":
+                self.assertEqual(
+                    order[index - 1], "settle",
+                    f"a reading at position {index} was taken without settling first",
+                )
 
     def test_reports_progress_for_each_step(self):
         seen = []

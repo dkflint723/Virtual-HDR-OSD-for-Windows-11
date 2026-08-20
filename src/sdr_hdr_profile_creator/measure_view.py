@@ -34,6 +34,9 @@ from .patterns import measurement_frame
 class MeasureWindow(QWidget):
     """Blacked-out fullscreen output showing one measurement patch at a time."""
 
+    #: Emitted as the window goes away, so a run in flight can be stopped.
+    closed = Signal()
+
     def __init__(
         self,
         capability: DisplayCapability | None,
@@ -54,6 +57,8 @@ class MeasureWindow(QWidget):
         self._surface: HdrSurface | None = None
         self._frame: bytes = b""
         self.failure = ""
+        #: Whether the most recent patch actually reached the display.
+        self.shown = False
 
     def paintEngine(self):  # noqa: D102 - Qt must not paint into a D3D surface
         return None
@@ -77,7 +82,14 @@ class MeasureWindow(QWidget):
 
     @Slot(object)
     def show_patch(self, step: MeasurementStep) -> None:
-        """Present one patch. Must run on the UI thread."""
+        """Present one patch. Must run on the UI thread.
+
+        ``shown`` records whether the frame actually reached the display. A
+        surface that has been closed silently swallowed every later patch, so
+        the meter went on reading a black desktop and the readings looked like
+        a very dark display rather than like nothing at all.
+        """
+        self.shown = False
         if self._surface is None:
             return
         width, height = self.device_size()
@@ -86,6 +98,8 @@ class MeasureWindow(QWidget):
             self._surface.present(self._frame)
         except HdrDisplayError as exc:
             self.failure = str(exc)
+            return
+        self.shown = True
 
     def resizeEvent(self, event):  # noqa: D102
         super().resizeEvent(event)
@@ -101,6 +115,11 @@ class MeasureWindow(QWidget):
         if self._surface is not None:
             self._surface.close()
             self._surface = None
+        # Before the surface goes, tell anyone measuring against it to stop.
+        # Without this the worker kept driving spotread through the remaining
+        # patches with nothing on screen, reading each one off a black desktop,
+        # and the run finished by adopting whatever that produced.
+        self.closed.emit()
         super().closeEvent(event)
 
     def keyPressEvent(self, event):  # noqa: D102
@@ -129,12 +148,28 @@ class _WindowDisplay(QObject):
 
     def __init__(self, window: MeasureWindow) -> None:
         super().__init__()
+        self._window = window
         self.patch.connect(
             window.show_patch, Qt.ConnectionType.BlockingQueuedConnection
         )
 
     def show(self, step: MeasurementStep) -> None:
         self.patch.emit(step)
+        self.require_shown()
+
+    def require_shown(self) -> None:
+        """Stop the run unless the last patch actually reached the display.
+
+        Separate from ``show`` so it can be tested: exercising ``show`` needs a
+        second thread, because a BlockingQueuedConnection issued from the
+        thread that would service it deadlocks rather than returning.
+
+        The window may have gone -- Esc closes it mid-run -- or the surface may
+        have refused the frame. Either way the meter would go on reading, and
+        reading a patch that is not on screen produces a number, which is
+        exactly what nothing downstream can tell from a measurement."""
+        if not getattr(self._window, "shown", False):
+            raise measure.Aborted()
 
 
 class MeasurementWorker(QObject):
@@ -209,6 +244,11 @@ def start(
     thread = QThread()
     worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits)
     worker.moveToThread(thread)
+    # "Esc cancels" is what the status line and the README both promise. Nothing
+    # called cancel() before this, so the whole abort path -- measure.Aborted,
+    # both should_abort guards, and the cancelled branch that reports "nothing
+    # was changed" -- was unreachable in the shipped app.
+    window.closed.connect(worker.cancel)
 
     thread.started.connect(worker.run)
     worker.progress.connect(on_progress)

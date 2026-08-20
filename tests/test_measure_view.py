@@ -155,12 +155,22 @@ class MeasureWindowTests(unittest.TestCase):
         self.assertAlmostEqual(centre[0] * 80.0, 800.0, places=1)
 
     def test_the_screen_starts_black(self):
-        """Nothing should be lit before the first patch is asked for."""
-        window, surface = self.build()
+        """Nothing should be lit before the first patch is asked for.
+
+        The centre is the only place this is visible. Sampling the top-left
+        corner, as this did, tests nothing: measurement_frame always draws a
+        black surround, so row 0 is black whatever patch is showing. Starting on
+        a white patch instead would flash the meter and warm the panel before
+        the black reading, which is measured first precisely to avoid that.
+        """
+        window, surface = self.build(width=320, height=200)
         with mock.patch.object(measure_view, "HdrSurface", lambda *a, **k: surface):
             self.assertTrue(window.begin())
         self.assertTrue(surface.frames)
-        self.assertEqual(set(surface.frames[0][:24]), {0, 0x3C})
+        centre = struct.unpack_from(
+            "<4e", surface.frames[0], ((200 // 2) * 320 + 320 // 2) * 8
+        )
+        self.assertEqual(centre[:3], (0.0, 0.0, 0.0))
 
     def test_a_surface_that_cannot_be_created_is_reported_not_raised(self):
         window, _ = self.build()
@@ -372,3 +382,134 @@ class WindowDisplayTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class CancellationTests(unittest.TestCase):
+    """Esc is promised by the status line and the README; it has to work.
+
+    Nothing called MeasurementWorker.cancel(), so the whole abort path was
+    unreachable in the shipped app: measure.Aborted, both should_abort guards,
+    and the branch reporting "nothing was changed". Pressing Esc closed the
+    window and the worker carried on driving spotread through the remaining
+    patches, reading each off a black desktop, then adopted the result.
+    """
+
+    qt_app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def window(self):
+        window = measure_view.MeasureWindow(hdr_capability(), 240.0, None)
+        window.resize(320, 200)
+        window._surface = FakeSurface()
+        self.addCleanup(window.deleteLater)
+        return window
+
+    def test_closing_the_window_announces_it(self):
+        from PySide6.QtGui import QCloseEvent
+
+        window = self.window()
+        seen = []
+        window.closed.connect(lambda: seen.append(True))
+        window.closeEvent(QCloseEvent())
+        self.assertEqual(seen, [True])
+
+    def test_escape_closes_the_window(self):
+        """Asserts that Escape calls close(), not that Qt then delivers a
+        closeEvent: under the offscreen platform a widget that was never shown
+        does not get one, which is Qt's behaviour rather than this app's. The
+        real window is fullscreen and does."""
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+
+        window = self.window()
+        closed = []
+        with mock.patch.object(type(window), "close", lambda _self: closed.append(True)):
+            window.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Escape,
+                                           Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(closed, [True])
+
+    def test_an_unrelated_key_does_not_close_the_window(self):
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
+
+        window = self.window()
+        closed = []
+        with mock.patch.object(type(window), "close", lambda _self: closed.append(True)):
+            window.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Space,
+                                           Qt.KeyboardModifier.NoModifier))
+        self.assertEqual(closed, [])
+
+    def test_a_patch_that_reached_the_screen_is_marked_shown(self):
+        window = self.window()
+        window.show_patch(MeasurementStep("white", "Peak white", (1.0, 1.0, 1.0), 800.0))
+        self.assertTrue(window.shown)
+
+    def test_a_patch_with_no_surface_is_not_marked_shown(self):
+        """It used to return silently, so every later patch was read off a black
+        desktop and looked like a very dark display rather than like nothing."""
+        window = self.window()
+        window._surface = None
+        window.show_patch(MeasurementStep("white", "Peak white", (1.0, 1.0, 1.0), 800.0))
+        self.assertFalse(window.shown)
+
+    def test_the_display_aborts_rather_than_letting_an_unshown_patch_be_read(self):
+        """Exercised through require_shown rather than show, because a
+        BlockingQueuedConnection issued from the thread that would service it
+        deadlocks -- the hazard _WindowDisplay's own docstring describes."""
+        from sdr_hdr_profile_creator.measure import Aborted
+
+        window = self.window()
+        display = measure_view._WindowDisplay(window)
+
+        window.shown = True
+        display.require_shown()      # a patch that reached the screen: no complaint
+
+        window.shown = False
+        with self.assertRaises(Aborted):
+            display.require_shown()
+
+    def test_show_checks_that_the_patch_landed(self):
+        """Asserted against the source: the emit cannot be exercised here."""
+        import inspect
+
+        source = inspect.getsource(measure_view._WindowDisplay.show)
+        self.assertIn("require_shown", source)
+    def test_closing_the_window_aborts_the_worker(self):
+        """The wiring that was missing entirely.
+
+        Built by hand rather than through start(), because start() launches a
+        real QThread whose BlockingQueuedConnection waits on an event loop a
+        unittest run does not provide -- which deadlocks rather than fails."""
+        window = self.window()
+        worker = measure_view.MeasurementWorker(
+            FakeDisplay(), lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None
+        )
+        window.closed.connect(worker.cancel)
+        self.assertFalse(worker._abort)
+        window.closed.emit()
+        self.assertTrue(worker._abort)
+
+    def test_start_is_the_thing_that_makes_that_connection(self):
+        """Asserted against the source, because exercising start() needs a
+        running event loop. Without this line the abort path is unreachable."""
+        import inspect
+
+        source = inspect.getsource(measure_view.start)
+        self.assertIn("window.closed.connect(worker.cancel)", source)
+
+    def test_an_aborted_run_reports_neither_a_result_nor_an_error(self):
+        """A cancelled run is not a failure and must not look like one."""
+        display = FakeDisplay()
+        worker = measure_view.MeasurementWorker(
+            display, lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None
+        )
+        outcomes = []
+        worker.finished.connect(lambda r, m: outcomes.append((r, m)))
+        worker.cancel()
+        worker.run()
+        self.assertEqual(outcomes, [(None, "")])
+        self.assertEqual(display.shown, [])

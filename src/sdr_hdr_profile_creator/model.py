@@ -242,9 +242,6 @@ class ApplicationState:
             self.display_bindings[stable_key] = existing
         return existing
 
-    def mode_state(self, mode: DisplayMode | None = None) -> ModeState:
-        return self.sdr if (mode or self.current_mode) == "SDR" else self.hdr
-
     def set_mode_state(self, mode: DisplayMode, state: ModeState) -> None:
         if mode == "SDR":
             self.sdr = state

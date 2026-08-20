@@ -183,12 +183,20 @@ class NeutralRampTests(unittest.TestCase):
         self.assertEqual(row, sorted(row))
 
     def test_the_ramp_is_neutral_at_every_point(self):
-        """Any channel imbalance here would be mistaken for display tint."""
+        """Any channel imbalance here would be mistaken for display tint.
+
+        Previously written as ``assertEqual((red, green), (red, blue))``, which
+        by tuple equality reduces to ``red == red and green == blue`` -- red was
+        compared only against itself, so a red cast at every point, the most
+        likely imbalance given the ramp is built from one scalar per pixel, went
+        unchecked. Emitting ``_colour_pixel(value * 2.0, value, value)`` passed.
+        """
         frame = render(pattern_by_key("neutral-ramp"), 256, 2, HDR)
         for x in range(0, 256, 16):
             red, green, blue, _ = pixel_at(frame, 256, x, 0)
             with self.subTest(x=x):
-                self.assertEqual((red, green), (red, blue))
+                self.assertEqual(red, green)
+                self.assertEqual(green, blue)
 
     def test_the_ramp_is_evenly_spaced_in_pq(self):
         frame = render(pattern_by_key("neutral-ramp"), 256, 1, HDR)
