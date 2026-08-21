@@ -1556,3 +1556,102 @@ class DeclaredBesideMeasuredTests(PatternViewTestCase):
         win.accept_measurement()
         self.assertAlmostEqual(win._declared_for(pattern_view.pattern_by_key("peak-white")),
                                1015.24, places=2)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class ApplyOutcomeTests(PatternViewTestCase):
+    """A refused apply must say so on the surface and stay retryable.
+
+    apply_measurements latched `applied` from a callback that returned True whatever
+    happened, so the summary painted "Written into the profile." and every later Enter
+    was refused -- with the actual reason in a status bar the fullscreen window covers.
+    """
+
+    def window_with(self, apply_result):
+        win = PatternWindow(
+            capability(), 240.0, self.controls,
+            measure=lambda *_: None, apply=lambda: apply_result,
+        )
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        return win
+
+    def test_a_refused_apply_does_not_claim_success(self):
+        win = self.window_with(False)
+        self.assertFalse(win.apply_measurements())
+        self.assertFalse(win.applied)
+        self.assertTrue(win.apply_failed)
+
+    def test_a_refused_apply_can_be_retried(self):
+        """The latch is what made this a dead end: one refusal and Enter was inert."""
+        outcomes = iter([False, True])
+        win = PatternWindow(
+            capability(), 240.0, self.controls,
+            measure=lambda *_: None, apply=lambda: next(outcomes),
+        )
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        self.assertFalse(win.apply_measurements())
+        self.assertTrue(win.apply_measurements(), "the retry was refused")
+        self.assertTrue(win.applied)
+        self.assertFalse(win.apply_failed)
+
+    def test_a_successful_apply_still_latches(self):
+        """Applying twice would rewrite the profile for no reason."""
+        win = self.window_with(True)
+        self.assertTrue(win.apply_measurements())
+        self.assertFalse(win.apply_measurements(), "a second apply should be refused")
+
+    def test_the_refusal_is_painted_on_the_surface_itself(self):
+        """The reason lives in a status bar this window covers, so the refusal has to
+        be visible here or the user is told nothing at all.
+
+        Counted by colour rather than by text: the offscreen platform has no font and
+        renders every character as an identical box, so comparing pixels of the amber
+        pen -- used at exactly this one place -- is what can actually distinguish the
+        refusal line from the success line.
+        """
+        AMBER = (240, 170, 120)
+
+        def amber_pixels(win):
+            raw, _, _ = win.render_summary(600, 800, 1.0)
+            return sum(
+                1 for i in range(0, len(raw), 4)
+                if raw[i + 3] > 0 and (raw[i], raw[i + 1], raw[i + 2]) == AMBER
+            )
+
+        refused = self.window_with(False)
+        refused._showing_summary = True
+        self.assertEqual(0, amber_pixels(refused), "amber before any apply was attempted")
+        refused.apply_measurements()
+        self.assertGreater(amber_pixels(refused), 0, "the refusal was not painted")
+
+        accepted = self.window_with(True)
+        accepted._showing_summary = True
+        accepted.apply_measurements()
+        self.assertEqual(0, amber_pixels(accepted), "a successful apply painted a refusal")
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class ReferenceOnlyPatternTests(PatternViewTestCase):
+    """Full-frame white records nothing, and now says so instead of promising Enter."""
+
+    def pattern(self, key):
+        found = [p for p in PATTERNS if p.key == key]
+        self.assertTrue(found, f"no pattern {key!r}")
+        return found[0]
+
+    def test_the_pattern_no_longer_tells_the_user_to_press_enter(self):
+        full_frame = self.pattern("full-frame-white")
+        self.assertFalse(full_frame.records)
+        self.assertNotIn("Press Enter", full_frame.instructions)
+
+    def test_it_says_what_it_is_for_instead(self):
+        full_frame = self.pattern("full-frame-white")
+        joined = (full_frame.purpose + " " + full_frame.instructions).lower()
+        self.assertIn("nothing here is recorded", joined)
+
+    def test_a_recording_pattern_still_promises_enter(self):
+        """Otherwise the fix could be "delete the promise everywhere"."""
+        peak = self.pattern("peak-white")
+        self.assertTrue(peak.records)

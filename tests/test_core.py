@@ -559,6 +559,185 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class ChadlessBaseTests(unittest.TestCase):
+    """A base profile that never says what white its colorants were adapted to.
+
+    ICC requires a display profile's rXYZ/gXYZ/bXYZ to be D50-adapted, and a v2 file
+    that omits chad relies on exactly that convention. The (wtpt, chad) coupled group
+    is dropped when chad is missing and replaced with this profile's own D65 white and
+    an identity chad -- so the inherited D50 colorants were then declared to be D65
+    ones. A consumer honouring that identity chad read green at 0.3212,0.5979 instead
+    of 0.3000,0.6000: 0.021 off, four times the module's own mismatch threshold.
+
+    8 of the 27 profiles installed on the machine this was found on are chad-less and
+    all 8 are offered in the HDR base picker.
+    """
+
+    # sRGB primaries in XYZ, relative to D65. What the base is really describing.
+    RED = (0.4124, 0.2126, 0.0193)
+    GREEN = (0.3576, 0.7152, 0.1192)
+    BLUE = (0.1805, 0.0722, 0.9505)
+    TRUE_GREEN_XY = (0.3000, 0.6000)
+
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+
+        from sdr_hdr_profile_creator import icc
+
+        self.icc = icc
+        self.base = Path(tempfile.mkdtemp(prefix="vhdr-base-")) / "base.icm"
+        # Only its existence matters; the tag read is intercepted below.
+        self.base.write_bytes(b"\0" * 200)
+
+    def base_tags(self, with_chad: bool) -> dict:
+        """The two conventions that actually occur on disk.
+
+        With chad: colorants D50-adapted, wtpt is the D50 PCS illuminant.
+        Without:   colorants D50-adapted, wtpt is the real media white.
+        """
+        icc = self.icc
+        matrix = icc.D65_TO_D50_CHAD
+        tags = {
+            b"rXYZ": icc._xyz_type(icc._matrix_vector(matrix, self.RED)),
+            b"gXYZ": icc._xyz_type(icc._matrix_vector(matrix, self.GREEN)),
+            b"bXYZ": icc._xyz_type(icc._matrix_vector(matrix, self.BLUE)),
+            b"wtpt": icc._xyz_type(icc.D50_XYZ if with_chad else icc.D65_XYZ),
+            b"rTRC": icc._curve_gamma_type(2.2),
+            b"gTRC": icc._curve_gamma_type(2.2),
+            b"bTRC": icc._curve_gamma_type(2.2),
+            b"desc": icc._mluc_type("base"),
+            b"cprt": icc._mluc_type("test"),
+        }
+        if with_chad:
+            tags[b"chad"] = icc._sf32_type(matrix)
+        return tags
+
+    def build_on(self, with_chad: bool) -> bytes:
+        from unittest import mock
+
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.model import ModeState
+
+        state = ModeState.neutral("HDR")
+        state.base_profile = str(self.base)
+        transform = build_transform(state, True)
+        tags = self.base_tags(with_chad)
+        with mock.patch.object(self.icc, "_read_tags", lambda *_a, **_k: tags):
+            return self.icc.build_profile("HDR", state, transform)
+
+    def green_of(self, blob: bytes) -> tuple[float, float]:
+        primaries = self.icc.profile_primaries_xy(blob)
+        self.assertIsNotNone(primaries, "the built profile has no colorant tags")
+        return primaries[1]
+
+    def test_a_chadless_base_still_describes_the_right_green(self):
+        green = self.green_of(self.build_on(False))
+        self.assertAlmostEqual(self.TRUE_GREEN_XY[0], green[0], places=3)
+        self.assertAlmostEqual(self.TRUE_GREEN_XY[1], green[1], places=3)
+
+    def test_a_base_that_carries_chad_is_unaffected(self):
+        """The adaptation must apply only where the white is unstated; doing it to a
+        profile that already declares its adaptation would double-apply it."""
+        green = self.green_of(self.build_on(True))
+        self.assertAlmostEqual(self.TRUE_GREEN_XY[0], green[0], places=3)
+        self.assertAlmostEqual(self.TRUE_GREEN_XY[1], green[1], places=3)
+
+    def test_the_d65_marker_is_absent_when_the_colorants_are_not_d65(self):
+        """MSCA is Windows HDR Calibration's "{'D65Adapted':True}" marker. A base that
+        brings its own chad through leaves the colorants in the D50 PCS, so stamping it
+        there tells a reader the opposite of what the chad says."""
+        tags = self.icc._read_tags(self.build_on(True))
+        self.assertNotIn(b"MSCA", tags, "claimed D65 adaptation beside a non-identity chad")
+
+    def test_the_d65_marker_is_present_on_the_generated_form(self):
+        """The chad-less path ends up genuinely D65-adapted with an identity chad, which
+        is exactly what the marker is for -- so removing it everywhere is not the fix."""
+        tags = self.icc._read_tags(self.build_on(False))
+        self.assertIn(b"MSCA", tags)
+
+    def test_the_colorants_add_up_to_the_declared_white(self):
+        """The self-consistency check: a matrix profile's three colorants must sum to
+        its own white, or it describes a display that cannot exist."""
+        for with_chad in (True, False):
+            with self.subTest(chad=with_chad):
+                blob = self.build_on(with_chad)
+                tags = self.icc._read_tags(blob)
+                parts = [self.icc._parse_xyz(tags[s]) for s in (b"rXYZ", b"gXYZ", b"bXYZ")]
+                white = self.icc._parse_xyz(tags[b"wtpt"])
+                chad = self.icc._parse_chad(tags.get(b"chad", b""))
+                total = tuple(sum(part[i] for part in parts) for i in range(3))
+                if chad is not None:
+                    # Colorants live in the PCS; undo the adaptation before comparing.
+                    total = self.icc._matrix_vector(self.icc._inverse3(chad), total)
+                    white = self.icc._matrix_vector(self.icc._inverse3(chad), white)
+                delta = max(abs(total[i] - white[i]) for i in range(3))
+                self.assertLess(delta, 0.01, f"colorants miss the white by {delta:.5f}")
+
+
+class OverwriteInstalledProfileTests(unittest.TestCase):
+    """Writing a profile's bytes in place, for the case Windows will not handle.
+
+    InstallColorProfileW returns TRUE without copying when the destination already
+    exists, and the uninstall that would clear the way fails on a file owned by
+    BUILTIN\\Administrators from an earlier elevated run. The ACL still allows
+    FILE_WRITE_DATA there, so the bytes can go straight in -- but not through
+    open(path, "wb"), which asks for GENERIC_WRITE and is refused.
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from sdr_hdr_profile_creator import windows_api
+
+        self.windows_api = windows_api
+        self.color_dir = Path(tempfile.mkdtemp(prefix="vhdr-color-"))
+        self.addCleanup(shutil.rmtree, self.color_dir, True)
+        patcher = mock.patch.object(
+            windows_api, "get_color_directory", lambda: self.color_dir
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def installed(self, name="probe.icm", data=b"A" * 120):
+        (self.color_dir / name).write_bytes(data)
+        return name
+
+    def test_a_payload_of_the_same_length_replaces_the_content(self):
+        name = self.installed()
+        self.assertTrue(self.windows_api.overwrite_installed_profile(name, b"B" * 120))
+        self.assertEqual(b"B" * 120, (self.color_dir / name).read_bytes())
+
+    def test_a_longer_payload_extends_the_file(self):
+        name = self.installed()
+        self.assertTrue(self.windows_api.overwrite_installed_profile(name, b"C" * 200))
+        self.assertEqual(b"C" * 200, (self.color_dir / name).read_bytes())
+
+    def test_a_shorter_payload_is_refused_rather_than_leaving_a_tail(self):
+        """There is no truncate right, so a short write would leave the end of the old
+        profile behind -- a file that parses and describes the wrong display."""
+        name = self.installed()
+        self.assertFalse(self.windows_api.overwrite_installed_profile(name, b"D" * 20))
+        self.assertEqual(b"A" * 120, (self.color_dir / name).read_bytes(),
+                         "a refused write must not have modified anything")
+
+    def test_a_missing_destination_is_false_rather_than_an_exception(self):
+        self.assertFalse(
+            self.windows_api.overwrite_installed_profile("absent.icm", b"E" * 10)
+        )
+
+    def test_the_answer_is_a_read_back_not_the_write_call(self):
+        """Every other step in this story reported success while changing nothing, so
+        the return value has to come from reading the file again."""
+        import inspect
+
+        source = inspect.getsource(self.windows_api.overwrite_installed_profile)
+        self.assertIn("target.read_bytes() == payload", source)
+
+
 class CorrectionTargetGammaTests(unittest.TestCase):
     """The Gamma slider sets the correction's target rather than applying a second power.
 

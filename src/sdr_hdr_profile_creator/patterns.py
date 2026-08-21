@@ -523,15 +523,17 @@ PATTERNS: tuple[Pattern, ...] = (
     Pattern(
         key="full-frame-white",
         title="Full-frame white",
-        purpose="Measures the luminance the display sustains with the whole screen lit.",
+        purpose="Shows what the brightness limiter does. Reference only -- nothing here is recorded.",
         criterion="The highest level at which the circle still separates from its surround.",
         instructions=(
             "The whole screen is lit, so the panel's brightness limiter is engaged. This "
             "pattern is bright by design.\n\n"
             "1. Hold Right until the circle merges into the background.\n"
-            "2. Tap Left until the two separate again.\n"
-            "3. Press Enter.\n\n"
-            "On an emissive panel this figure normally falls well below peak white. The "
+            "2. Tap Left until the two separate again.\n\n"
+            "Nothing here is recorded. The sustained figure the profile uses comes "
+            "from the panel's own data, or from a meter; the level is shown on the bar "
+            "for reading off.\n\n"
+            "On an emissive panel it normally falls well below peak white. The "
             "difference is the brightness limiter, not a defect."
         ),
         render=_render_peak_clip,

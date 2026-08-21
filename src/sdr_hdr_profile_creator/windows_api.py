@@ -509,6 +509,78 @@ def resolve_profile_path(profile_name: str) -> Path:
     return get_color_directory() / candidate.name
 
 
+#: The one write right the colour folder still grants on a file this account does not
+#: own. Deliberately not GENERIC_WRITE: that bundles FILE_APPEND_DATA and
+#: FILE_WRITE_ATTRIBUTES, which are refused, so asking for it fails outright -- and so
+#: does open(path, "wb"), which asks for exactly that.
+FILE_WRITE_DATA = 0x0002
+FILE_SHARE_ALL = 0x00000007
+OPEN_EXISTING = 3
+INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
+
+
+def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
+    """Replace an installed profile's bytes in place. True when it now matches.
+
+    ``InstallColorProfileW`` will not overwrite a destination that already exists: it
+    returns TRUE and copies nothing. The usual answer is to uninstall first, but a
+    profile written by an elevated run is owned by ``BUILTIN\\Administrators`` and this
+    account is refused DELETE, so the uninstall does nothing either and the pair
+    silently freezes at whatever bytes were installed that day.
+
+    Writing the bytes straight into the existing file is the way out, because the ACL
+    still allows FILE_WRITE_DATA even where it denies DELETE and GENERIC_WRITE. There
+    is no truncate right, so a payload shorter than the file on disk would leave the
+    tail of the old profile behind; that case is reported rather than attempted.
+
+    Never trusts the write. The return value is a read-back comparison, because every
+    other step in this story returned success while changing nothing.
+    """
+    if not IS_WINDOWS:
+        raise WindowsColorError("Colour profiles can only be installed on Windows")
+
+    target = get_color_directory() / Path(profile_name).name
+    try:
+        existing = target.stat().st_size
+    except OSError:
+        return False
+    if len(payload) < existing:
+        # Only an equal or larger payload can be written safely without DELETE.
+        return False
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+        ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+    ]
+    kernel32.CreateFileW.restype = wintypes.HANDLE
+    kernel32.WriteFile.argtypes = [
+        wintypes.HANDLE, ctypes.c_void_p, wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
+    ]
+    kernel32.WriteFile.restype = wintypes.BOOL
+
+    handle = kernel32.CreateFileW(
+        str(target), FILE_WRITE_DATA, FILE_SHARE_ALL, None, OPEN_EXISTING, 0, None
+    )
+    if handle == INVALID_HANDLE_VALUE:
+        return False
+    try:
+        written = wintypes.DWORD(0)
+        buffer = ctypes.create_string_buffer(payload, len(payload))
+        if not kernel32.WriteFile(handle, buffer, len(payload), ctypes.byref(written), None):
+            return False
+        if written.value != len(payload):
+            return False
+    finally:
+        kernel32.CloseHandle(handle)
+
+    try:
+        return target.read_bytes() == payload
+    except OSError:
+        return False
+
+
 def get_default_profile(display: DisplayInfo, mode: str) -> str:
     if not IS_WINDOWS or not hasattr(mscms, "ColorProfileGetDisplayDefault"):
         raise WindowsColorError("Default-profile read-back is unavailable on this Windows build")

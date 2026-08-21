@@ -227,7 +227,9 @@ Below that:
 - **Lock Profile** — the switch in row 3. Installs the independent association watchdog, which
   puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
   closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
-  dismissed administrator prompt leaves it off rather than lying about it.
+  cancelled or failed install leaves it off rather than lying about it. The installer needs no
+  administrator rights; if Windows refuses its scheduled task it says so and uses a plain startup
+  entry instead.
 - **Watchdog…** — the same install/remove actions with a fuller explanation, and the only
   way to force a reinstall while the watchdog is already running.
 - **Help** — the full usage guide, control reference, and recovery notes.

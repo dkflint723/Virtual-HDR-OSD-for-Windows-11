@@ -270,6 +270,11 @@ def render_overlay(
                 painter.setPen(QColor(150, 220, 150, 255))
                 unit = " nits" if context.absolute else ""
                 painter.drawText(margin, y, f"recorded {recorded:.4g}{unit}")
+            elif not pattern.records:
+                # accept_measurement returns before repainting for these, so promising
+                # that Enter does something described a key that is a silent no-op.
+                painter.setPen(QColor(150, 150, 150, 255))
+                painter.drawText(margin, y, "reference only — nothing is recorded here")
             else:
                 painter.setPen(QColor(150, 150, 150, 255))
                 nxt = "Enter records it and moves on" if step is not None else "Enter records this level"
@@ -291,7 +296,7 @@ def render_overlay(
         adjust = "← →  move the level" if pattern.level_driven else "← →  adjust"
         walk = "↑ ↓   next level" if pattern.levels is not None else ""
         last = step is not None and step >= total
-        if pattern.level_driven:
+        if pattern.level_driven and pattern.records:
             confirm = "Enter  record it and finish" if last else "Enter  record it"
         else:
             confirm = "Enter  finish" if last else "Enter  done, next step"
@@ -302,7 +307,9 @@ def render_overlay(
         lines += [adjust]
         if walk:
             lines.append(walk)
-        if pattern.level_driven or step is not None:
+        # A level-driven pattern that records nothing has no Enter to offer, unless a
+        # guided run needs it to move on.
+        if (pattern.level_driven and pattern.records) or step is not None:
             lines.append(confirm)
         if any(control.write for control in controls) or pattern.level_driven:
             lines.append("E     type a value")
@@ -478,6 +485,10 @@ class PatternWindow(QWidget):
         self._on_close = on_close
         self._apply = apply
         self.applied = False
+        #: Set when an apply was attempted and Windows refused it. The status bar that
+        #: carries the reason is a child of the window this one covers, so without a
+        #: line here the user is told nothing at all.
+        self.apply_failed = False
         self._editing: str | None = None
         self._tracks: list[tuple[str, int, int, int, int]] = []
         self._overlay_origin = (0, 0)
@@ -718,6 +729,15 @@ class PatternWindow(QWidget):
             if self.applied:
                 painter.setPen(QColor(150, 220, 150, 255))
                 painter.drawText(margin, y, "Written into the profile. Esc to finish.")
+            elif self.apply_failed:
+                painter.setPen(QColor(240, 170, 120, 255))
+                painter.drawText(margin, y, "Windows refused the profile — nothing was written.")
+                y += round(30 * scale)
+                painter.setPen(QColor(200, 200, 200, 255))
+                painter.drawText(margin, y, "Esc     leave and read the reason; the readings are kept")
+                y += round(30 * scale)
+                painter.setPen(QColor(160, 160, 160, 255))
+                painter.drawText(margin, y, "Enter   try again")
             else:
                 painter.setPen(QColor(255, 255, 255, 255))
                 painter.drawText(margin, y, "Enter   write these into the profile now")
@@ -837,6 +857,9 @@ class PatternWindow(QWidget):
         if self._apply is None or self.applied:
             return False
         self.applied = bool(self._apply())
+        # Latching on failure too would refuse every later Enter for the life of the
+        # window, which is what happened while this returned True unconditionally.
+        self.apply_failed = not self.applied
         self.refresh()
         return self.applied
 
@@ -880,8 +903,6 @@ class PatternWindow(QWidget):
         if self.pattern.key == "peak-white":
             self._context = replace(self._context, peak_nits=max(80.0, measured))
             self._assumed_peak = False
-        elif self.pattern.key == "full-frame-white":
-            self._context = replace(self._context, max_full_frame_nits=max(80.0, measured))
         if self._guided and not self.advance():
             return True
         self.refresh()

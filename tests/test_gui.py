@@ -26,6 +26,7 @@ try:
     from sdr_hdr_profile_creator.dialogs import GUIDE_STEPS, HELP_SECTIONS
     from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
     from sdr_hdr_profile_creator.edid import PanelMetadata
+    from sdr_hdr_profile_creator.model import ApplicationState, normalize_primaries
     from sdr_hdr_profile_creator.windows_api import DisplayInfo
 
     GUI_AVAILABLE = True
@@ -84,6 +85,7 @@ class WindowTestCase(unittest.TestCase):
         self.installed: list[str] = []
         self.removed: list[str] = []
         self.associations: list[str] = []
+        self.overwritten: list[str] = []
         (self.color_dir / "BaseCalibration.icm").write_bytes(b"")
 
         self.associated: list[str] = []
@@ -115,6 +117,22 @@ class WindowTestCase(unittest.TestCase):
             (self.color_dir / profile_name).unlink(missing_ok=True)
             return True, "uninstalled"
 
+        def fake_overwrite(profile_name, payload):
+            """The in-place repair, with the real one's refusals.
+
+            The real call writes into the system colour folder, so leaving it
+            unfaked would put this suite's fixtures into the machine's own
+            profiles -- the mistake METER_LOG_PATH already made once.
+            """
+            self.overwritten.append(profile_name)
+            target = self.color_dir / profile_name
+            if not target.is_file():
+                return False
+            if len(payload) < target.stat().st_size:
+                return False  # no truncate right: a short write would leave a tail
+            target.write_bytes(payload)
+            return True
+
         patches = {
             "LOCAL_ROOT": self.temp,
             "STATE_PATH": self.temp / "last_gui_state.json",
@@ -134,6 +152,7 @@ class WindowTestCase(unittest.TestCase):
             "send_hdr_toggle_shortcut": fake_send_toggle,
             "reapply_existing_default_profile": fake_reapply,
             "remove_profile": fake_remove,
+            "overwrite_installed_profile": fake_overwrite,
             # Registering real global hotkeys from a test would be antisocial.
             "GammaHotkeyListener": mock.MagicMock(),
             # Both of these read the real monitor. Building the window called them,
@@ -193,6 +212,7 @@ class FixtureSafetyTests(WindowTestCase):
         "associate_profile",
         "reapply_existing_default_profile",
         "remove_profile",
+        "overwrite_installed_profile",
         "set_hdr_enabled",
         "send_hdr_toggle_shortcut",
     )
@@ -1267,6 +1287,106 @@ class WatchdogLaunchTests(WindowTestCase):
         self.addCleanup(patcher.stop)
         self.script = self.install_root / "Watchdog.ps1"
 
+    def write_result(self, **payload):
+        """What the installer or uninstaller records for the GUI to read."""
+        import json as _json
+
+        path = self.install_root / "install_result.json"
+        path.write_text(_json.dumps(payload), encoding="utf-8")
+        return path
+
+    def test_a_recorded_failure_beats_a_freshly_written_script(self):
+        """The whole point of M3.
+
+        The .bat writes Watchdog.ps1 before the integrity check, before -Install and
+        before Task Scheduler registration, so its mtime proves extraction and nothing
+        more. An -Install that threw afterwards -- the realistic first-time failure,
+        when the Off/On pair is incomplete -- still moved that timestamp, and the status
+        bar printed a green "Watchdog installed." nine seconds later.
+        """
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("extracted", encoding="utf-8")
+        self.write_result(action="install", ok=False, warnings=["the working pair is incomplete"])
+        self.window._report_watchdog_outcome(True, before)
+        text = self.window.status_label.text()
+        self.assertIn("Error", text)
+        self.assertIn("incomplete", text)
+
+    def test_a_fallback_startup_entry_is_amber_rather_than_green(self):
+        """It works, but not the way it was meant to: no ten-second logon delay."""
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("extracted", encoding="utf-8")
+        self.write_result(
+            action="install", ok=True, startup="HKCU Run fallback",
+            warnings=["Windows refused to register the scheduled task"],
+        )
+        self.window._report_watchdog_outcome(True, before)
+        text = self.window.status_label.text()
+        self.assertIn("Attention", text, "a degraded install should not read as success")
+        self.assertIn("scheduled task", text)
+
+    def test_a_clean_install_names_how_it_will_start(self):
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("extracted", encoding="utf-8")
+        self.write_result(action="install", ok=True, startup="Task Scheduler (COM / current-user SID)", warnings=[])
+        self.window._report_watchdog_outcome(True, before)
+        text = self.window.status_label.text()
+        self.assertIn("Ready", text)
+        self.assertIn("Task Scheduler", text)
+
+    def test_a_result_from_a_previous_run_is_ignored(self):
+        """Otherwise last week's failure is reported as this click's outcome.
+
+        Freshness is judged against the moment the installer was launched, not against
+        Watchdog.ps1's mtime: that is 0.0 when nothing is installed yet, and every
+        stale result on disk is newer than zero.
+        """
+        import os
+        import time
+
+        self.write_result(action="install", ok=False, warnings=["ancient history"])
+        stale = self.install_root / "install_result.json"
+        old = time.time() - 3600
+        os.utime(stale, (old, old))
+
+        before = self.window._watchdog_script_stamp()
+        launched_at = time.time()
+        self.script.write_text("installed", encoding="utf-8")
+        self.window._report_watchdog_outcome(True, before, launched_at)
+        text = self.window.status_label.text()
+        self.assertNotIn("ancient history", text)
+        self.assertIn("Watchdog installed", text)
+
+    def test_a_stale_result_cannot_pass_when_nothing_is_installed_yet(self):
+        """The case that made the first version of this wrong: with no Watchdog.ps1 the
+        script stamp is 0.0, so a mtime comparison accepted anything."""
+        import os
+        import time
+
+        self.write_result(action="install", ok=False, warnings=["ancient history"])
+        stale = self.install_root / "install_result.json"
+        old = time.time() - 3600
+        os.utime(stale, (old, old))
+
+        self.assertEqual(0.0, self.window._watchdog_script_stamp(), "fixture has a script")
+        self.assertIsNone(
+            self.window._watchdog_result(time.time()),
+            "a result written an hour ago was accepted as this run's",
+        )
+
+    def test_an_uninstall_that_left_the_task_behind_is_reported(self):
+        """The uninstaller used to hardcode exit 0 under SilentlyContinue, so the batch
+        errorlevel test was dead and it always printed "removed successfully"."""
+        before = self.window._watchdog_script_stamp()
+        self.write_result(
+            action="uninstall", ok=False,
+            warnings=["The scheduled task could not be removed: it was created by an elevated install."],
+        )
+        self.window._report_watchdog_outcome(False, before)
+        text = self.window.status_label.text()
+        self.assertIn("Error", text)
+        self.assertIn("elevated install", text)
+
     def test_install_that_updates_the_script_is_reported_as_success(self):
         before = self.window._watchdog_script_stamp()
         self.script.write_text("installed", encoding="utf-8")
@@ -1602,6 +1722,23 @@ class ApplyFromPatternViewTests(WindowTestCase):
     def test_it_reports_failure_rather_than_raising(self):
         with mock.patch.object(self.window, "_apply_mode_profile", side_effect=RuntimeError("no")):
             self.assertFalse(self.window._apply_from_pattern_view())
+
+    def test_a_refused_apply_is_reported_as_failure(self):
+        """_apply_mode_profile signals failure by returning False, not by raising --
+        Windows not being in HDR is the ordinary case. This guarded only against the
+        exception and returned True regardless, so the fullscreen surface latched
+        "Written into the profile." in green and refused every further Enter while the
+        real reason sat in a status bar that window covers."""
+        with mock.patch.object(self.window, "_apply_mode_profile", return_value=False):
+            self.assertFalse(self.window._apply_from_pattern_view())
+
+    def test_the_result_is_the_applys_own_answer_not_a_constant(self):
+        """Both branches through one call site, so a hardcoded return cannot pass."""
+        answers = []
+        for expected in (True, False, True):
+            with mock.patch.object(self.window, "_apply_mode_profile", return_value=expected):
+                answers.append(self.window._apply_from_pattern_view())
+        self.assertEqual([True, False, True], answers)
 
     def test_the_measured_values_reach_the_installed_profile(self):
         import struct
@@ -2182,6 +2319,248 @@ class MeterIntegrationTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class PanelProvenanceTests(WindowTestCase):
+    """One HDR ModeState serves every display, so its figures need an owner.
+
+    Switching the target used to touch none of the colorimetry: _capture_panel_primaries
+    ran only from _refresh_displays and _build_from_panel, and _prefill_luminance_from_panel
+    refused to re-run once anything was set. So display B's profile was written with
+    display A's peak, sustained, black and gamut -- and icc.py regenerates the MHC2
+    header and lumi tag from state, so those override anything a base profile carried.
+    """
+
+    A_XY = (0.6836, 0.3047, 0.2441, 0.7090, 0.1436, 0.0557, 0.3135, 0.3291)
+    B_XY = (0.6400, 0.3300, 0.3000, 0.6000, 0.1500, 0.0600, 0.3127, 0.3290)
+
+    def panel(self, primaries, peak, sustained, black=0.0005):
+        # credible is derived from supports_pq and the peak, not stored.
+        return PanelMetadata(
+            peak_nits=peak,
+            max_frame_average_nits=sustained,
+            min_nits=black,
+            supports_pq=True,
+            primaries=primaries,
+        )
+
+    def other_display(self):
+        """A genuinely different display.
+
+        Changing only ``key`` is not enough: stable_key falls back to
+        friendly_name|gdi_name when device_path is empty, which the shared fixture
+        leaves blank, so two displays built that way are the same display as far as
+        every per-display lookup is concerned.
+        """
+        from dataclasses import replace
+
+        other = replace(
+            self.display,
+            key="BBBB:CCCC:0:2",
+            friendly_name="Second Monitor",
+            gdi_name=r"\\.\DISPLAY2",
+            device_path=r"\\?\DISPLAY#SEC0002#5&second#{guid}",
+        )
+        self.assertNotEqual(self.display.stable_key, other.stable_key)
+        return other
+
+    def reading_panel(self, primaries, peak, sustained):
+        return mock.patch.object(
+            app_module, "read_panel_metadata",
+            lambda _path: self.panel(primaries, peak, sustained),
+        )
+
+    def test_switching_target_replaces_the_other_panels_figures(self):
+        state = self.window.state.hdr
+        state.panel_primaries = normalize_primaries(self.A_XY)
+        state.panel_source_key = self.display.stable_key
+        state.peak_luminance_nits = 1015.0
+        state.full_frame_luminance_nits = 265.0
+        state.minimum_luminance_nits = 0.0002
+
+        other = self.other_display()
+        with self.reading_panel(self.B_XY, 600.0, 350.0):
+            self.window._adopt_panel_for(other)
+
+        self.assertEqual(normalize_primaries(self.B_XY), state.panel_primaries)
+        self.assertAlmostEqual(600.0, state.peak_luminance_nits, places=3)
+        self.assertAlmostEqual(350.0, state.full_frame_luminance_nits, places=3)
+        self.assertEqual(other.stable_key, state.panel_source_key)
+
+    def test_reselecting_the_same_display_leaves_its_measurements_alone(self):
+        """A reading taken on this display outranks its own EDID; only figures whose
+        recorded source is a different display are replaced."""
+        state = self.window.state.hdr
+        state.panel_primaries = normalize_primaries(self.A_XY)
+        state.panel_source_key = self.display.stable_key
+        state.peak_luminance_nits = 812.5      # measured, not declared
+        state.full_frame_luminance_nits = 243.0
+        state.minimum_luminance_nits = 0.0001
+
+        with self.reading_panel(self.A_XY, 1015.0, 265.0):
+            self.window._adopt_panel_for(self.display)
+
+        self.assertAlmostEqual(812.5, state.peak_luminance_nits, places=3)
+        self.assertAlmostEqual(243.0, state.full_frame_luminance_nits, places=3)
+
+    def test_figures_with_no_recorded_owner_are_left_as_they_are(self):
+        """Every state file written before the field existed deserialises with an empty
+        source, and those figures are far likelier to be this display's than not."""
+        state = self.window.state.hdr
+        state.panel_source_key = ""
+        state.peak_luminance_nits = 812.5
+        state.full_frame_luminance_nits = 243.0
+        state.minimum_luminance_nits = 0.0001
+
+        with self.reading_panel(self.B_XY, 600.0, 350.0):
+            self.window._adopt_panel_for(self.other_display())
+
+        self.assertAlmostEqual(812.5, state.peak_luminance_nits, places=3)
+
+    def test_an_unchanged_gamut_still_records_its_owner(self):
+        """Two displays of one model share a gamut, so the early return on an identical
+        value must not leave the previous display recorded as the source."""
+        state = self.window.state.hdr
+        state.panel_primaries = normalize_primaries(self.A_XY)
+        state.panel_source_key = self.display.stable_key
+        other = self.other_display()
+        with self.reading_panel(self.A_XY, 1015.0, 265.0):
+            self.window._capture_panel_primaries(other)
+        self.assertEqual(other.stable_key, state.panel_source_key)
+
+    def test_the_field_survives_a_round_trip_through_json(self):
+        self.window.state.hdr.panel_source_key = "AAAA:BBBB:0:1"
+        restored = ApplicationState.from_dict(self.window.state.to_dict())
+        self.assertEqual("AAAA:BBBB:0:1", restored.hdr.panel_source_key)
+
+    def test_a_state_file_predating_the_field_still_loads(self):
+        payload = self.window.state.to_dict()
+        payload["hdr"].pop("panel_source_key", None)
+        restored = ApplicationState.from_dict(payload)
+        self.assertEqual("", restored.hdr.panel_source_key)
+
+
+class SilentInstallTests(WindowTestCase):
+    """The install that reports success and copies nothing.
+
+    On the owner's machine the two working profiles were owned by
+    BUILTIN\\Administrators from a single earlier elevated run. remove_profile could
+    not delete them, its failure was swallowed, InstallColorProfileW then returned
+    TRUE without copying, and the digest of the payload was cached as though it had
+    been installed. Every edit after that was written to LOCALAPPDATA and thrown away
+    while the status bar said "Rebuilt the Off, On variant."
+    """
+
+    def stage(self, stale=b"OLD" + b"\x00" * 300):
+        """A destination Windows refuses to replace, and a payload for it."""
+        name = "Virtual_HDR_OSD_stale_On.icm"
+        (self.color_dir / name).write_bytes(stale)
+        payload = b"NEW" + b"\x00" * 300
+        path = self.live_root / name
+        return name, path, payload
+
+    def freeze_windows(self):
+        """remove_profile cannot delete, and install silently keeps the old bytes."""
+
+        def refuse_remove(profile_name, display, mode):
+            self.removed.append(profile_name)
+            return False, "uninstall failed (Win32 5)"
+
+        def no_op_install(path, display, mode, make_default=True):
+            self.installed.append(path.name)
+            self.associated.append(path.name)
+            target = self.color_dir / path.name
+            if not target.exists():
+                shutil.copyfile(path, target)
+            return path.name
+
+        return (
+            mock.patch.object(app_module, "remove_profile", refuse_remove),
+            mock.patch.object(app_module, "install_and_associate_profile", no_op_install),
+        )
+
+    def test_a_frozen_destination_is_repaired_in_place(self):
+        name, path, payload = self.stage()
+        repaired = []
+
+        def repair(profile_name, data):
+            repaired.append(profile_name)
+            (self.color_dir / profile_name).write_bytes(data)
+            return True
+
+        remove, install = self.freeze_windows()
+        with remove, install, mock.patch.object(
+            app_module, "overwrite_installed_profile", repair
+        ):
+            self.window._install_variant(self.display, path, payload)
+
+        self.assertEqual([name], repaired, "the no-op install was not noticed")
+        self.assertEqual(payload, (self.color_dir / name).read_bytes())
+
+    def test_an_unrepairable_destination_raises_instead_of_reporting_success(self):
+        name, path, payload = self.stage()
+        remove, install = self.freeze_windows()
+        with remove, install, mock.patch.object(
+            app_module, "overwrite_installed_profile", lambda *_: False
+        ):
+            with self.assertRaises(app_module.WindowsColorError) as caught:
+                self.window._install_variant(self.display, path, payload)
+
+        message = str(caught.exception)
+        self.assertIn(name, message, "the message should name the profile")
+        self.assertIn("Run as Admin", message, "and the remedy that works")
+
+    def test_a_failed_install_does_not_leave_the_cache_claiming_success(self):
+        """The cache is consulted before re-hashing, so one false entry makes every
+        later apply in the session a silent no-op too."""
+        name, path, payload = self.stage()
+        remove, install = self.freeze_windows()
+        with remove, install, mock.patch.object(
+            app_module, "overwrite_installed_profile", lambda *_: False
+        ):
+            with self.assertRaises(app_module.WindowsColorError):
+                self.window._install_variant(self.display, path, payload)
+
+        self.assertNotEqual(
+            app_module.content_digest(payload),
+            self.window._installed_digests.get(name),
+            "a digest was cached for bytes Windows never accepted",
+        )
+
+    def test_an_install_that_really_lands_needs_no_repair(self):
+        """The ordinary path must not start writing over files by hand."""
+        name = "Virtual_HDR_OSD_fresh_On.icm"
+        path = self.live_root / name
+        payload = b"FRESH" + b"\x00" * 300
+        repaired = []
+        with mock.patch.object(
+            app_module, "overwrite_installed_profile",
+            lambda profile_name, data: repaired.append(profile_name) or True,
+        ):
+            self.window._install_variant(self.display, path, payload)
+
+        self.assertEqual([], repaired, "a successful install was second-guessed")
+        self.assertEqual(payload, (self.color_dir / name).read_bytes())
+        self.assertEqual(
+            app_module.content_digest(payload), self.window._installed_digests.get(name)
+        )
+
+    def test_the_verification_does_not_ask_the_cache_to_vouch_for_itself(self):
+        """_install_variant checks with trust_cache=False. Consulting the cache there
+        would let a stale entry from an earlier failed apply confirm the next one."""
+        name = "Virtual_HDR_OSD_stale_On.icm"
+        path = self.live_root / name
+        payload = b"NEW" + b"\x00" * 300
+        (self.color_dir / name).write_bytes(b"OLD" + b"\x00" * 300)
+        # Poison the cache exactly as the old code would have.
+        self.window._installed_digests[name] = app_module.content_digest(payload)
+
+        remove, install = self.freeze_windows()
+        with remove, install, mock.patch.object(
+            app_module, "overwrite_installed_profile", lambda *_: False
+        ):
+            with self.assertRaises(app_module.WindowsColorError):
+                self.window._install_variant(self.display, path, payload)
+
+
 class ElevationButtonTests(WindowTestCase):
     """Restarting elevated closes this window, so the outcomes have to be told apart.
 
@@ -3028,16 +3407,42 @@ class GuideProgressTests(WindowTestCase):
     PANEL_XY = (0.68359375, 0.3046875, 0.244140625, 0.708984375,
                 0.1435546875, 0.0556640625, 0.3134765625, 0.3291015625)
 
+    def calibrated(self):
+        """The state Calibrate Display actually leaves behind."""
+        self.window.state.hdr.base_profile = ""
+        self.window.state.hdr.imported_profile = ""
+        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        binding = self.window._selected_binding()
+        self.assertIsNotNone(binding, "the fixture display has no binding")
+        binding.hdr_profile = app_module.HDR_FROM_PANEL
+        return binding
+
     def test_calibrating_from_the_panel_satisfies_the_step_that_asks_for_it(self):
         """_build_from_panel clears base_profile and imported_profile by design,
         so a check that tested only for those reported the guide's own Calibrate
         Display step as outstanding however many times it was pressed."""
-        self.window.state.hdr.base_profile = ""
-        self.window.state.hdr.imported_profile = ""
-        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        self.calibrated()
         satisfied, detail = self.window._check_profile_imported()
         self.assertTrue(satisfied, detail)
         self.assertIn("Built from this display", detail)
+
+    def test_panel_data_alone_does_not_tick_the_step_off(self):
+        """The regression this step exists to catch.
+
+        _capture_panel_primaries runs on every _refresh_displays, including the one in
+        __init__, so panel_primaries is populated on a genuinely first launch -- before
+        anything has been built, installed or associated. Gating on it reported the step
+        green immediately and invited a first-time user to click straight past the only
+        step in the guide that does any work.
+        """
+        self.window.state.hdr.base_profile = ""
+        self.window.state.hdr.imported_profile = ""
+        self.window.state.hdr.panel_primaries = self.PANEL_XY
+        binding = self.window._selected_binding()
+        binding.hdr_profile = ""          # nothing has been calibrated yet
+        satisfied, detail = self.window._check_profile_imported()
+        self.assertFalse(satisfied, detail)
+        self.assertIn("No HDR profile", detail)
 
     def test_a_display_with_nothing_chosen_is_still_reported_as_outstanding(self):
         self.window.state.hdr.base_profile = ""

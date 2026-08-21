@@ -96,7 +96,8 @@ HELP_SECTIONS: tuple[tuple[str, str], ...] = (
         "To back out completely, open Windows Settings › System › Display › Advanced display, and pick your "
         "original profile as the default for HDR. The app-generated profiles are the two files named "
         "Virtual_HDR_OSD_<id>_Off.icm and _On.icm; you can uninstall them from the colour profile folder.\n\n"
-        "If applying fails with an access-denied error, close the app and start it as administrator once.",
+        "If applying fails with an access-denied error, press Run as Admin at the top of the window. "
+        "It restarts the app elevated and keeps your edits; nothing has to be redone.",
     ),
 )
 
@@ -212,9 +213,12 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
         "small background program puts it back whenever that happens, and keeps Alt+1 / Alt+2 working "
         "once this window is closed."
         "\n\n"
-        "It installs separately and needs administrator rights, so expect a console window and a "
-        "prompt. The switch reports what is actually running rather than what was last clicked, so "
-        "dismissing the prompt simply leaves it off."
+        "It installs separately, so expect a console window. It does not need administrator "
+        "rights — everything it registers is per-user — but if Windows refuses its scheduled "
+        "task, the installer reports that and uses a plain startup entry instead, which starts "
+        "it without the ten-second delay that lets the display stack settle. Run as Admin, then "
+        "install again, to get the scheduled task. The switch reports what is actually running "
+        "rather than what was last clicked."
         "\n\n"
         "Later slider edits are picked up on their own. Re-run the installer only when you change "
         "which profile Windows should fall back to.",

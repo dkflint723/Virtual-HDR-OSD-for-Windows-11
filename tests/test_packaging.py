@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import sys
 import zipfile
 import unittest
 from pathlib import Path
@@ -54,8 +56,71 @@ class WatchdogPackagingTests(unittest.TestCase):
         """Calman reloads STANDARD itself; a forced write every five seconds fights it."""
         script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
         self.assertIn("sdr_unmanaged", script, "the app publishes this; the watchdog must read it")
-        guard = re.search(r"if \(\$SavedDisplay\.StandardProfile -and \(-not \$sdrUnmanaged\)\)", script)
+        guard = re.search(r"if \(\$sdrDesired -and \(-not \$sdrUnmanaged\)\)", script)
         self.assertIsNotNone(guard, "the STANDARD restore must be gated on the published choice")
+
+    def test_watchdog_prefers_the_pinned_sdr_profile_over_its_own_capture(self):
+        """The pin is what the user chose; the capture is only what happened to be
+        associated when the watchdog was installed.
+
+        Publishing just the "unmanaged" boolean was not enough: the forced write ran
+        every five seconds against ``$SavedDisplay.StandardProfile``, so a pin the GUI
+        reported as restored was reverted within five seconds, and re-running the
+        installer re-captured the reverted profile rather than fixing it.
+        """
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("sdr_profile", script, "the watchdog must read the published pin")
+        self.assertIn("$sdrDesired = [string]$SavedDisplay.StandardProfile", script,
+                      "the capture is the fallback, not the first choice")
+        self.assertIn("if ($sdrPinned) { $sdrDesired = $sdrPinned }", script,
+                      "a published pin must override the capture")
+        # And the write itself must use the resolved value, not the raw capture.
+        self.assertNotIn(
+            "CPST_STANDARD_DISPLAY_COLOR_MODE,\n                [string]$SavedDisplay.StandardProfile",
+            script.replace("\r\n", "\n"),
+            "the STANDARD write still uses the install-time capture",
+        )
+
+    def test_the_app_publishes_the_sdr_pin_the_watchdog_reads(self):
+        """Both halves of the contract, or the watchdog reads a key nobody writes."""
+        app = (ROOT / "src/sdr_hdr_profile_creator/app.py").read_text(encoding="utf-8")
+        self.assertIn('"sdr_profile"', app, "the app must publish the pinned SDR profile")
+
+    def test_the_installer_refuses_to_arm_both_startup_mechanisms(self):
+        """Arming the Run key beside a surviving task starts two watchdogs per sign-in.
+
+        Observed: the task from an earlier elevated install could not be deleted by an
+        ordinary account, ``DeleteTask`` raised E_ACCESSDENIED, the whole registration
+        block fell into the catch, and the catch armed the Run key without looking.
+        """
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("$taskSurvives", script, "the fallback must check whether the task is gone")
+        self.assertIn("$probeRoot.GetTask($TaskName)", script,
+                      "deleting is not proof; the task has to be looked for afterwards")
+        catch_body = script[script.index("$registrationError = $_.Exception.Message"):]
+        arm = catch_body.index("New-ItemProperty")
+        check = catch_body.index("if ($taskSurvives)")
+        self.assertLess(check, arm, "the Run key must only be armed after the task check")
+
+    def test_both_sweeps_reap_the_launcher_and_not_only_its_child(self):
+        """Killing the PowerShell alone accomplishes nothing: Launcher.vbs restarts it
+        five seconds later. Every copy of the sweep must name wscript."""
+        for name in ("2- OPTIONAL - Install-Watchdog.bat", "Uninstall-Watchdog.bat"):
+            with self.subTest(script=name):
+                body = (ROOT / name).read_text(encoding="utf-8", errors="replace")
+                self.assertIn("wscript.exe", body, "the supervisor is a wscript.exe")
+                self.assertIn("Launcher.vbs", body, "matched by the script it runs")
+
+    def test_a_surplus_launcher_stands_down_instead_of_respawning(self):
+        """Exit 4 means another instance holds the singleton. Looping on that respawns
+        a doomed PowerShell every five seconds for the life of the session."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        self.assertIn("exit 4", script, "losing the singleton needs its own exit code")
+        self.assertIn("code = shell.Run(", script, "the launcher must read the exit code")
+        self.assertIn("If code = 4 Or code = 2 Or code = 3 Then", script)
+        self.assertIn("WScript.Quit 0", script)
+        # 9 is the startup guard asking for a fresh instance: it must NOT stand down.
+        self.assertNotIn("code = 9", script, "the guard's restart request must be honoured")
 
     def test_watchdog_guards_its_own_startup(self):
         """A hung instance holds the singleton and blocks every healthy one."""
@@ -69,7 +134,9 @@ class WatchdogPackagingTests(unittest.TestCase):
         # A guard that only covers startup misses a loop that stops later, and a
         # watchdog that exits itself needs something to start it again.
         self.assertIn("shell.Run", script)
-        supervises = re.search(r"Do\s+shell\.Run.*, 0, True", script)
+        # bWaitOnReturn = True is what makes it supervise rather than fire and forget,
+        # and is also how the loop learns the exit code it now decides on.
+        supervises = re.search(r"Do\s+code = shell\.Run\(.*, 0, True\)", script)
         self.assertIsNotNone(supervises, "launcher must supervise, not fire and forget")
         # The guard is useless if it is armed after the step that blocks.
         self.assertLess(
@@ -84,6 +151,146 @@ class WatchdogPackagingTests(unittest.TestCase):
         self.assertIn("Principal.UserId = $currentSid", script)
         self.assertIn("logonTrigger.UserId = $currentSid", script)
         self.assertIn("HKCU Run fallback", script)
+
+
+class InstallerOutcomeTests(unittest.TestCase):
+    """The scripts have to record what happened; the GUI cannot see their console.
+
+    "Watchdog installed" used to be decided from Watchdog.ps1's mtime, which the .bat
+    writes before the integrity check, before -Install, before the display capture and
+    before Task Scheduler registration. An -Install that threw afterwards still moved
+    that timestamp and still printed a green success line nine seconds later.
+    """
+
+    def install(self) -> str:
+        return (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+
+    def uninstall(self) -> str:
+        return (ROOT / "Uninstall-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+
+    def test_the_installer_writes_a_result_the_gui_reads(self):
+        script = self.install()
+        self.assertIn("install_result.json", script)
+        self.assertIn("$ResultPath", script)
+        self.assertIn("startup  = $startupMethod", script)
+
+    def test_the_result_is_cleared_before_the_install_starts(self):
+        """A file left by the previous run must not be read as this run's answer."""
+        script = self.install()
+        clear = script.index("Remove-Item -LiteralPath $ResultPath")
+        write = script.index("$result | ConvertTo-Json")
+        self.assertLess(clear, write, "the stale result is cleared after being written")
+
+    def test_the_degraded_startup_paths_record_a_warning(self):
+        """Both are installs that work but not as intended, and the console they say so
+        in is behind a `pause` the user may never read."""
+        script = self.install()
+        self.assertEqual(
+            2, script.count("$script:InstallWarnings +="),
+            "each degraded startup path should record its own warning",
+        )
+
+    def test_the_gui_reads_the_same_file_the_scripts_write(self):
+        app = (ROOT / "src/sdr_hdr_profile_creator/app.py").read_text(encoding="utf-8")
+        self.assertIn("install_result.json", app, "the GUI must read the recorded result")
+
+    def test_the_uninstaller_can_actually_fail(self):
+        """It hardcoded `exit 0` under SilentlyContinue with the task deletion in an
+        empty catch{}, so the batch errorlevel test below it was unreachable and it
+        printed "removed successfully" whatever happened."""
+        script = self.uninstall()
+        # Matched line by line: the prose above explaining the old bug quotes it too.
+        unconditional = [
+            line for line in script.splitlines() if line.strip() == '"exit 0"'
+        ]
+        self.assertEqual([], unconditional, "the exit code is still hardcoded")
+        self.assertIn("if ($keep) { exit 1 } else { exit 0 }", script)
+
+    def test_the_uninstaller_verifies_the_task_is_gone(self):
+        """Deleting is not proof: the task belongs to an elevated install and this
+        account is refused."""
+        script = self.uninstall()
+        self.assertIn("GetTask($task)", script)
+
+    def test_the_uninstaller_keeps_its_files_when_the_task_survives(self):
+        """Deleting Launcher.vbs while the task survives leaves the task launching a
+        script that no longer exists, silently, at every sign-in."""
+        script = self.uninstall()
+        self.assertIn("$keep = $problems.Count -gt 0", script)
+        self.assertIn("if (-not $keep) { Remove-Item -LiteralPath $app -Recurse -Force }", script)
+
+    def test_the_summary_does_not_call_a_managed_hdr_profile_untouched(self):
+        """The owner's screenshot: "HDR / EXTENDED : <none - left untouched>" printed at
+        the same moment the app's own bar read "Active HDR profile: ..._On.icm". The
+        empty case is the one the watchdog rewrites with -Force every five seconds."""
+        script = self.install()
+        self.assertIn("<managed by the Gamma OFF/ON pair below>", script)
+        self.assertNotIn(
+            "'    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<none - left untouched>' })",
+            script,
+        )
+
+
+@unittest.skipUnless(sys.platform == "win32", "cscript.exe is a Windows host")
+class LauncherBehaviourTests(unittest.TestCase):
+    """Run the generated Launcher.vbs for real, rather than reading it.
+
+    Everything else in this file asserts against the text of a script, which is worth
+    something but cannot tell whether the thing works. This one writes the launcher the
+    installer would write, points it at a stub that exits with a chosen code, and
+    watches what it does -- which is the whole of the supervisor's job: deciding
+    whether to restart the watchdog or stand down.
+    """
+
+    #: Long enough for a second attempt (the loop sleeps 5s), short enough to live in
+    #: a suite. A launcher that stands down does so in a fraction of a second.
+    LOOP_BUDGET = 7.0
+
+    def launcher_body(self) -> str:
+        raw = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        found = re.search(r'\$vbs = @"\r?\n(.*?)\r?\n"@', raw, re.S)
+        self.assertIsNotNone(found, "the Launcher.vbs here-string is gone")
+        return found.group(1)
+
+    def outcome_for(self, exit_code: int) -> str:
+        """"stood-down" or "still-looping" for a watchdog that exits with exit_code."""
+        import subprocess
+        import tempfile
+
+        workspace = Path(tempfile.mkdtemp(prefix="vhdr-launcher-"))
+        self.addCleanup(shutil.rmtree, workspace, True)
+        stub = workspace / "stub.cmd"
+        stub.write_text(f"@echo off\r\nexit /b {exit_code}\r\n", encoding="ascii")
+
+        replacement = f'shell.Run("""{stub}""", 0, True)'
+        body = re.sub(
+            r'shell\.Run\("powershell\.exe[^\n]*?, 0, True\)',
+            lambda _match: replacement,   # callable: the path's backslashes are literal
+            self.launcher_body(),
+        )
+        self.assertIn("stub.cmd", body, "failed to point the launcher at the stub")
+
+        launcher = workspace / "Launcher.vbs"
+        launcher.write_text(body, encoding="ascii")
+        try:
+            subprocess.run(
+                ["cscript.exe", "//B", "//Nologo", str(launcher)],
+                timeout=self.LOOP_BUDGET, capture_output=True,
+            )
+            return "stood-down"
+        except subprocess.TimeoutExpired:
+            return "still-looping"
+
+    def test_a_surplus_launcher_exits_rather_than_respawning_forever(self):
+        """Exit 4 is "another instance owns the singleton". Restarting that every five
+        seconds is what burned a PowerShell process per five seconds, indefinitely."""
+        self.assertEqual("stood-down", self.outcome_for(4))
+
+    def test_a_launcher_keeps_restarting_when_the_guard_asks_for_a_fresh_instance(self):
+        """Exit 9 is the startup guard deliberately standing aside so a healthy
+        instance can take over. Standing down on it would leave nothing running --
+        the opposite failure, and a worse one."""
+        self.assertEqual("still-looping", self.outcome_for(9))
 
 
 class StandaloneArchiveTests(unittest.TestCase):

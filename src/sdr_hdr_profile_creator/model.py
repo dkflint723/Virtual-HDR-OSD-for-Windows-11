@@ -74,6 +74,14 @@ class ModeState:
     # a profile built without a base profile to inherit from would otherwise
     # claim BT.2020 on a panel that is nothing of the sort.
     panel_primaries: tuple[float, ...] = ()
+    # Which display the panel figures above came from, as DisplayInfo.stable_key.
+    # The editor keeps one HDR ModeState for all displays, so without this the
+    # luminance and gamut read from display A were written into display B's profile
+    # the moment the target changed -- silently, because icc.py regenerates the MHC2
+    # header and lumi tag from state and those override any inherited tag.
+    # Empty means "provenance unknown", which is how every state file written before
+    # this field existed deserialises.
+    panel_source_key: str = ""
 
     @classmethod
     def neutral(cls, mode: DisplayMode) -> "ModeState":

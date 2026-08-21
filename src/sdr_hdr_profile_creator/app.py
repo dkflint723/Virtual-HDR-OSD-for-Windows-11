@@ -71,11 +71,13 @@ from .windows_api import (
     get_default_profile,
     get_sdr_white_level_nits,
     list_installed_profiles,
+    overwrite_installed_profile,
     set_hdr_enabled,
     reapply_existing_default_profile,
     remove_profile,
     send_hdr_toggle_shortcut,
     watchdog_is_running,
+    WindowsColorError,
 )
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
@@ -211,7 +213,7 @@ class MainWindow(FluentWidget):
         # The watchdog is a separate process with its own installer, and it can be
         # stopped from outside this app entirely. Polling is the only way for the
         # switch to keep telling the truth; an install also completes long after
-        # the click, behind a UAC prompt nobody can time.
+        # the click, in a console this app does not wait on.
         self.watchdog_timer = QTimer(self)
         self.watchdog_timer.setInterval(2500)
         self.watchdog_timer.timeout.connect(self._sync_lock_switch)
@@ -608,8 +610,11 @@ class MainWindow(FluentWidget):
             "whenever Windows drops it — after a mode change, a resume from sleep, or a "
             "driver reset — and keeps Alt+1 / Alt+2 working once this window is closed.\n\n"
             "It is a separate program with its own installer, so switching this on opens a "
-            "console and asks for administrator rights. The switch follows what is actually "
-            "running, not what was last clicked."
+            "console window. No administrator rights are needed: everything it registers is "
+            "per-user. If Windows refuses to register its scheduled task, the installer says "
+            "so and falls back to a plain startup entry — press Run as Admin and install "
+            "again to get the scheduled task instead.\n\n"
+            "The switch follows what is actually running, not what was last clicked."
         )
         self.lock_switch.checkedChanged.connect(self._lock_toggled)
         runtime_row.addWidget(self.lock_switch)
@@ -1131,7 +1136,14 @@ class MainWindow(FluentWidget):
         # Testing only for a base therefore reported the guide's own Calibrate
         # Display step as still outstanding no matter how many times it was
         # pressed, which is the one step that step exists to confirm.
-        if self.state.hdr.panel_primaries:
+        # Not panel_primaries: _capture_panel_primaries fills that on every
+        # _refresh_displays, including the one in __init__, so this step reported
+        # itself already done on a genuinely first launch -- with no profile built,
+        # none installed and none associated -- and the guide invited the user to
+        # click past the only step that does any work. binding.hdr_profile is set to
+        # HDR_FROM_PANEL by _calibrate_now and by nothing else.
+        binding_built = binding is not None and binding.hdr_profile == HDR_FROM_PANEL
+        if binding_built and self.state.hdr.panel_primaries:
             state = self.state.hdr
             return True, (
                 f"Built from this display: {state.peak_luminance_nits:g} nits peak, "
@@ -1286,6 +1298,9 @@ class MainWindow(FluentWidget):
         # one: the button appeared to do nothing at all. Give the installer its own
         # visible console instead, then verify the outcome and report it.
         before = self._watchdog_script_stamp()
+        # Wall clock, not the script's mtime. The mtime is 0.0 when nothing is
+        # installed yet, and every stale result file on disk is "newer" than that.
+        launched_at = time.time()
         try:
             subprocess.Popen(
                 ["cmd.exe", "/c", str(path)],
@@ -1300,7 +1315,10 @@ class MainWindow(FluentWidget):
             "reported here when it finishes.",
             "warning",
         )
-        QTimer.singleShot(9000, self, lambda: self._report_watchdog_outcome(installing, before))
+        QTimer.singleShot(
+            9000, self,
+            lambda: self._report_watchdog_outcome(installing, before, launched_at),
+        )
 
     @staticmethod
     def _watchdog_script_stamp() -> float:
@@ -1310,10 +1328,56 @@ class MainWindow(FluentWidget):
         except OSError:
             return 0.0
 
-    def _report_watchdog_outcome(self, installing: bool, before: float) -> None:
-        """Say whether the installer actually changed anything."""
+    @staticmethod
+    def _watchdog_result(newer_than: float) -> dict | None:
+        """What the installer or uninstaller recorded, if it did so on this run.
+
+        The mtime check is what makes a stale file from a previous run unusable as
+        this run's answer.
+        """
+        path = WATCHDOG_INSTALL_ROOT / "install_result.json"
+        try:
+            if path.stat().st_mtime < newer_than:
+                return None
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return payload if isinstance(payload, dict) else None
+
+    def _report_watchdog_outcome(
+        self, installing: bool, before: float, launched_at: float | None = None
+    ) -> None:
+        """Say whether the installer actually changed anything.
+
+        The mtime of Watchdog.ps1 answers a much narrower question than it looks like
+        it does: the .bat writes that file before the integrity check, before -Install,
+        before the display capture and before Task Scheduler registration. So it proves
+        extraction, and everything after it -- including an outright throw, which is the
+        realistic first-time failure when the Off/On pair is incomplete -- was still
+        reported as a green "Watchdog installed." Prefer what the script itself
+        recorded, and fall back to the timestamp only when there is no record.
+        """
         after = self._watchdog_script_stamp()
+        result = self._watchdog_result(launched_at if launched_at is not None else before)
         if installing:
+            if result is not None:
+                warnings = [str(text) for text in (result.get("warnings") or [])]
+                if not result.get("ok"):
+                    self._set_status(
+                        "Watchdog install did not complete. "
+                        + (warnings[0] if warnings else "Check the installer window."),
+                        "error",
+                    )
+                elif warnings:
+                    # It works, but not the way it was meant to. Amber, not green.
+                    self._set_status(f"Watchdog installed, with a caveat: {warnings[0]}", "warning")
+                else:
+                    self._set_status(
+                        f"Watchdog installed via {result.get('startup') or 'the usual startup entry'}. "
+                        "It now keeps your SDR/HDR associations stable and owns Alt+1 / Alt+2.",
+                        "ok",
+                    )
+                return
             if after > before:
                 self._set_status(
                     "Watchdog installed. It now keeps your SDR/HDR associations stable and "
@@ -1326,6 +1390,15 @@ class MainWindow(FluentWidget):
                     "updated. Check the installer window for an error message.",
                     "error",
                 )
+            return
+
+        if result is not None and not result.get("ok"):
+            warnings = [str(text) for text in (result.get("warnings") or [])]
+            self._set_status(
+                "Watchdog uninstall did not complete. "
+                + (warnings[0] if warnings else "Check the uninstaller window."),
+                "error",
+            )
             return
         if after == 0.0:
             self._set_status("Watchdog uninstalled.", "ok")
@@ -1394,6 +1467,11 @@ class MainWindow(FluentWidget):
         self.state.selected_display_key = selected.key
         self._current_display_snapshot = selected
         self._last_detected_mode = None
+        # Re-read the panel, because the editor holds one HDR ModeState for every
+        # display. Nothing here used to touch the colorimetry at all, so picking a
+        # second display wrote the first one's gamut and luminance into its profile.
+        # Both calls are no-ops when the figures already describe this display.
+        self._adopt_panel_for(selected)
         self._remember_current_sdr_profile(selected)
         self._update_mode_badge(selected)
         self._sync_display_widgets(selected)
@@ -2283,15 +2361,22 @@ class MainWindow(FluentWidget):
         self._restore_live_mode(previous_live)
 
     def _apply_from_pattern_view(self) -> bool:
-        """Apply without leaving the patterns, so the readings are not lost on exit."""
+        """Apply without leaving the patterns, so the readings are not lost on exit.
+
+        Returns what the apply actually did. _apply_mode_profile reports failure by
+        returning False -- Windows not in HDR, or its own except branch -- and this
+        used to return True regardless, guarding only against an exception. The
+        pattern surface then latched "Written into the profile." in green and refused
+        every later Enter, while the real message sat in a status bar covered by a
+        fullscreen window.
+        """
         display = self._selected_display()
         if display is None:
             return False
         try:
-            self._apply_mode_profile("Calibration measurements", force=True)
+            return self._apply_mode_profile("Calibration measurements", force=True)
         except Exception:
             return False
-        return True
 
     def _restore_live_mode(self, previous: bool) -> None:
         """Put Live Apply back as the user had it once the patterns are gone."""
@@ -2592,18 +2677,23 @@ class MainWindow(FluentWidget):
         }
         return payloads, on_option
 
-    def _installed_matches(self, path: Path, digest: str) -> bool:
+    def _installed_matches(self, path: Path, digest: str, *, trust_cache: bool = True) -> bool:
         """True when Windows already has byte-identical content installed.
 
         Hashing the installed copy rather than trusting the in-memory cache means
         the fast path also survives an app restart, and correctly misses when
         something outside this app has replaced the file.
+
+        ``trust_cache=False`` is for verifying an install that has just happened. The
+        cache is only ever written from a hash of the file on disk, but the caller of
+        that check is precisely the code that would be about to record a new entry, so
+        consulting it there would be asking the claim to vouch for itself.
         """
         try:
             installed = get_color_directory() / path.name
             if not installed.is_file():
                 return False
-            if self._installed_digests.get(path.name) == digest:
+            if trust_cache and self._installed_digests.get(path.name) == digest:
                 return True
             if content_digest(installed.read_bytes()) != digest:
                 return False
@@ -2613,6 +2703,20 @@ class MainWindow(FluentWidget):
         return True
 
     def _install_variant(self, display: DisplayInfo, path: Path, payload: bytes) -> str:
+        """Install one variant and prove Windows really took it.
+
+        Nothing here used to be checked. ``InstallColorProfileW`` returns TRUE without
+        copying anything when the destination already exists, so the whole sequence --
+        remove, install, cache the digest, report success -- ran to completion while
+        the file in the colour folder stayed exactly as it was. The removal that was
+        supposed to prevent that is the step that fails: a profile written by an
+        elevated run is owned by ``BUILTIN\\Administrators`` and this account is
+        refused DELETE, and its failure was swallowed by ``except Exception: pass``.
+
+        The result was an app that reported "Rebuilt the Off, On variant." after every
+        edit while the display went on using an older profile, with the association
+        correct and the bytes stale, and nothing anywhere that could notice.
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(payload)
         # Stable filenames are intentionally reused, so the previous app-owned copy
@@ -2623,7 +2727,21 @@ class MainWindow(FluentWidget):
         except Exception:
             pass
         name = install_and_associate_profile(path, display, "HDR", make_default=False)
-        self._installed_digests[path.name] = content_digest(payload)
+
+        digest = content_digest(payload)
+        if not self._installed_matches(path, digest, trust_cache=False):
+            # The install was a no-op. The bytes can still be written straight into the
+            # existing file, because the ACL that denies DELETE still allows
+            # FILE_WRITE_DATA -- so this recovers without asking for elevation.
+            if not overwrite_installed_profile(name, payload):
+                raise WindowsColorError(
+                    f"Windows kept the previous {name} instead of the profile just "
+                    "built, and it could not be replaced by this account. It was "
+                    "installed by an earlier elevated run, so press Run as Admin at "
+                    "the top of the window and apply again."
+                )
+            self._installed_digests[path.name] = digest
+
         return name
 
     def _apply_mode_profile(self, reason: str, *, force: bool = False) -> bool:
@@ -2785,6 +2903,17 @@ class MainWindow(FluentWidget):
                 # calibration owns SDR" rather than overriding it on a timer; the
                 # GUI's own restraint is worth nothing while the watchdog writes.
                 "sdr_unmanaged": binding is not None and binding.sdr_profile == SDR_UNMANAGED,
+                # The pinned name, not just the fact that a choice was made. Publishing
+                # only the boolean above left the watchdog reasserting its install-time
+                # capture every five seconds, so a profile pinned here was reverted
+                # within five seconds while the GUI had already said it was restored.
+                # Empty means "no opinion": follow whatever was captured.
+                "sdr_profile": (
+                    binding.sdr_profile
+                    if binding is not None
+                    and binding.sdr_profile not in ("", SDR_UNMANAGED)
+                    else ""
+                ),
                 # Timezone-aware and full precision: the watchdog compares this against
                 # its own timestamp to decide who acted last. A naive local time is
                 # ambiguous across a DST fall-back, and truncating to whole seconds made
@@ -2876,7 +3005,13 @@ class MainWindow(FluentWidget):
             state.peak_luminance_nits,
             state.full_frame_luminance_nits,
         )
-        if current != self.UNSET_LUMINANCE:
+        # "Nobody has set these" is the usual reason to fill them, but figures
+        # belonging to a different panel are worse than unset: they are wrong and they
+        # look deliberate. There is one HDR ModeState for every display, so switching
+        # target used to carry display A's peak, sustained and black straight into
+        # display B's profile.
+        foreign = bool(state.panel_source_key) and state.panel_source_key != display.stable_key
+        if current != self.UNSET_LUMINANCE and not foreign:
             return False
         panel = read_panel_metadata(display.device_path)
         if panel is None or not panel.credible:
@@ -2886,6 +3021,7 @@ class MainWindow(FluentWidget):
         state.full_frame_luminance_nits = max(
             80.0, min(state.peak_luminance_nits, panel.max_frame_average_nits or panel.peak_nits)
         )
+        state.panel_source_key = display.stable_key
         self._save_state_soon()
         return True
 
@@ -2958,6 +3094,24 @@ class MainWindow(FluentWidget):
         self._save_state_now()
         self._load_mode_into_controls()
 
+    def _adopt_panel_for(self, display: DisplayInfo) -> None:
+        """Make the panel figures in state describe this display.
+
+        Cheap and idempotent when they already do: both calls below compare against
+        what is stored and return without writing. The luminance half only replaces
+        values when their recorded source is a different display, so a measurement
+        taken on this one is never overwritten by its own EDID.
+
+        Luminance first, and the order is load-bearing: both calls stamp
+        ``panel_source_key`` with this display, and the luminance check reads it to
+        decide whether the stored figures belong to somebody else. Capturing the
+        primaries first overwrote that provenance, so the luminance check then saw its
+        own new stamp, concluded the figures were native and kept the previous
+        display's peak.
+        """
+        self._prefill_luminance_from_panel(display)
+        self._capture_panel_primaries(display)
+
     def _capture_panel_primaries(self, display: DisplayInfo) -> bool:
         """Record the panel's own gamut, for profiles generated without a base.
 
@@ -2979,8 +3133,13 @@ class MainWindow(FluentWidget):
         if not measured:
             measured = self._dxgi_primaries(display)
         if not measured or measured == self.state.hdr.panel_primaries:
+            # Still this display's gamut even when the value did not change, and the
+            # provenance is what decides whether a later display switch re-reads.
+            if measured:
+                self.state.hdr.panel_source_key = display.stable_key
             return False
         self.state.hdr.panel_primaries = measured
+        self.state.hdr.panel_source_key = display.stable_key
         self._save_state_soon()
         return True
 

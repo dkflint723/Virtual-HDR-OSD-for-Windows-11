@@ -81,6 +81,11 @@ $StatePath = Join-Path $AppDir 'State.json'
 $LogPath = Join-Path $AppDir 'Watchdog.log'
 $GammaStatePath = Join-Path $env:LOCALAPPDATA 'Virtual_HDR_OSD_for_Windows\gamma_hotkeys.json'
 $LauncherPath = Join-Path $AppDir 'Launcher.vbs'
+# Written at the very end of a successful -Install and read by the GUI, which cannot
+# see this console. Deleted first, so a stale file from a previous run cannot be
+# mistaken for this one's result.
+$ResultPath = Join-Path $AppDir 'install_result.json'
+$script:InstallWarnings = @()
 $TaskName = 'Virtual HDR OSD - Color Profile Mode Watchdog'
 
 function Write-Log {
@@ -99,6 +104,25 @@ function Write-Log {
 }
 
 function Stop-ExistingWatchdog {
+    # Two kinds of process, and the order matters. Launcher.vbs runs under
+    # wscript.exe and restarts the watchdog five seconds after it exits, so killing
+    # only the PowerShell -- which is all this used to do, because the filter named
+    # powershell.exe and pwsh.exe and nothing else -- just got it started again. The
+    # supervisor goes first, then its child.
+    try {
+        $launcher = [Regex]::Escape($LauncherPath)
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                ($_.Name -ieq 'wscript.exe' -or $_.Name -ieq 'cscript.exe') -and
+                $_.CommandLine -and
+                ($_.CommandLine -match $launcher) -and
+                ($_.ProcessId -ne $PID)
+            } |
+            ForEach-Object {
+                Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
+            }
+    } catch {}
+
     try {
         $escaped = [Regex]::Escape((Join-Path $AppDir 'Watchdog.ps1'))
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -1010,28 +1034,44 @@ function Restore-SavedProfiles {
     # reload the STANDARD association themselves, and a redundant write on a timer
     # is what fights them. The GUI publishes the choice; honour it.
     $sdrUnmanaged = $false
+    # What to reassert, in order of authority: a profile the user pinned in the GUI,
+    # otherwise whatever was associated when this watchdog was installed.
+    #
+    # Only the boolean used to be published, so the force-write below always used the
+    # install-time capture. A pin the GUI had just reported as "restored" was reverted
+    # within five seconds, and the log said so in the user's own words -- "Restored
+    # STANDARD profile" -- naming the profile they had just replaced. Re-running the
+    # installer did not help either: it re-captures the live association, which by then
+    # is the reverted one.
+    $sdrDesired = [string]$SavedDisplay.StandardProfile
     $sdrEntry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
-    if ($sdrEntry -and ($sdrEntry.PSObject.Properties.Name -contains 'sdr_unmanaged')) {
-        $sdrUnmanaged = [bool]$sdrEntry.sdr_unmanaged
+    if ($sdrEntry) {
+        if ($sdrEntry.PSObject.Properties.Name -contains 'sdr_unmanaged') {
+            $sdrUnmanaged = [bool]$sdrEntry.sdr_unmanaged
+        }
+        if ($sdrEntry.PSObject.Properties.Name -contains 'sdr_profile') {
+            $sdrPinned = [string]$sdrEntry.sdr_profile
+            if ($sdrPinned) { $sdrDesired = $sdrPinned }
+        }
     }
 
-    if ($SavedDisplay.StandardProfile -and (-not $sdrUnmanaged)) {
+    if ($sdrDesired -and (-not $sdrUnmanaged)) {
         $current = [ColorProfileWatchdog.Native]::GetDefaultProfile(
             $CurrentDisplay,
             [ColorProfileWatchdog.Native]::WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
             [ColorProfileWatchdog.Native]::CPST_STANDARD_DISPLAY_COLOR_MODE
         )
 
-        if ($Force -or $current -ne $SavedDisplay.StandardProfile) {
+        if ($Force -or $current -ne $sdrDesired) {
             $hr = [ColorProfileWatchdog.Native]::SetCurrentUserDefault(
                 $CurrentDisplay,
                 [ColorProfileWatchdog.Native]::CPST_STANDARD_DISPLAY_COLOR_MODE,
-                [string]$SavedDisplay.StandardProfile
+                $sdrDesired
             )
             if ($hr -lt 0) {
                 Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } else {
-                Write-Log ('Restored STANDARD profile on {0}: {1}' -f $CurrentDisplay.GdiName, $SavedDisplay.StandardProfile)
+                Write-Log ('Restored STANDARD profile on {0}: {1}' -f $CurrentDisplay.GdiName, $sdrDesired)
             }
         }
     }
@@ -1130,6 +1170,9 @@ function Invoke-GammaHotkey {
 }
 
 if ($Install) {
+    # A result file left by a previous run must never be mistaken for this one's.
+    Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
+
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     Stop-ExistingWatchdog
 
@@ -1172,10 +1215,21 @@ if ($Install) {
     # supervisor that would simply leave no watchdog running until the next logon.
     # Run with bWaitOnReturn = True so this script blocks until the process ends,
     # then restart it after a short pause.
+    # bWaitOnReturn = True makes Run return the watchdog's exit code, which is the
+    # only way this loop can tell "restart me" from "you are surplus". Without that
+    # distinction a second supervisor -- one arrives whenever both the scheduled task
+    # and the Run key are armed -- respawned a PowerShell that lost the singleton and
+    # exited immediately, every five seconds, for as long as the session lasted.
+    #   4  another instance already holds the singleton  -> stand down
+    #   2  no saved state    3  no saved displays        -> will not fix itself
+    #   9  the startup guard asked for a fresh instance  -> restart, that is the point
     $vbs = @"
 Set shell = CreateObject("WScript.Shell")
 Do
-  shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, True
+  code = shell.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, True)
+  If code = 4 Or code = 2 Or code = 3 Then
+    WScript.Quit 0
+  End If
   WScript.Sleep 5000
 Loop
 "@
@@ -1240,22 +1294,73 @@ Loop
         Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
     }
     catch {
-        $startupMethod = 'HKCU Run fallback'
-        Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $_.Exception.Message)
-        $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
-        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
-        New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+        $registrationError = $_.Exception.Message
+
+        # Arming the Run key without checking is what left both mechanisms live at
+        # once. The DeleteTask above is usually what failed -- an earlier elevated
+        # install owns the task and this account cannot remove it -- so the old task
+        # survived and the Run key was added beside it. Two supervisors then start at
+        # every sign-in, one loses the singleton, and it respawns forever.
+        $taskSurvives = $false
+        try {
+            $probe = New-Object -ComObject 'Schedule.Service'
+            $probe.Connect()
+            $probeRoot = $probe.GetFolder('\')
+            try { $probeRoot.DeleteTask($TaskName, 0) } catch {}
+            try { $probeRoot.GetTask($TaskName) | Out-Null; $taskSurvives = $true } catch { $taskSurvives = $false }
+        } catch { $taskSurvives = $false }
+
+        if ($taskSurvives) {
+            $startupMethod = 'existing scheduled task (kept; Run key deliberately not added)'
+            $script:InstallWarnings += 'The scheduled task from an earlier elevated install could not be replaced by this account. It was left running and the startup entry was not duplicated. To replace it, press Run as Admin and install again.'
+            Write-Warning ('Task Scheduler registration failed ({0}).' -f $registrationError)
+            Write-Warning 'The existing task could not be removed either, so it was created by an elevated install and this account cannot replace it.'
+            Write-Warning 'It is left in place and the Run key is NOT being added: arming both starts two watchdogs at every sign-in, and the surplus one spins.'
+            Write-Warning 'To replace the task, press Run as Admin in Virtual HDR OSD, or right-click this installer and choose Run as administrator.'
+            Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
+        } else {
+            $startupMethod = 'HKCU Run fallback'
+            $script:InstallWarnings += 'Windows refused to register the scheduled task, so a plain startup entry was used instead. The watchdog will start at sign-in without the ten-second delay that lets the display stack settle first.'
+            Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $registrationError)
+            $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
+            New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+            New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+        }
     }
 
     Write-Host ''
-    Write-Host 'Captured display profile associations:' -ForegroundColor Cyan
+    Write-Host 'What the watchdog will keep in place:' -ForegroundColor Cyan
     foreach ($item in $saved) {
         Write-Host ('  {0}' -f $item.GdiName)
         Write-Host ('    SDR / STANDARD : {0}' -f $(if ($item.StandardProfile) { $item.StandardProfile } else { '<none - left untouched>' }))
-        Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<none - left untouched>' }))
+        # An empty ExtendedProfile does NOT mean HDR is unprotected. It means the live
+        # association is this app's own working profile, which Resolve-BaseExtendedProfile
+        # deliberately refuses to adopt as a fallback -- otherwise the watchdog would
+        # restore already-edited output as its own source. The pair below is what it
+        # actually reasserts, with -Force, every five seconds. Reporting that case as
+        # "left untouched" said the opposite of what happens, and contradicted the app's
+        # own status bar at the same moment.
+        Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<managed by the Gamma OFF/ON pair below>' }))
         Write-Host ('    Gamma OFF      : {0}' -f $(if ($item.WorkingOff) { $item.WorkingOff } else { '<not prepared by Virtual HDR OSD>' }))
         Write-Host ('    Gamma ON       : {0}' -f $(if ($item.WorkingOn) { $item.WorkingOn } else { '<not prepared by Virtual HDR OSD>' }))
     }
+
+    # The GUI used to decide "installed" from Watchdog.ps1's mtime, which the .bat
+    # writes before the integrity check, before -Install, before the display capture
+    # and before Task Scheduler registration. So every later failure -- including an
+    # outright throw -- was still reported as a green "Watchdog installed."
+    # Write down what actually happened instead, for the GUI to read.
+    $result = [PSCustomObject]@{
+        action   = 'install'
+        ok       = $true
+        startup  = $startupMethod
+        fallback = ($startupMethod -notlike 'Task Scheduler*')
+        warnings = @($script:InstallWarnings)
+        at       = (Get-Date).ToString('o')
+    }
+    try {
+        $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+    } catch {}
 
     Write-Host ''
     Write-Host ('Startup mode: {0} / hidden / 10-second Task Scheduler delay when supported' -f $startupMethod) -ForegroundColor Green
@@ -1272,7 +1377,10 @@ Loop
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\ColorProfileModeWatchdogStandalone', [ref]$createdNew)
 if (-not $createdNew) {
-    exit 0
+    # 4, not 0: Launcher.vbs reads this to decide whether it is the surplus supervisor
+    # and should stand down. 0 is indistinguishable from an ordinary exit, and the
+    # loop treated it as "restart me".
+    exit 4
 }
 
 try {

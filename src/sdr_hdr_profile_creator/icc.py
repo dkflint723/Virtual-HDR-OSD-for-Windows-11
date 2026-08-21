@@ -316,6 +316,32 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
             template_tags = {}
 
     if template_tags:
+        # Colorants inherited from a base that never said what white they were adapted
+        # to. ICC requires a display profile's rXYZ/gXYZ/bXYZ to be D50-adapted, and a
+        # v2 file that omits chad is relying on exactly that convention -- but the
+        # (wtpt, chad) pair is about to be dropped by the coupled-group rule below and
+        # replaced with this profile's own D65 white and an identity chad. Splicing the
+        # two together describes a display that does not exist: measured against real
+        # installed profiles the colorant sum missed the declared white by 0.044, and a
+        # consumer honouring the identity chad reads green at 0.3212,0.5979 instead of
+        # 0.3000,0.6000 -- four times the module's own PRIMARY_MISMATCH_THRESHOLD_XY.
+        #
+        # Adapt the colorants out of D50 and into this profile's white instead. Only
+        # the colorants: those files store wtpt unadapted, so putting it through the
+        # same matrix yields a white of 0.2806,0.2959, which is not a white at all.
+        colorants = (b"rXYZ", b"gXYZ", b"bXYZ")
+        if (
+            all(signature in template_tags for signature in colorants)
+            and b"chad" not in template_tags
+            and mode == "HDR"
+        ):
+            d50_to_d65 = _inverse3(D65_TO_D50_CHAD)
+            for signature in colorants:
+                parsed = _parse_xyz(template_tags[signature])
+                if parsed is None:
+                    continue
+                template_tags[signature] = _xyz_type(_matrix_vector(d50_to_d65, parsed))
+
         # Tags that only mean anything as a set. Taking some members from the base
         # profile and synthesising the rest produces a plausible-looking profile
         # describing a display that does not exist — a base missing gTRC and bTRC
@@ -326,6 +352,16 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
                 for signature in group:
                     template_tags.pop(signature, None)
 
+        # MSCA says "these colorants are D65-adapted", which is true of the generated
+        # form -- D65 white beside an identity chad -- and false whenever a base brings
+        # its own chad through, because those colorants are then still in the D50 PCS.
+        # Claiming otherwise misdescribes the profile to anything that reads the marker.
+        inherited_chad = _parse_chad(template_tags.get(b"chad", b""))
+        identity = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
+        adapted_to_d65 = inherited_chad is None or all(
+            abs(inherited_chad[i] - identity[i]) < 1e-6 for i in range(9)
+        )
+
         tags: list[tuple[bytes, bytes]] = []
         seen: set[bytes] = set()
         for signature, payload in template_tags.items():
@@ -335,6 +371,8 @@ def build_profile(mode: DisplayMode, state: ModeState, transform: CalibrationTra
             tags.append((signature, replacement))
             seen.add(signature)
         for signature, payload in defaults:
+            if signature == b"MSCA" and not adapted_to_d65:
+                continue
             if signature not in seen:
                 tags.append((signature, payload))
                 seen.add(signature)
