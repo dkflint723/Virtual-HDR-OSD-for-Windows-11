@@ -261,3 +261,88 @@ class UnstatedLuminanceTests(unittest.TestCase):
         self.assertTrue(panel.credible)
         self.assertGreater(panel.peak_nits, 900.0)
         self.assertLess(panel.max_frame_average_nits, panel.peak_nits / 2)
+
+
+class ChromaticityInTheBaseBlockTests(unittest.TestCase):
+    """The panel's gamut, read from the base block rather than from DXGI.
+
+    Every fixture in this file built its base block as 128 zero bytes, which
+    parse_chromaticity rejects outright -- so `primaries=parse_chromaticity(edid)` in
+    parse_hdr_static_metadata returned () at every call site and replacing it with
+    `primaries=()` was an *equivalent* mutation. Nothing here could see the difference,
+    and every other module mocks read_panel_metadata with a hand-built PanelMetadata.
+    """
+
+    # The panel this fork was developed against, as it states itself.
+    PG32UCDM = (0.6836, 0.3047, 0.2441, 0.7090, 0.1436, 0.0557, 0.3135, 0.3291)
+
+    @staticmethod
+    def encode_chromaticity(values) -> bytes:
+        """The inverse of parse_chromaticity: ten bytes for 0x19-0x22.
+
+        Each coordinate is ten bits -- eight in its own byte, the low two packed into
+        one of two shared bytes -- so the resolution is 1/1024 and a round trip is only
+        exact to about 0.001.
+        """
+        codes = [min(1023, max(0, round(value * 1024.0))) for value in values]
+        low_rg = ((codes[0] & 3) << 6) | ((codes[1] & 3) << 4) | \
+                 ((codes[2] & 3) << 2) | (codes[3] & 3)
+        low_bw = ((codes[4] & 3) << 6) | ((codes[5] & 3) << 4) | \
+                 ((codes[6] & 3) << 2) | (codes[7] & 3)
+        return bytes([low_rg, low_bw] + [code >> 2 for code in codes])
+
+    def edid_with(self, values, peak_code=0xBE, average_code=0x9C, minimum_code=0x08):
+        """A two-block EDID: real chromaticity in the base, HDR metadata in the CTA."""
+        base = bytearray(128)
+        base[0x19:0x23] = self.encode_chromaticity(values)
+
+        extension = bytearray(128)
+        extension[0] = 0x02
+        extension[2] = 20
+        extension[4] = (7 << 5) | 6
+        extension[5] = 0x06          # HDR static metadata
+        extension[6] = 0x04          # ET_2 = PQ
+        extension[7] = 0x00
+        extension[8] = peak_code
+        extension[9] = average_code
+        extension[10] = minimum_code
+        return bytes(base) + bytes(extension)
+
+    def test_the_base_block_round_trips_through_the_encoder(self):
+        """If this fails the fixture is wrong, not the code under test."""
+        parsed = parse_chromaticity(self.edid_with(self.PG32UCDM))
+        self.assertEqual(8, len(parsed))
+        for expected, actual in zip(self.PG32UCDM, parsed):
+            self.assertAlmostEqual(expected, actual, delta=1 / 1024)
+
+    def test_the_declaration_carries_the_panels_own_gamut(self):
+        """The assertion the file could not make before: parse_hdr_static_metadata
+        surfaces the base block's primaries, so dropping that argument fails here."""
+        panel = parse_hdr_static_metadata(self.edid_with(self.PG32UCDM))
+        self.assertIsNotNone(panel)
+        self.assertEqual(8, len(panel.primaries), "the panel's gamut was not carried")
+        for expected, actual in zip(self.PG32UCDM, panel.primaries):
+            self.assertAlmostEqual(expected, actual, delta=1 / 1024)
+
+    def test_a_wide_gamut_is_not_flattened_to_something_generic(self):
+        """The value of reading the panel at all: this display is wider than P3, and a
+        BT.709 or BT.2020 stand-in would describe a different display."""
+        panel = parse_hdr_static_metadata(self.edid_with(self.PG32UCDM))
+        red_x, green_y = panel.primaries[0], panel.primaries[3]
+        self.assertGreater(red_x, 0.67, "red was not the panel's own")
+        self.assertGreater(green_y, 0.69, "green was not the panel's own")
+
+    def test_a_zeroed_base_block_reports_no_gamut_rather_than_a_wrong_one(self):
+        """The other half of the rule, and the state every other fixture is in: a panel
+        that answered with zeros has not answered, and must not be taken at its word."""
+        blank = bytearray(self.edid_with(self.PG32UCDM))
+        blank[0x19:0x23] = bytes(10)
+        panel = parse_hdr_static_metadata(bytes(blank))
+        self.assertEqual((), panel.primaries)
+
+    def test_a_coordinate_outside_the_diagram_is_refused(self):
+        """Each y also divides when converting to XYZ, so a zero there is fatal."""
+        impossible = list(self.PG32UCDM)
+        impossible[3] = 0.0          # green y
+        panel = parse_hdr_static_metadata(self.edid_with(impossible))
+        self.assertEqual((), panel.primaries)

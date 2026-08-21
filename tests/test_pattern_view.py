@@ -8,6 +8,7 @@ against a widget that was never shown.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import struct
 import unittest
 from unittest import mock
@@ -1539,14 +1540,50 @@ class DeclaredBesideMeasuredTests(PatternViewTestCase):
         win = self.view(panel=False)
         self.assertIsNone(win._declared_for(win.pattern))
 
+    def declaration_ink(self, **kwargs):
+        """Pixels painted in the declaration line's own pen.
+
+        Comparing whole buffers with and without a claim proved nothing: the line
+        carries its own y advance, so deleting the drawText and keeping the advance
+        still shifted every later glyph and the buffers differed anyway. Varying the
+        number does not work either, because the offscreen platform has no font and
+        renders every character as an identical box. The pen is reserved for this one
+        line, so its ink exists if and only if the line was drawn, and the amount of it
+        tracks how many characters there are.
+        """
+        raw, _, _ = render_overlay(
+            460, 900, pattern_view.pattern_by_key("peak-white"),
+            context_for(capability(), 240.0), self.controls, 0, **kwargs)
+        want = (pattern_view.DECLARATION_INK.red(),
+                pattern_view.DECLARATION_INK.green(),
+                pattern_view.DECLARATION_INK.blue())
+        return sum(
+            1 for i in range(0, len(raw), 4)
+            if raw[i + 3] > 0 and (raw[i], raw[i + 1], raw[i + 2]) == want
+        )
+
     def test_the_declaration_reaches_the_overlay(self):
-        plain, _, _ = render_overlay(
-            460, 900, pattern_view.pattern_by_key("peak-white"),
-            context_for(capability(), 240.0), self.controls, 0)
-        with_claim, _, _ = render_overlay(
-            460, 900, pattern_view.pattern_by_key("peak-white"),
-            context_for(capability(), 240.0), self.controls, 0, declared=1015.24)
-        self.assertNotEqual(plain, with_claim)
+        self.assertEqual(0, self.declaration_ink(), "the claim was drawn without one to make")
+        self.assertGreater(
+            self.declaration_ink(declared=1015.24), 0,
+            "the panel's declared figure was not drawn",
+        )
+
+    def test_the_declared_number_itself_is_drawn(self):
+        """Not a constant caption: a longer number must paint more ink. Catches the
+        line being reduced to "panel declares" with the figure dropped."""
+        short = self.declaration_ink(declared=1.0)
+        long = self.declaration_ink(declared=1015.24)
+        self.assertGreater(short, 0)
+        self.assertGreater(long, short, "the figure is not part of the drawn text")
+
+    def test_the_declaration_has_the_overlay_to_itself(self):
+        """The pen is only useful as a probe while nothing else uses it."""
+        source = Path(pattern_view.__file__).read_text(encoding="utf-8")
+        self.assertEqual(
+            1, source.count("DECLARATION_INK)"),
+            "the reserved pen is used somewhere other than the declaration line",
+        )
 
     def test_the_declaration_does_not_move_when_a_reading_replaces_the_context(self):
         """It is the panel's claim; a measurement must not silently rewrite it."""

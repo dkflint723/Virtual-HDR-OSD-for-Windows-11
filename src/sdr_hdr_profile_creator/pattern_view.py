@@ -57,6 +57,13 @@ SUMMARY_NITS = 40.0
 # Identifies the probe-level track among the control tracks when hit-testing.
 PROBE_TRACK_KEY = "probe-level"
 
+#: The pen for the "panel declares N" line, and for nothing else. Reserved so that a
+#: test can count that line's ink: the offscreen platform has no font and paints every
+#: character as an identical box, so varying the digits proves nothing, and comparing
+#: whole buffers only sees the layout shift. Colour is the one property that
+#: distinguishes this line from its neighbours.
+DECLARATION_INK = QColor(160, 200, 190, 255)
+
 
 @dataclass(frozen=True)
 class ControlBinding:
@@ -255,7 +262,13 @@ def render_overlay(
                 # The panel's own claim, beside the reading rather than instead of it.
                 # Agreement is reassurance; a gap is the more interesting result, and
                 # either way the user should not have to remember the number.
-                painter.setPen(QColor(150, 150, 150, 255))
+                #
+                # Its own pen, used at exactly this one place, so a test can find this
+                # line by colour. The obvious check -- render with and without a claim
+                # and compare the buffers -- passes on the layout shift alone: deleting
+                # the drawText while keeping the y advance below left 142 tests green,
+                # and a *wrong* number would have been just as invisible.
+                painter.setPen(DECLARATION_INK)
                 painter.drawText(margin, y + spacing(18), f"       panel declares {declared:.4g}")
                 y += spacing(22)
             # PQ, not nits: a linear bar would spend nearly all its length on highlights

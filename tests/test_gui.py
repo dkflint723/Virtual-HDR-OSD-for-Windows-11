@@ -1545,11 +1545,50 @@ class RuntimeStateTests(WindowTestCase):
         payload = self.read_runtime()
         self.assertEqual(payload["schema"], app_module.GAMMA_RUNTIME_SCHEMA)
         entry = payload["displays"][self.display.key]
-        for key in ("profiles", "paths", "enabled", "selected", "active_profile"):
+        # base_profile and base_profile_path are the two the watchdog's
+        # Resolve-BaseExtendedProfile actually reads to decide what to fall back to,
+        # and they were the two this list left out: blanking both to "" kept 61 tests
+        # green across every class that touches the runtime record. The .bat side of
+        # the same contract is asserted by name in test_watchdog.py, so only the
+        # publisher was unguarded.
+        for key in ("profiles", "paths", "enabled", "selected", "active_profile",
+                    "base_profile", "base_profile_path"):
             with self.subTest(key=key):
                 self.assertIn(key, entry)
         self.assertEqual(set(entry["profiles"]), {"Off", "On"})
         self.assertEqual(entry["active_profile"], self.associations[-1])
+
+    def test_the_base_profile_the_watchdog_falls_back_to_is_the_real_one(self):
+        """Present is not enough; the value has to be the profile to fall back to.
+
+        base_profile is not the template the user picked. _capture_current_hdr_base
+        records whatever Windows had as the HDR default *before* this app took over,
+        skipping anything of ours -- that is what the watchdog restores if the working
+        pair ever goes missing. Blanking both keys kept 61 tests green before this.
+        """
+        self.apply()
+        entry = self.read_runtime()["displays"][self.display.key]
+        self.assertEqual("BaseCalibration.icm", entry["base_profile"])
+        self.assertIn("BaseCalibration.icm", entry["base_profile_path"] or "")
+
+    def test_the_published_base_is_never_one_of_our_own_profiles(self):
+        """The failure this guards is circular: the watchdog would restore
+        already-edited output as its own source, and every later run would inherit
+        the previous run's corrections. Resolve-BaseExtendedProfile refuses a
+        Virtual_HDR_OSD_ name on the watchdog side; this is the publisher's half.
+        """
+        self.apply()
+        # Windows now reports one of ours as the HDR default, which is the state a
+        # second apply starts from.
+        self.default_profiles["HDR"] = self.associations[-1]
+        self.window._capture_current_hdr_base(self.display)
+        self.apply()
+
+        entry = self.read_runtime()["displays"][self.display.key]
+        self.assertEqual(
+            "BaseCalibration.icm", entry["base_profile"],
+            "the app published its own generated profile as the fallback base",
+        )
 
     def test_intent_is_published_before_the_profile_changes(self):
         self.apply()

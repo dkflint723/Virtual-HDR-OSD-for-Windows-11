@@ -447,11 +447,41 @@ class TemplateMergeTests(unittest.TestCase):
             state.base_profile = str(base)
             return _read_tags(build_profile("HDR", state, build_transform(state, hdr=True)))
 
+    @staticmethod
+    def table_curve(bend: float = 2.4, entries: int = 256) -> bytes:
+        """A real 256-entry curv table, the shape a vendor profile actually ships.
+
+        The point is that it cannot be confused with a generated default. A gamma
+        curve is a curv of count 1; the defaults here are gamma 1.00 for HDR. A base
+        whose curves are themselves generated is byte-identical to the defaults, so
+        splicing and defaulting produce the same output and no test can tell them
+        apart -- which is why the guard below used to pass with the prune loop
+        removed entirely.
+        """
+        import struct as _struct
+
+        values = [
+            min(65535, int(round(((index / (entries - 1)) ** bend) * 65535)))
+            for index in range(entries)
+        ]
+        return (
+            b"curv" + b"\x00" * 4
+            + _struct.pack(">I", entries)
+            + b"".join(_struct.pack(">H", value) for value in values)
+        )
+
     def vendor_like_profile(self) -> bytes:
-        """A profile whose per-channel curves are real tables, not a gamma value."""
+        """A profile blob, for the tests that need real bytes on disk."""
         state = ModeState.neutral("HDR")
         blob = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
         return bytes(blob)
+
+    def vendor_like_tags(self) -> dict:
+        """The same, as a tag dict carrying genuine table curves."""
+        tags = dict(_read_tags(self.vendor_like_profile()))
+        for signature in (b"rTRC", b"gTRC", b"bTRC"):
+            tags[signature] = self.table_curve()
+        return tags
 
     def test_truncated_base_is_refused_rather_than_half_inherited(self):
         full = self.vendor_like_profile()
@@ -460,27 +490,49 @@ class TemplateMergeTests(unittest.TestCase):
         # Non-strict stays lenient so importing an odd profile still works.
         self.assertIsInstance(_read_tags(full[: len(full) // 2]), dict)
 
-    def test_a_base_missing_one_trc_contributes_no_trc_at_all(self):
-        """Otherwise the output mixes a real curve with synthesised neighbours."""
+    def build_from_tags(self, tags: dict) -> dict[bytes, bytes]:
+        """Build an HDR profile on a base whose tags are exactly `tags`."""
         state = ModeState.neutral("HDR")
-        blob = build_profile("HDR", state, build_transform(state, hdr=True))
-        tags = dict(_read_tags(blob))
-        self.assertIn(b"gTRC", tags)
-
         with mock.patch.object(icc_module, "_read_tags") as fake:
-            partial = {k: v for k, v in tags.items() if k != b"gTRC"}
-            fake.return_value = partial
+            fake.return_value = tags
             with tempfile.TemporaryDirectory() as directory:
                 base = Path(directory) / "base.icm"
-                base.write_bytes(blob)
+                base.write_bytes(self.vendor_like_profile())
                 state.base_profile = str(base)
-                out = _read_tags(build_profile("HDR", state, build_transform(state, hdr=True)))
+                blob = build_profile("HDR", state, build_transform(state, hdr=True))
+        return _read_tags(blob)
 
+    def test_a_base_missing_one_trc_contributes_no_trc_at_all(self):
+        """Otherwise the output mixes a real curve with synthesised neighbours.
+
+        The base carries genuine 256-entry tables, so the two outcomes are
+        distinguishable: pruned gives three generated gamma curves, unpruned gives
+        table256 beside gamma1.00 -- the exact colour cast the production comment
+        says the prune loop prevents. With a generated base, as this had, both
+        outcomes are byte-identical and the loop could be deleted with 62 tests green.
+        """
+        tags = self.vendor_like_tags()
+        self.assertEqual("table256", self.curve_kind(tags[b"gTRC"]), "fixture is not table-based")
+        del tags[b"gTRC"]
+
+        out = self.build_from_tags(tags)
         kinds = {sig: self.curve_kind(out.get(sig)) for sig in (b"rTRC", b"gTRC", b"bTRC")}
         self.assertEqual(
             len(set(kinds.values())), 1,
             f"channel curves came from different sources: {kinds}",
         )
+        self.assertNotIn(
+            "table256", set(kinds.values()),
+            "an incomplete table set was spliced in rather than dropped",
+        )
+
+    def test_a_complete_table_set_is_inherited_whole(self):
+        """The other side of the rule: pruning must not throw away a base that is
+        actually complete, or every vendor profile would lose its curves."""
+        out = self.build_from_tags(self.vendor_like_tags())
+        for signature in (b"rTRC", b"gTRC", b"bTRC"):
+            with self.subTest(tag=signature):
+                self.assertEqual("table256", self.curve_kind(out.get(signature)))
 
     def test_an_intact_base_still_supplies_its_tags(self):
         blob = self.vendor_like_profile()
