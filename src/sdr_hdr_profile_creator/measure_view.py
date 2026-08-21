@@ -234,6 +234,7 @@ def start(
     on_progress: Callable[[str, int, int], None],
     on_finished: Callable[[Calibration | None, str], None],
     on_reading: Callable[[str, Reading], None] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[QThread, MeasurementWorker]:
     """Begin a run, returning the thread and worker so the caller can cancel.
 
@@ -242,7 +243,10 @@ def start(
     reporting anything useful about the measurement.
     """
     thread = QThread()
-    worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits)
+    # MeasurementWorker takes an injectable sleep so tests are not charged the panel's
+    # settling time; start() used not to forward one, which put every end-to-end test
+    # of this function back on the real delays and is why there were none.
+    worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep)
     worker.moveToThread(thread)
     # "Esc cancels" is what the status line and the README both promise. Nothing
     # called cancel() before this, so the whole abort path -- measure.Aborted,
@@ -256,8 +260,20 @@ def start(
         worker.reading.connect(on_reading)
 
     def _done(result, message):
-        on_finished(result, message)
+        # Stop the thread and join it *before* handing the outcome back. The caller's
+        # on_finished drops its only references to this thread and worker, and
+        # finalising a QThread that has not yet left exec() is a fail-fast abort --
+        # exit code 0xC0000409, no traceback, no Qt message. That took the app down at
+        # the end of every completed measurement, after the numbers had been saved,
+        # so it looked like the app vanishing rather than like a crash in measuring.
+        #
+        # Waiting here cannot deadlock: this runs on the UI thread, because a signal
+        # connected to a plain Python callable is delivered through a receiver created
+        # in the connecting thread, which makes it a queued connection. The worker has
+        # already returned from run() and is idle in exec() by the time this arrives.
         thread.quit()
+        thread.wait()
+        on_finished(result, message)
 
     worker.finished.connect(_done)
     thread.start()

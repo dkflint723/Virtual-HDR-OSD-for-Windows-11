@@ -513,3 +513,99 @@ class CancellationTests(unittest.TestCase):
         worker.run()
         self.assertEqual(outcomes, [(None, "")])
         self.assertEqual(display.shown, [])
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class ThreadLifetimeTests(unittest.TestCase):
+    """A whole run through the real start(), with a real QThread and event loop.
+
+    The rest of this file avoids that deliberately, and the cost of avoiding it was
+    a crash nothing could see. start() used to hand the outcome to on_finished and
+    only then call thread.quit(). The caller's on_finished is MainWindow's
+    _measure_finished, which nulls _measure_window, _measure_thread and
+    _measure_worker -- the only references there are. Finalising a QThread that has
+    not yet left exec() is a fail-fast abort: exit code 0xC0000409, empty stderr, no
+    Qt message and no traceback. It fired at the end of every completed measurement,
+    after the readings had already been saved, so it presented as the app vanishing
+    rather than as a failure in measuring, and every test here calls _measure_finished
+    directly with no live thread.
+
+    Running the loop for real is not the hazard the other classes' comments suggest:
+    the deadlock they avoid comes from issuing a BlockingQueuedConnection from the
+    thread that would have to service it, which is not what start() does.
+    """
+
+    qt_app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def run_one(self):
+        """Drive a complete measurement and report what on_finished saw."""
+        from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Signal
+
+        class Window(QObject):
+            """Enough of MeasureWindow for start(): a closed signal and a patch sink."""
+
+            closed = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.shown = True
+
+            def show_patch(self, step):
+                self.shown = True
+
+        loop = QEventLoop()
+        seen = {}
+        readings = iter(GOOD_ORDER)
+
+        def on_finished(result, message):
+            # Captured inside the callback: by the time it returns, the caller would
+            # already have dropped its references.
+            seen["running"] = holder["thread"].isRunning()
+            seen["on_ui_thread"] = QThread.currentThread() is self.qt_app.thread()
+            seen["message"] = message
+            seen["result"] = result
+            loop.quit()
+
+        holder = {}
+        thread, worker = measure_view.start(
+            Window(),
+            lambda: next(readings),
+            1000.0,
+            on_progress=lambda *_: None,
+            on_finished=on_finished,
+            sleep=lambda _seconds: None,
+        )
+        holder["thread"], holder["worker"] = thread, worker
+
+        # Never hang the suite if the run never reports.
+        QTimer.singleShot(30000, loop.quit)
+        loop.exec()
+        thread.quit()
+        thread.wait(5000)
+        return seen
+
+    def test_the_thread_has_stopped_before_the_outcome_is_delivered(self):
+        """The guard against the abort. If the thread is still running here, the
+        caller is about to drop the last reference to it and take the app down."""
+        seen = self.run_one()
+        self.assertIn("running", seen, "the run never reported an outcome")
+        self.assertFalse(
+            seen["running"],
+            "on_finished was handed the outcome while the worker thread was still "
+            "running; dropping the last reference now is a fail-fast abort",
+        )
+
+    def test_the_outcome_arrives_on_the_ui_thread(self):
+        """on_finished is MainWindow's, and it touches widgets and the status bar."""
+        seen = self.run_one()
+        self.assertTrue(seen.get("on_ui_thread"), "outcome delivered off the UI thread")
+
+    def test_a_clean_run_reports_a_calibration_and_no_message(self):
+        """Otherwise the two tests above could pass on a run that failed instantly."""
+        seen = self.run_one()
+        self.assertEqual("", seen.get("message"))
+        self.assertIsInstance(seen.get("result"), Calibration)
