@@ -75,7 +75,6 @@ from .windows_api import (
     set_hdr_enabled,
     reapply_existing_default_profile,
     remove_profile,
-    send_hdr_toggle_shortcut,
     watchdog_is_running,
     WindowsColorError,
 )
@@ -155,7 +154,9 @@ class MainWindow(FluentWidget):
         self._first_run = not STATE_PATH.is_file()
         self.state = self._load_last_state()
         self.state.current_mode = "HDR"
-        self.state.live_mode = False
+        # Live Apply is a preference, and discarding it here meant the guide's own
+        # step 4 had to be repeated every session: the user turned it on, closed the
+        # app, and found it off again with nothing to say why.
         self._loading_controls = False
         self._last_detected_mode: DisplayMode | None = None
         self._current_display_snapshot: DisplayInfo | None = None
@@ -220,6 +221,13 @@ class MainWindow(FluentWidget):
 
         self._build_ui()
         self._load_mode_into_controls()
+        # The switch and the state used to agree by accident, because the state was
+        # forced off a few lines above. Now that it is restored, the switch has to be
+        # told what it is -- and told without emitting, or building the window would
+        # count as the user turning it on and install a profile before they had
+        # touched anything.
+        with QSignalBlocker(self.live_checkbox):
+            self.live_checkbox.setChecked(self.state.live_mode)
 
         self._hotkey_listener = GammaHotkeyListener(
             self._gamma_hotkey_disable,
@@ -735,6 +743,40 @@ class MainWindow(FluentWidget):
             "Increase or reduce tonal separation around the midrange while preserving black and peak-white endpoints."
         )))
         page.addWidget(gamma_card)
+
+        # The three figures that most affect the generated profile, and until now the
+        # only ones with no way to see or change them. They go into the MHC2 header and
+        # the lumi tag directly, so a wrong one describes a display that does not exist
+        # -- and two of the bugs found while this app was being repaired were invisible
+        # for exactly as long as these were: a stale peak carried from another display,
+        # and a sustained figure left above the peak after a measurement.
+        luminance_card = Card(
+            "Panel Luminance",
+            "What the display can actually produce, in nits. Calibrate Display fills "
+            "these in from the panel's own EDID and Measure… replaces them with what a "
+            "colorimeter saw, so there is rarely a reason to set them by hand — but "
+            "they are what the profile is built from, so they are visible and editable "
+            "rather than hidden.",
+        )
+        luminance_card.add_widget(self._make_control(ControlSpec(
+            "peak_luminance_nits", "Peak Luminance", 80.0, 10000.0, 1000.0, 1.0, " nits", 1, "panel",
+            "The brightest a small highlight can go. Written into the MHC2 header and "
+            "used as the ceiling for the sustained figure below."
+        )))
+        luminance_card.add_widget(self._make_control(ControlSpec(
+            "full_frame_luminance_nits", "Sustained Luminance", 80.0, 10000.0, 400.0, 1.0, " nits", 1, "panel",
+            "What the display holds with the whole screen lit, which on an emissive "
+            "panel is far below peak because of its brightness limiter. This is the "
+            "profile's lumi tag. It cannot exceed peak; raising it past peak raises "
+            "peak with it."
+        )))
+        luminance_card.add_widget(self._make_control(ControlSpec(
+            "minimum_luminance_nits", "Black Level", 0.0, 100.0, 0.0, 0.0001, " nits", 4, "panel",
+            "How much light the display emits at black. Near zero on an OLED, so the "
+            "slider is coarse here by nature — type the value instead."
+        )))
+        page.addWidget(luminance_card)
+
         page.addStretch(1)
         return self._scroll_page(page)
 
@@ -981,6 +1023,28 @@ class MainWindow(FluentWidget):
         if self._loading_controls:
             return
         setattr(self.state.hdr, field, value)
+        # Sustained cannot exceed peak; a panel doing that would be reporting fiction,
+        # and ModeState.from_dict silently clamps it on the next load, so leaving the
+        # two disagreeing means the editor shows one thing and the profile carries
+        # another. Reconciled here rather than refused, because either direction is a
+        # reasonable thing to mean: pulling peak down takes sustained with it, and
+        # pushing sustained up raises the ceiling it is measured against.
+        if field in ("peak_luminance_nits", "full_frame_luminance_nits"):
+            state = self.state.hdr
+            if state.full_frame_luminance_nits > state.peak_luminance_nits:
+                other = (
+                    "full_frame_luminance_nits"
+                    if field == "peak_luminance_nits"
+                    else "peak_luminance_nits"
+                )
+                setattr(self.state.hdr, other, value)
+                widget = self.control_widgets.get(other)
+                if widget is not None:
+                    was_loading, self._loading_controls = self._loading_controls, True
+                    try:
+                        widget.set_value(value, emit=False)
+                    finally:
+                        self._loading_controls = was_loading
         if field == "gamma":
             self._set_status(f"Traditional Gamma = {value:.3f} (2.200 is neutral).", "ok")
         else:
@@ -2688,16 +2752,6 @@ class MainWindow(FluentWidget):
 
     def _working_profile_paths(self, display: DisplayInfo) -> tuple[Path, Path]:
         return self._working_profile_paths_for(display.stable_key)
-
-    def _toggle_windows_mode(self) -> None:
-        try:
-            display = self._selected_display()
-            if display is not None and display.current_mode == "HDR":
-                self._remember_current_sdr_profile(display)
-            send_hdr_toggle_shortcut()
-            self._set_status("Sent Win + Alt + B. Waiting for Windows to settle…", "warning")
-        except Exception as exc:
-            self._set_status(f"Could not toggle SDR/HDR: {exc}", "error")
 
     @staticmethod
     def _safe_stem(text: str, fallback: str) -> str:

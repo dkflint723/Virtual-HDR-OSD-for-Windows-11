@@ -104,9 +104,6 @@ class WindowTestCase(unittest.TestCase):
         def fake_set_hdr(display, enabled):
             self.hdr_switch_calls.append((display.key, enabled))
 
-        def fake_send_toggle():
-            self.hdr_switch_calls.append(("win+alt+b", True))
-
         def fake_reapply(display, mode, profile_name):
             self.associations.append(profile_name)
             self.default_profiles[mode] = profile_name
@@ -147,9 +144,8 @@ class WindowTestCase(unittest.TestCase):
             "get_sdr_white_level_nits": lambda display: 240.0,
             "install_and_associate_profile": fake_install,
             "associate_profile": fake_associate,
-            # Both of these change the real display; never let them through.
+            # This changes the real display; never let it through.
             "set_hdr_enabled": fake_set_hdr,
-            "send_hdr_toggle_shortcut": fake_send_toggle,
             "reapply_existing_default_profile": fake_reapply,
             "remove_profile": fake_remove,
             "overwrite_installed_profile": fake_overwrite,
@@ -214,7 +210,6 @@ class FixtureSafetyTests(WindowTestCase):
         "remove_profile",
         "overwrite_installed_profile",
         "set_hdr_enabled",
-        "send_hdr_toggle_shortcut",
     )
 
     # Every module-level path app.py writes to. A new one added without being
@@ -293,6 +288,12 @@ class EditorStructureTests(WindowTestCase):
             "gamma", "brightness_trim", "contrast",
             "temperature", "tint", "saturation",
             "red_channel", "green_channel", "blue_channel",
+            # The three figures the profile is actually built from. They reach the
+            # MHC2 header and the lumi tag directly, and having no widgets is why a
+            # stale peak carried over from another display, and a sustained figure
+            # left above peak after a measurement, were both invisible while they
+            # happened.
+            "peak_luminance_nits", "full_frame_luminance_nits", "minimum_luminance_nits",
         }
         self.assertEqual(set(self.window.control_widgets), expected)
         for key in expected:
@@ -311,6 +312,11 @@ class EditorStructureTests(WindowTestCase):
             "red_channel": (-25.0, 25.0, 0.0, 0.05),
             "green_channel": (-25.0, 25.0, 0.0, 0.05),
             "blue_channel": (-25.0, 25.0, 0.0, 0.05),
+            # Matching ModeState's own limits, so a typed value and a loaded one are
+            # constrained alike rather than the editor allowing what the model clamps.
+            "peak_luminance_nits": (80.0, 10000.0, 1000.0, 1.0),
+            "full_frame_luminance_nits": (80.0, 10000.0, 400.0, 1.0),
+            "minimum_luminance_nits": (0.0, 100.0, 0.0, 0.0001),
         }
         for key, (low, high, default, step) in expected.items():
             spec = self.window.control_widgets[key].spec
@@ -2453,6 +2459,115 @@ class MeasurementBriefingTests(WindowTestCase):
         self.assertIn(str(steps), body, "the patch count is not stated")
         self.assertIn("Esc", body, "the way out is not stated")
         self.assertIn("still", body.lower(), "holding the meter still is not stated")
+
+
+class LuminanceControlTests(WindowTestCase):
+    """Peak, sustained and black, now that they have widgets.
+
+    They reach the MHC2 header and the lumi tag directly, so a wrong one describes a
+    display that does not exist -- and having nowhere to see them is why a stale peak
+    carried over from another display, and a sustained figure left above peak after a
+    measurement, were both invisible for as long as they lasted.
+    """
+
+    def widget(self, key):
+        control = self.window.control_widgets.get(key)
+        self.assertIsNotNone(control, f"no widget for {key}")
+        return control
+
+    def test_the_three_figures_are_editable(self):
+        for key in ("peak_luminance_nits", "full_frame_luminance_nits", "minimum_luminance_nits"):
+            with self.subTest(control=key):
+                self.widget(key).set_value(300.0 if "minimum" not in key else 0.01, emit=True)
+        self.assertAlmostEqual(300.0, self.window.state.hdr.peak_luminance_nits, places=3)
+        self.assertAlmostEqual(0.01, self.window.state.hdr.minimum_luminance_nits, places=4)
+
+    def test_black_keeps_the_precision_an_oled_needs(self):
+        """0.00015613 is this panel's real black. Two decimals would store zero."""
+        self.widget("minimum_luminance_nits").set_value(0.0002, emit=True)
+        self.assertAlmostEqual(0.0002, self.window.state.hdr.minimum_luminance_nits, places=6)
+
+    def test_lowering_peak_takes_sustained_with_it(self):
+        """Sustained above peak is fiction, and ModeState.from_dict silently clamps it
+        on the next load -- so leaving them disagreeing shows one thing in the editor
+        and writes another into the profile."""
+        self.widget("peak_luminance_nits").set_value(1000.0, emit=True)
+        self.widget("full_frame_luminance_nits").set_value(600.0, emit=True)
+        self.widget("peak_luminance_nits").set_value(400.0, emit=True)
+
+        state = self.window.state.hdr
+        self.assertAlmostEqual(400.0, state.peak_luminance_nits, places=3)
+        self.assertAlmostEqual(400.0, state.full_frame_luminance_nits, places=3)
+        self.assertAlmostEqual(
+            400.0, self.widget("full_frame_luminance_nits").value(),
+            places=3,
+            msg="the state was reconciled but the widget still shows the old figure",
+        )
+
+    def test_raising_sustained_past_peak_raises_peak(self):
+        """The other direction, because either is a reasonable thing to mean."""
+        self.widget("peak_luminance_nits").set_value(500.0, emit=True)
+        self.widget("full_frame_luminance_nits").set_value(900.0, emit=True)
+
+        state = self.window.state.hdr
+        self.assertAlmostEqual(900.0, state.full_frame_luminance_nits, places=3)
+        self.assertAlmostEqual(900.0, state.peak_luminance_nits, places=3)
+        self.assertAlmostEqual(900.0, self.widget("peak_luminance_nits").value(), places=3)
+
+    def test_reconciling_does_not_count_as_a_second_edit(self):
+        """The paired widget is updated with emit=False; a signal there would recurse
+        straight back into this handler."""
+        self.widget("peak_luminance_nits").set_value(1000.0, emit=True)
+        self.widget("full_frame_luminance_nits").set_value(600.0, emit=True)
+        before = self.window._edit_signature()
+        self.widget("peak_luminance_nits").set_value(400.0, emit=True)
+        self.assertNotEqual(before, self.window._edit_signature())
+        # And the state is self-consistent rather than mid-recursion.
+        self.assertLessEqual(
+            self.window.state.hdr.full_frame_luminance_nits,
+            self.window.state.hdr.peak_luminance_nits,
+        )
+
+    def test_a_calibration_still_overwrites_them(self):
+        """They are editable, not authoritative: the panel and the meter both win."""
+        self.widget("peak_luminance_nits").set_value(250.0, emit=True)
+        panel = PanelMetadata(
+            peak_nits=1015.24, max_frame_average_nits=265.05, min_nits=0.0002,
+            supports_pq=True, primaries=(),
+        )
+        self.window.state.hdr.panel_source_key = ""
+        self.window.state.hdr.minimum_luminance_nits = self.window.UNSET_LUMINANCE[0]
+        self.window.state.hdr.peak_luminance_nits = self.window.UNSET_LUMINANCE[1]
+        self.window.state.hdr.full_frame_luminance_nits = self.window.UNSET_LUMINANCE[2]
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel):
+            self.assertTrue(self.window._prefill_luminance_from_panel(self.display))
+        self.assertAlmostEqual(1015.24, self.window.state.hdr.peak_luminance_nits, places=1)
+
+
+class LiveApplyPersistenceTests(WindowTestCase):
+    """Live Apply is a preference, and was discarded at every launch.
+
+    The constructor set state.live_mode = False after loading, so the guide's own
+    step 4 had to be repeated every session: turn it on, close the app, find it off
+    again with nothing to say why.
+    """
+
+    def test_the_setting_survives_a_reload(self):
+        self.window.state.live_mode = True
+        self.window._save_state_now()
+        restored = app_module.ApplicationState.from_dict(
+            json.loads((self.temp / "last_gui_state.json").read_text(encoding="utf-8"))
+        )
+        self.assertTrue(restored.live_mode)
+
+    def test_the_switch_is_told_what_the_state_says(self):
+        """It used to agree by accident, because the state was forced off."""
+        self.assertEqual(self.window.state.live_mode, self.window.live_checkbox.isChecked())
+
+    def test_restoring_it_does_not_count_as_switching_it_on(self):
+        """Building the window must not install a profile before the user has touched
+        anything, which an emitting setChecked would do."""
+        self.assertEqual([], self.installed, "constructing the window installed a profile")
 
 
 class PanelProvenanceTests(WindowTestCase):

@@ -35,8 +35,16 @@ HELP_SECTIONS: tuple[tuple[str, str], ...] = (
         "Most monitors grey out brightness, gamma and colour-temperature controls in their own OSD as soon as "
         "HDR is switched on. Virtual HDR OSD puts those adjustments back by editing the MHC2 calibration block "
         "inside the HDR ICC profile that Windows already has associated with your display.\n\n"
-        "It is a subjective, by-eye correction layer. It is not a substitute for a colorimeter, a "
-        "spectrophotometer, or a professional calibration workflow.",
+        "There are three ways to arrive at the figures it writes, and they are not equally good. "
+        "Calibrate Display reads the panel's own EDID — its declared peak, sustained and black "
+        "luminance, and its real primaries — and needs no judgement from you. Measure… drives a "
+        "colorimeter through ArgyllCMS and replaces those declarations with what the display "
+        "actually does. The sliders and the test patterns are a subjective, by-eye layer on top of "
+        "either.\n\n"
+        "So this is not only a by-eye tool, and it stopped being a substitute for nothing: with a "
+        "meter attached it measures. What it is still not is a full colour-managed workflow — it "
+        "adjusts one display's HDR profile, and does not profile your printer, your camera, or "
+        "anything else in a pipeline.",
     ),
     (
         "What it changes on your system",

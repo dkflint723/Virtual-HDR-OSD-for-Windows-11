@@ -838,19 +838,6 @@ def open_windows_color_profile_directory() -> None:
     os.startfile(str(get_color_directory()))  # type: ignore[attr-defined]
 
 
-def send_hdr_toggle_shortcut() -> None:
-    if not IS_WINDOWS:
-        raise WindowsColorError("The HDR shortcut is only available on Windows")
-    VK_LWIN = 0x5B
-    VK_MENU = 0x12
-    VK_B = 0x42
-    KEYEVENTF_KEYUP = 0x0002
-    for key in (VK_LWIN, VK_MENU, VK_B):
-        user32.keybd_event(key, 0, 0, 0)
-    for key in (VK_B, VK_MENU, VK_LWIN):
-        user32.keybd_event(key, 0, KEYEVENTF_KEYUP, 0)
-
-
 # The standalone watchdog holds this for as long as it runs; it is how the
 # watchdog stops a second copy of itself from starting.
 WATCHDOG_SINGLETON_MUTEX = r"Local\ColorProfileModeWatchdogStandalone"

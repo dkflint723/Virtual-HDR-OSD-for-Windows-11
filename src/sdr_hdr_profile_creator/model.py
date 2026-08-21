@@ -278,7 +278,11 @@ class ApplicationState:
             "HDR" if data.get("current_mode") != "SDR" else "SDR",
             bool(data.get("follow_windows_mode", True)),
             bool(data.get("auto_refresh_after_mode_change", True)),
-            False,
+            # live_mode was hardcoded False here, and forced False again in the window's
+            # constructor, so the preference was discarded twice over and to_dict wrote
+            # a field nothing ever read back. Turning Live Apply on had to be repeated
+            # every session, which is the guide's own step 4.
+            bool(data.get("live_mode", False)),
             str(data.get("selected_display_key", "")),
             ModeState.from_dict(dict(data.get("sdr", {})), "SDR"),
             ModeState.from_dict(dict(data.get("hdr", {})), "HDR"),
