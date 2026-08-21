@@ -498,7 +498,7 @@ class MainWindow(FluentWidget):
             "Unlike Win + Alt + B this targets the display you picked above."
         )
         self.hdr_switch.checkedChanged.connect(self._hdr_switch_toggled)
-        # MUTANT: hdr_switch never added to any layout
+        display_row.addWidget(self.hdr_switch)
         refresh_displays = PushButton("Refresh", bar)
         refresh_displays.setToolTip("Rescan active Windows displays and refresh the selected display information.")
         refresh_displays.clicked.connect(self._refresh_displays)

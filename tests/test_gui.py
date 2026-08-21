@@ -2182,6 +2182,98 @@ class MeterIntegrationTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class LayoutMembershipTests(WindowTestCase):
+    """A control with a parent but no layout is still a real widget.
+
+    Qt gives it the parent's origin and draws it over whatever is already there,
+    and nothing warns. That is how the HDR switch came to sit on top of the
+    "1 - Target Display" label: one line reading ``display_row.addWidget(
+    self.hdr_switch)`` went missing, the switch kept its parent, and the whole
+    suite stayed green, because no test asked where any control had ended up.
+
+    ``titleBar`` is the one real exception -- qfluentwidgets positions the
+    frameless title bar itself rather than through a layout.
+    """
+
+    LAID_OUT_ELSEWHERE = {"titleBar"}
+
+    def walk(self):
+        """Every widget and every layout reachable from the window, in one pass.
+
+        Tab pages and scroll-area contents are held by their container rather
+        than by a layout item, so they have to be followed by hand or half the
+        window looks orphaned.
+        """
+        from PySide6.QtWidgets import QScrollArea, QStackedWidget, QTabWidget
+
+        widgets, layouts, stack = set(), [], [self.window]
+        while stack:
+            widget = stack.pop()
+            if widget is None or id(widget) in widgets:
+                continue
+            widgets.add(id(widget))
+            if isinstance(widget, (QTabWidget, QStackedWidget)):
+                stack.extend(widget.widget(i) for i in range(widget.count()))
+            elif isinstance(widget, QScrollArea):
+                stack.append(widget.widget())
+            pending = [widget.layout()] if widget.layout() is not None else []
+            while pending:
+                layout = pending.pop()
+                layouts.append(layout)
+                for index in range(layout.count()):
+                    item = layout.itemAt(index)
+                    if item.widget() is not None:
+                        stack.append(item.widget())
+                    if item.layout() is not None:
+                        pending.append(item.layout())
+        return widgets, layouts
+
+    def test_every_named_control_reaches_a_layout(self):
+        from PySide6.QtWidgets import QWidget
+
+        widgets, _ = self.walk()
+        orphans = sorted(
+            name
+            for name, control in vars(self.window).items()
+            if isinstance(control, QWidget)
+            and name not in self.LAID_OUT_ELSEWHERE
+            and id(control) not in widgets
+        )
+        self.assertEqual(
+            [], orphans,
+            "given a parent but never added to a layout, so drawn at the "
+            f"parent's origin on top of other controls: {orphans}",
+        )
+
+    def test_the_hdr_switch_sits_between_the_display_picker_and_refresh(self):
+        """Being in *a* layout is not enough; it has to be in the right one."""
+        from PySide6.QtWidgets import QAbstractButton
+
+        _, layouts = self.walk()
+        row = next(
+            (layout for layout in layouts
+             if any(layout.itemAt(i).widget() is self.window.hdr_switch
+                    for i in range(layout.count()))),
+            None,
+        )
+        self.assertIsNotNone(row, "the HDR switch is not in any layout")
+        order = [row.itemAt(i).widget() for i in range(row.count())]
+        refresh = [
+            widget for widget in order
+            if isinstance(widget, QAbstractButton) and widget.text() == "Refresh"
+        ]
+        self.assertIn(self.window.display_combo, order, "not the target-display row")
+        self.assertTrue(refresh, "Refresh is not in the target-display row")
+        self.assertLess(
+            order.index(self.window.display_combo), order.index(self.window.hdr_switch),
+            "the HDR switch belongs after the display it applies to",
+        )
+        self.assertLess(
+            order.index(self.window.hdr_switch), order.index(refresh[0]),
+            "the HDR switch belongs before the row's buttons",
+        )
+
+
 class ControlRowFitTests(WindowTestCase):
     """Every control must fit at the smallest size the window allows itself.
 

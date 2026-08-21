@@ -577,12 +577,43 @@ class GuidedSequenceTests(PatternViewTestCase):
         self.assertIsNone(win.guided_step)
 
     def test_the_step_number_reaches_the_overlay(self):
-        raw_plain, _, _ = render_overlay(
-            420, 700, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0)
-        raw_step, _, _ = render_overlay(
-            420, 700, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
-            step=2, total=3)
-        self.assertNotEqual(raw_plain, raw_step)
+        """Count the counter's own ink rather than comparing whole buffers.
+
+        The obvious test -- render without a step, render with one, assert the
+        bytes differ -- proved nothing, because the counter carries its own
+        ``y += spacing(30)``. Deleting its drawText still shifted every later
+        glyph up by thirty pixels, so the buffers differed anyway and the
+        assertion held with the counter gone.
+
+        Holding the step fixed and varying only the digits does not work either,
+        for a reason particular to this environment: the offscreen platform has
+        no font, so every character renders as a hollow "tofu" box. "STEP 1 OF 3"
+        and "STEP 2 OF 3" are both eleven characters, so they paint identically.
+
+        What is unambiguous is the colour. QColor(120, 190, 255) is used at
+        exactly one place in the whole codebase -- the step counter's pen -- so
+        pixels of that colour exist if and only if the counter was drawn, tofu
+        or not. Their number tracks how much text there is, which catches a
+        counter reduced to a constant string.
+        """
+        STEP_INK = (120, 190, 255)
+
+        def step_ink(**kwargs):
+            raw, _, _ = render_overlay(
+                420, 700, PATTERNS[0], context_for(capability(), 240.0),
+                self.controls, 0, **kwargs)
+            return sum(
+                1 for i in range(0, len(raw), 4)
+                if raw[i + 3] > 0 and (raw[i], raw[i + 1], raw[i + 2]) == STEP_INK
+            )
+
+        self.assertEqual(0, step_ink(), "nothing should be in the counter's colour with no step")
+        short = step_ink(step=1, total=3)
+        self.assertGreater(short, 0, "the step counter was not drawn")
+        self.assertGreater(
+            step_ink(step=10, total=300), short,
+            "the step and total are not in the text; it is a constant string",
+        )
 
 
 class CompletionTests(PatternViewTestCase):
