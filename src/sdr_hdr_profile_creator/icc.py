@@ -581,8 +581,17 @@ def profile_primaries_xy(
 
     ICC stores colorant tags adapted to the D50 profile connection space, so the raw
     rXYZ/gXYZ/bXYZ values are not the display's primaries and comparing them against
-    anything measured would be wrong. The profile's own ``chad`` is inverted to undo that
-    adaptation; a profile without one is assumed to be unadapted already.
+    anything measured would be wrong. The profile's own ``chad`` is inverted to undo
+    that adaptation.
+
+    A profile without a chad is **not** unadapted, which is what this used to assume.
+    ICC colorants are D50-relative whether or not the file bothers to say so, and a v2
+    display profile that omits chad is relying on exactly that convention. Reading them
+    raw put the primaries 0.021 to 0.025 off across the eight chad-less profiles
+    installed on the machine this was found on -- four to five times
+    PRIMARY_MISMATCH_THRESHOLD_XY -- so a base that describes its panel perfectly still
+    reported a gamut mismatch. Absent a chad, undo the standard D65-to-D50 adaptation
+    instead of undoing nothing.
 
     Returns ``None`` when the profile has no colorant tags at all, which is normal for
     LUT-based profiles.
@@ -601,13 +610,17 @@ def profile_primaries_xy(
     if red is None or green is None or blue is None or white is None:
         return None
 
-    chad = _parse_chad(tags.get(b"chad", b""))
-    if chad is not None:
-        try:
-            undo = _inverse3(chad)
-        except ValueError:
-            return None
-        red, green, blue, white = (_matrix_vector(undo, v) for v in (red, green, blue, white))
+    chad = _parse_chad(tags.get(b"chad", b"")) or D65_TO_D50_CHAD
+    try:
+        undo = _inverse3(chad)
+    except ValueError:
+        return None
+    # The colorants only. Those v2 files store wtpt as the real media white rather
+    # than the PCS illuminant, so putting it through the same matrix turns a D65 white
+    # into 0.2806,0.2959, which is not a white at all.
+    red, green, blue = (_matrix_vector(undo, vector) for vector in (red, green, blue))
+    if tags.get(b"chad"):
+        white = _matrix_vector(undo, white)
     return (_to_xy(red), _to_xy(green), _to_xy(blue), _to_xy(white))
 
 

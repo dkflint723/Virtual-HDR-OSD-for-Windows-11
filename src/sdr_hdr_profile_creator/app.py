@@ -316,7 +316,29 @@ class MainWindow(FluentWidget):
         return False
 
     def _save_state_now(self) -> None:
-        self._write_json_atomic(STATE_PATH, self.state.to_dict())
+        """Persist the editor state, and say so when it does not land.
+
+        _write_json_atomic reports whether the rename succeeded and every caller
+        threw that away. For the two runtime files the consequence is small -- the
+        watchdog re-reads on a timer and the filenames are stable -- but this one is
+        the user's own work, and it is called from closeEvent, so a failure here is
+        every unsaved edit disappearing with no indication that anything went wrong.
+        The usual cause is a security product holding the file open; the same one the
+        watchdog installer already warns about.
+        """
+        if self._write_json_atomic(STATE_PATH, self.state.to_dict()):
+            return
+        # Guarded: closeEvent calls this after the status bar may already be gone,
+        # and a failure to save must not become a failure to close.
+        try:
+            self._set_status(
+                f"Could not save your settings to {STATE_PATH.name}. Something else is "
+                "holding the file open — check Controlled Folder Access under Windows "
+                "Security, Ransomware protection.",
+                "error",
+            )
+        except Exception:
+            pass
 
     # ----------------------------------------------------------------------------------
     # Fluent UI
@@ -2313,6 +2335,14 @@ class MainWindow(FluentWidget):
         state = self.state.hdr
         state.peak_luminance_nits = max(80.0, min(10000.0, result.peak_nits))
         state.minimum_luminance_nits = max(0.0, min(100.0, result.black_nits))
+        # Full frame cannot exceed peak; a panel that did that would be reporting
+        # fiction. _record_measurement reconciles them and this did not, so a measured
+        # peak below the stored sustained left the two contradicting each other. The
+        # profile itself was safe -- _build_working_payloads round-trips through
+        # ModeState.from_dict, which clamps -- but the status line went on quoting a
+        # sustained figure above the peak until the app was restarted.
+        if state.full_frame_luminance_nits > state.peak_luminance_nits:
+            state.full_frame_luminance_nits = state.peak_luminance_nits
 
         # panel_primaries is deliberately untouched. The patches are presented in
         # scRGB, which is defined on BT.709, so a measured "red" is BT.709 red as

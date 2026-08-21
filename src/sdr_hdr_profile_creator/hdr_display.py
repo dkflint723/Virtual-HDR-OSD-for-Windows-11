@@ -359,6 +359,7 @@ class HdrSurface:
             raise HdrDisplayError(f"D3D11CreateDevice failed (0x{result & 0xFFFFFFFF:08X})")
 
         dxgi_device, adapter, factory = c_void_p(), c_void_p(), c_void_p()
+        created_swapchain = False
         try:
             if _vcall(self._device, _QUERY_INTERFACE, [POINTER(_GUID), POINTER(c_void_p)],
                       byref(_IID_IDXGIDevice), byref(dxgi_device)) < 0:
@@ -388,10 +389,21 @@ class HdrSurface:
                 raise HdrDisplayError(
                     f"CreateSwapChainForHwnd failed (0x{result & 0xFFFFFFFF:08X})"
                 )
+            created_swapchain = True
         finally:
             _release(factory)
             _release(adapter)
             _release(dxgi_device)
+            if not created_swapchain:
+                # The device and its context were released nowhere. An exception out
+                # of __init__ means the object is never bound, so close() can never be
+                # called on it and there is no __del__ -- one ID3D11Device plus its
+                # context orphaned per failed attempt, for the life of the process.
+                # No swapchain leaks here: it is still null on this path.
+                _release(self._context)
+                _release(self._device)
+                self._context = c_void_p()
+                self._device = c_void_p()
 
     def close(self) -> None:
         _release(self._swapchain)

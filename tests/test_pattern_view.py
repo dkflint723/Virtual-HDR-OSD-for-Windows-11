@@ -1692,3 +1692,62 @@ class ReferenceOnlyPatternTests(PatternViewTestCase):
         """Otherwise the fix could be "delete the promise everywhere"."""
         peak = self.pattern("peak-white")
         self.assertTrue(peak.records)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class LeavingTheGuidedRunTests(PatternViewTestCase):
+    """Pressing an advertised digit key mid-run used to be a dead end.
+
+    select_pattern clears _guided while _complete stays False, so the step counter
+    vanished with no message, advance() and show_summary() both returned False, and the
+    results screen was unreachable for the life of the window. Nothing was lost --
+    readings persist as they are taken -- but the overlay invited the keystroke and then
+    offered no way back, which is the same hazard already fixed for the finished screen.
+    """
+
+    def mid_run(self):
+        """A guided run with one reading taken, then left by number key."""
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, guided=True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win._apply_guided_step()
+        self.advance_step(win, 0.004)
+        self.assertTrue(win.accepted, "the fixture recorded nothing to come back to")
+        win.select_pattern(0)
+        self.assertIsNone(win.guided_step, "still in the guided run")
+        self.assertFalse(win._complete, "the run finished rather than being left")
+        return win
+
+    def test_the_results_are_still_reachable(self):
+        win = self.mid_run()
+        self.assertTrue(win.show_summary(), "no way back to the readings already taken")
+
+    def test_the_s_key_gets_there(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        win = self.mid_run()
+        win.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_S, Qt.KeyboardModifier.NoModifier)
+        )
+        self.assertTrue(win._showing_summary)
+
+    def test_the_overlay_says_so(self):
+        """A way back nobody is told about is not a way back."""
+        raw, _, _ = render_overlay(
+            460, 900, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0,
+            accepted={"peak-white": 500.0})
+        plain, _, _ = render_overlay(
+            460, 900, PATTERNS[0], context_for(capability(), 240.0), self.controls, 0)
+        self.assertNotEqual(raw, plain, "the overlay is identical with and without readings")
+
+    def test_a_run_with_nothing_recorded_offers_nothing(self):
+        """Before any reading there is no summary to return to, and advertising one
+        would be a promise the window cannot keep."""
+        win = PatternWindow(capability(), 240.0, self.controls,
+                            measure=lambda *_: None, guided=True)
+        win.resize(800, 600)
+        self.addCleanup(win.deleteLater)
+        win.select_pattern(0)
+        self.assertFalse(win.show_summary())

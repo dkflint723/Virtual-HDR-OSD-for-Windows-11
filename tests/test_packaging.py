@@ -231,6 +231,79 @@ class InstallerOutcomeTests(unittest.TestCase):
         )
 
 
+class WatchdogIdentityTests(unittest.TestCase):
+    """Which saved entry belongs to which monitor, and how much the log says.
+
+    GdiName is a slot, not an identity: \\\\.\\DISPLAY1 is reassigned between sessions,
+    so after a hotplug a saved entry could be applied to a different panel than the one
+    it was captured from. The two obvious alternatives are both wrong -- the adapter
+    LUID is reissued every reboot, and SourceId is the field GdiName derives from -- so
+    the fix is the monitor's own EDID-derived device path, which is exactly what the
+    GUI anchors on and was simply never available to the watchdog.
+    """
+
+    def install(self) -> str:
+        return (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+
+    def test_the_watchdog_can_read_a_monitors_device_path(self):
+        script = self.install()
+        self.assertIn("DISPLAYCONFIG_TARGET_DEVICE_NAME", script)
+        self.assertIn("DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2", script)
+        self.assertIn("info.DevicePath = GetDevicePath(path.targetInfo)", script)
+
+    def test_the_capture_records_it(self):
+        self.assertIn("DevicePath      = $Display.DevicePath", self.install())
+
+    def test_every_saved_lookup_goes_through_one_place(self):
+        """Six separate `Where-Object { $_.GdiName -eq ... }` lookups is six chances to
+        fix five of them."""
+        script = self.install()
+        self.assertIn("function Find-SavedDisplay", script)
+        self.assertEqual(
+            0, script.count("$state.Displays | Where-Object { $_.GdiName -eq $current.GdiName }"),
+            "a State.json lookup still matches on the slot rather than the monitor",
+        )
+
+    def test_a_path_on_both_sides_that_disagrees_is_not_a_miss(self):
+        """Falling through to GdiName when both sides name a monitor and the names
+        differ is precisely the confusion this exists to prevent."""
+        self.assertIn("if ($anyPaths) { return $null }", self.install())
+
+    def test_state_written_before_the_field_existed_still_matches(self):
+        """Every existing install has no DevicePath in State.json; refusing those would
+        make the watchdog forget every display it was already protecting."""
+        script = self.install()
+        self.assertIn("$_.PSObject.Properties.Name -contains 'DevicePath'", script)
+        self.assertIn(
+            "return $State.Displays | Where-Object { $_.GdiName -eq $CurrentDisplay.GdiName }",
+            script,
+        )
+
+    def test_the_log_records_corrections_rather_than_every_reassertion(self):
+        """614 of 618 lines were identical "Restored..." entries: 37 B/s, the 512 KB cap
+        reached in about four hours, one .old kept, so eight hours of history at most --
+        for a log whose only job is answering when something took the profile."""
+        script = self.install()
+        self.assertIn("Corrected STANDARD profile on", script)
+        self.assertIn("Corrected EXTENDED profile on", script)
+        self.assertEqual(
+            0, script.count("Write-Log ('Restored STANDARD profile on"),
+            "the forced re-assert is still logged as if it were a correction",
+        )
+
+    def test_the_correction_names_what_windows_had(self):
+        """What replaced the profile is the interesting half; a log saying only what was
+        put back cannot answer why."""
+        self.assertIn("was {1}, restored {2}", self.install())
+
+    def test_a_quiet_log_is_distinguishable_from_a_dead_one(self):
+        """Silence otherwise means either "nothing drifted" or "this stopped running an
+        hour ago", which are the two answers most worth telling apart."""
+        script = self.install()
+        self.assertIn("Watchdog alive; no profile drift since the last entry.", script)
+        self.assertIn("TotalMinutes -ge 60", script)
+
+
 @unittest.skipUnless(sys.platform == "win32", "cscript.exe is a Windows host")
 class LauncherBehaviourTests(unittest.TestCase):
     """Run the generated Launcher.vbs for real, rather than reading it.

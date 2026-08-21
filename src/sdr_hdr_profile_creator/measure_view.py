@@ -252,7 +252,20 @@ def start(
     # called cancel() before this, so the whole abort path -- measure.Aborted,
     # both should_abort guards, and the cancelled branch that reports "nothing
     # was changed" -- was unreachable in the shipped app.
-    window.closed.connect(worker.cancel)
+    #
+    # Direct, not the default queued. worker lives in `thread`, whose event loop is
+    # occupied by run() for the entire measurement, so a queued cancel() is not
+    # delivered until run() has already returned -- measured: _abort was still False
+    # when observed from inside run(). The run did stop, but only because
+    # require_shown() raises once the surface is gone, which meant both should_abort
+    # guards were dead from the Esc path, one whole spotread integration still ran
+    # against a closed surface, and Esc during the final step let the loop finish, so
+    # the user who cancelled was told their channels failed to add up instead of that
+    # nothing had changed.
+    #
+    # cancel() only assigns a bool, and CPython guarantees that much; it is exactly
+    # the kind of write a cross-thread flag is for.
+    window.closed.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
 
     thread.started.connect(worker.run)
     worker.progress.connect(on_progress)

@@ -695,6 +695,44 @@ class ChadlessBaseTests(unittest.TestCase):
         self.assertAlmostEqual(self.TRUE_GREEN_XY[0], green[0], places=3)
         self.assertAlmostEqual(self.TRUE_GREEN_XY[1], green[1], places=3)
 
+    def test_reading_a_chadless_profile_back_gives_the_panels_real_primaries(self):
+        """The read side of the same assumption.
+
+        profile_primaries_xy took a missing chad to mean "unadapted already". ICC
+        colorants are D50-relative whether the file says so or not, so reading them raw
+        put the primaries 0.021-0.025 off across the eight chad-less profiles installed
+        on the machine this was found on -- several times the 0.005 mismatch threshold,
+        so a base describing its panel perfectly still reported a gamut change.
+        """
+        from unittest import mock
+
+        # A v2-style file: D50-adapted colorants, the real media white, and no chad --
+        # read through the same seam profile_primaries_xy uses, since there is no
+        # profile assembler to hand.
+        tags = self.base_tags(with_chad=False)
+        with mock.patch.object(self.icc, "_read_tags", lambda *_a, **_k: tags):
+            described = self.icc.profile_primaries_xy(b"any bytes; the tags are supplied")
+
+        self.assertIsNotNone(described)
+        for expected, actual in zip(
+            [(0.6400, 0.3300), (0.3000, 0.6000), (0.1500, 0.0600)], described[:3]
+        ):
+            self.assertAlmostEqual(expected[0], actual[0], places=3)
+            self.assertAlmostEqual(expected[1], actual[1], places=3)
+
+    def test_a_chadless_profile_no_longer_reports_a_false_gamut_change(self):
+        """The user-visible consequence: one wrong sentence in the status bar."""
+        from unittest import mock
+
+        tags = self.base_tags(with_chad=False)
+        with mock.patch.object(self.icc, "_read_tags", lambda *_a, **_k: tags):
+            described = self.icc.profile_primaries_xy(b"x")
+        truth = ((0.6400, 0.3300), (0.3000, 0.6000), (0.1500, 0.0600))
+        self.assertFalse(
+            self.icc.primaries_disagree(described[:3], truth),
+            "a profile describing its panel exactly still reported a mismatch",
+        )
+
     def test_the_d65_marker_is_absent_when_the_colorants_are_not_d65(self):
         """MSCA is Windows HDR Calibration's "{'D65Adapted':True}" marker. A base that
         brings its own chad through leaves the colorants in the D50 PCS, so stamping it

@@ -158,6 +158,7 @@ namespace ColorProfileWatchdog
         public const int CPST_EXTENDED_DISPLAY_COLOR_MODE = 8;
 
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
+        public const int DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11;
 
@@ -242,6 +243,28 @@ namespace ColorProfileWatchdog
             public string viewGdiDeviceName;
         }
 
+        // The monitor's own device path, derived from its EDID, which is what the GUI
+        // anchors per-display settings on. GdiName is not an identity: \.\DISPLAY1 is a
+        // slot, reassigned between sessions, so a saved entry could be applied to a
+        // different panel after a hotplug. Marshalled sizes are fixed by the API: 64
+        // characters of friendly name, 128 of path, 420 bytes in total.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DISPLAYCONFIG_TARGET_DEVICE_NAME
+        {
+            public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+            public UInt32 flags;
+            public UInt32 outputTechnology;
+            public UInt16 edidManufactureId;
+            public UInt16 edidProductCodeId;
+            public UInt32 connectorInstance;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string monitorFriendlyDeviceName;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string monitorDevicePath;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
         {
@@ -279,6 +302,9 @@ namespace ColorProfileWatchdog
         public sealed class DisplayInfo
         {
             public string GdiName { get; set; }
+            // The monitor's EDID-derived device path. Empty when Windows will not
+            // supply one, in which case matching falls back to GdiName.
+            public string DevicePath { get; set; }
             public UInt32 AdapterLow { get; set; }
             public Int32 AdapterHigh { get; set; }
             public UInt32 SourceId { get; set; }
@@ -315,6 +341,10 @@ namespace ColorProfileWatchdog
         [DllImport("user32.dll")]
         private static extern int DisplayConfigGetDeviceInfo(
             ref DISPLAYCONFIG_SOURCE_DEVICE_NAME requestPacket);
+
+        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
+        private static extern int DisplayConfigGetTargetName(
+            ref DISPLAYCONFIG_TARGET_DEVICE_NAME requestPacket);
 
         [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
         private static extern int DisplayConfigGetAdvancedColorInfo(
@@ -550,6 +580,35 @@ namespace ColorProfileWatchdog
             return packet.viewGdiDeviceName;
         }
 
+        private static string GetDevicePath(DISPLAYCONFIG_PATH_TARGET_INFO target)
+        {
+            // Best effort. A display that will not name itself still gets watched; it
+            // simply falls back to matching on GdiName, as every version before this did.
+            try
+            {
+                DISPLAYCONFIG_TARGET_DEVICE_NAME packet = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
+                packet.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                packet.header.size = (UInt32)Marshal.SizeOf(typeof(DISPLAYCONFIG_TARGET_DEVICE_NAME));
+                packet.header.adapterId = target.adapterId;
+                packet.header.id = target.id;
+                packet.monitorFriendlyDeviceName = String.Empty;
+                packet.monitorDevicePath = String.Empty;
+
+                if (DisplayConfigGetDeviceInfo_Target(ref packet) != ERROR_SUCCESS)
+                    return String.Empty;
+                return packet.monitorDevicePath == null ? String.Empty : packet.monitorDevicePath;
+            }
+            catch
+            {
+                return String.Empty;
+            }
+        }
+
+        private static int DisplayConfigGetDeviceInfo_Target(ref DISPLAYCONFIG_TARGET_DEVICE_NAME packet)
+        {
+            return DisplayConfigGetTargetName(ref packet);
+        }
+
         private static bool GetAdvancedColorEnabled(DISPLAYCONFIG_PATH_TARGET_INFO target)
         {
             DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO packet = new DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO();
@@ -612,6 +671,7 @@ namespace ColorProfileWatchdog
 
                         DisplayInfo info = new DisplayInfo();
                         info.GdiName = gdiName;
+                        info.DevicePath = GetDevicePath(path.targetInfo);
                         info.AdapterLow = path.targetInfo.adapterId.LowPart;
                         info.AdapterHigh = path.targetInfo.adapterId.HighPart;
                         info.SourceId = path.sourceInfo.id;
@@ -722,6 +782,35 @@ if (-not ('ColorProfileWatchdog.Native' -as [type])) {
 
 function Get-ActiveDisplays {
     return [ColorProfileWatchdog.Native]::GetActiveDisplays()
+}
+
+function Find-SavedDisplay {
+    param($State, $CurrentDisplay)
+
+    # The monitor's own device path first. GdiName is a slot, not an identity:
+    # \.\DISPLAY1 is reassigned between sessions, so after a hotplug a saved entry
+    # could be applied to a different panel than the one it was captured from -- and
+    # the two obvious alternatives are worse. The adapter LUID is reissued on every
+    # reboot, and SourceId is the field GdiName is derived from.
+    #
+    # Falls back to GdiName when either side lacks a path: state written by an earlier
+    # version has no DevicePath, and Windows does not always supply one.
+    if (-not $State -or -not $State.Displays) { return $null }
+    $path = [string]$CurrentDisplay.DevicePath
+    if ($path) {
+        $byPath = $State.Displays | Where-Object {
+            ($_.PSObject.Properties.Name -contains 'DevicePath') -and ([string]$_.DevicePath -eq $path)
+        } | Select-Object -First 1
+        if ($byPath) { return $byPath }
+
+        # A path on both sides that does not match is a different monitor, not a miss.
+        # Falling through to GdiName there is exactly the confusion this exists to stop.
+        $anyPaths = $State.Displays | Where-Object {
+            ($_.PSObject.Properties.Name -contains 'DevicePath') -and [string]$_.DevicePath
+        }
+        if ($anyPaths) { return $null }
+    }
+    return $State.Displays | Where-Object { $_.GdiName -eq $CurrentDisplay.GdiName } | Select-Object -First 1
 }
 
 function Format-HResult {
@@ -860,6 +949,9 @@ function Get-SavedProfileState {
 
     [PSCustomObject]@{
         GdiName         = $Display.GdiName
+        # The monitor itself, not the slot it happens to occupy. Entries written before
+        # this field existed simply do not carry it, and matching falls back to GdiName.
+        DevicePath      = $Display.DevicePath
         AdapterLow      = $Display.AdapterLow
         AdapterHigh     = $Display.AdapterHigh
         SourceId        = $Display.SourceId
@@ -1070,8 +1162,15 @@ function Restore-SavedProfiles {
             )
             if ($hr -lt 0) {
                 Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
-            } else {
-                Write-Log ('Restored STANDARD profile on {0}: {1}' -f $CurrentDisplay.GdiName, $sdrDesired)
+            } elseif ($current -ne $sdrDesired) {
+                # Only a real correction. The forced pass rewrites this every five
+                # seconds whether anything drifted or not, and logging that made 614 of
+                # 618 lines identical: 37 bytes a second, the 512 KB cap reached in
+                # about four hours, and one .old kept, so eight hours of history at
+                # most -- for a log whose whole purpose is answering "did something
+                # take my profile, and when". The value Windows had is named, because
+                # what replaced it is the interesting half.
+                Write-Log ('Corrected STANDARD profile on {0}: was {1}, restored {2}' -f $CurrentDisplay.GdiName, $(if ($current) { $current } else { '<none>' }), $sdrDesired)
             }
         }
     }
@@ -1092,8 +1191,8 @@ function Restore-SavedProfiles {
             )
             if ($hr -lt 0) {
                 Write-Log ('Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
-            } else {
-                Write-Log ('Restored EXTENDED profile on {0}: {1}' -f $CurrentDisplay.GdiName, $desiredExtended)
+            } elseif ($current -ne $desiredExtended) {
+                Write-Log ('Corrected EXTENDED profile on {0}: was {1}, restored {2}' -f $CurrentDisplay.GdiName, $(if ($current) { $current } else { '<none>' }), $desiredExtended)
             }
         }
     }
@@ -1105,7 +1204,7 @@ function Invoke-GammaHotkey {
     try {
         $currentDisplays = @(Get-ActiveDisplays)
         foreach ($current in $currentDisplays) {
-            $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+            $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
             if (-not $saved) { continue }
 
             $profile = $(if ($Enable) { $saved.WorkingOn } else { $saved.WorkingOff })
@@ -1413,6 +1512,12 @@ try {
     [ColorProfileWatchdog.Native]::MarkStartupComplete()
 
     $pollCounter = 0
+    # A log that only speaks up when something drifted is unreadable in the other
+    # direction: silence then means either "nothing has gone wrong" or "this stopped
+    # running an hour ago", and those are the two answers a user most needs to tell
+    # apart. One line an hour separates them, and costs about 800 bytes a day against
+    # the 512 KB cap -- against the ~3.2 MB a day the every-write trace produced.
+    $lastHeartbeat = Get-Date
     while ($true) {
         if (-not $hotkeysRegistered -and ((Get-Date) - $lastHotkeyRetry).TotalSeconds -ge 2.0) {
             $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
@@ -1429,6 +1534,11 @@ try {
         }
         [ColorProfileWatchdog.Native]::MarkAlive()
 
+        if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 60) {
+            $lastHeartbeat = Get-Date
+            Write-Log 'Watchdog alive; no profile drift since the last entry.'
+        }
+
         $pollCounter++
         if (($pollCounter % 8) -ne 0) {
             Start-Sleep -Milliseconds 100
@@ -1439,7 +1549,7 @@ try {
             $currentDisplays = @(Get-ActiveDisplays)
 
             foreach ($current in $currentDisplays) {
-                $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+                $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
                 if (-not $saved) {
                     continue
                 }
@@ -1466,7 +1576,7 @@ try {
             # can both report Advanced Color enabled through the legacy query.
             if (((Get-Date) - $lastForced).TotalSeconds -ge 5.0) {
                 foreach ($current in $currentDisplays) {
-                    $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+                    $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
                     if ($saved) {
                         Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved -Force
                     }

@@ -71,8 +71,15 @@ class FakeSurface:
         self.frames = []
         self.closed = False
         self.size = (0, 0)
+        #: Which thread actually reached the swapchain. Recorded here rather than in
+        #: the caller, because a thread noted before the call under test says nothing
+        #: about where the call ended up.
+        self.presented_on = None
 
     def present(self, pixels, vsync=True):
+        import threading
+
+        self.presented_on = threading.get_ident()
         self.frames.append(pixels)
 
     def resize(self, width, height):
@@ -372,12 +379,24 @@ class WindowDisplayTests(unittest.TestCase):
         self.assertTrue(self.outcome["presented_before_return"])
 
     def test_the_frame_is_built_on_the_ui_thread(self):
-        """Presenting from a worker thread is not allowed, and the swapchain
-        belongs to the thread that created it."""
+        """Presenting from a worker thread is not allowed: the swapchain belongs to the
+        thread that created it.
+
+        The thread recorded in the worker was recorded *before* calling the code under
+        test, so this asserted a property of its own moveToThread and nothing else.
+        Switching the connection to DirectConnection ran show_patch on five distinct
+        worker threads and all 26 tests still passed. What matters is which thread
+        reaches the surface, so that is what is now recorded -- inside present().
+        """
         step = MeasurementStep("black", "Black level", (0.0, 0.0, 0.0), 0.0)
         self.run_from_worker(step)
-        self.assertNotEqual(self.outcome["thread"], self.ui_thread)
+        self.assertNotEqual(self.outcome["thread"], self.ui_thread,
+                            "the worker did not run on its own thread")
         self.assertEqual(len(self.surface.frames), 1)
+        self.assertEqual(
+            self.ui_thread, self.surface.presented_on,
+            "the swapchain was driven from a thread that does not own it",
+        )
 
 
 if __name__ == "__main__":
@@ -493,13 +512,78 @@ class CancellationTests(unittest.TestCase):
         window.closed.emit()
         self.assertTrue(worker._abort)
 
-    def test_start_is_the_thing_that_makes_that_connection(self):
-        """Asserted against the source, because exercising start() needs a
-        running event loop. Without this line the abort path is unreachable."""
-        import inspect
+    def test_closing_the_window_aborts_while_the_run_is_still_going(self):
+        """Not just that cancel is wired, but that it lands in time to matter.
 
-        source = inspect.getsource(measure_view.start)
-        self.assertIn("window.closed.connect(worker.cancel)", source)
+        worker lives in the thread whose event loop run() occupies for the whole
+        measurement, so a *queued* cancel() is not delivered until run() has already
+        returned: _abort was still False when read from inside run(). The run stopped
+        anyway -- require_shown() raises once the surface is gone -- but both
+        should_abort guards were dead from the Esc path, a full spotread integration
+        still ran against a closed surface, and Esc during the final step let the loop
+        finish, so a cancelled run reported that the channels failed to add up rather
+        than that nothing had changed.
+
+        The signal has to be emitted from the UI thread, which is where Esc comes from.
+        Emitting it from the worker thread proves nothing: sender and receiver are then
+        in the same thread and Qt calls the slot directly whatever the connection type.
+        """
+        import threading
+
+        from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
+
+        class Window(QObject):
+            closed = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.shown = True
+
+            def show_patch(self, step):
+                self.shown = True
+
+        window = Window()
+        loop = QEventLoop()
+        reached_read = threading.Event()
+        cancel_emitted = threading.Event()
+        seen = {}
+        holder = {}
+
+        def read():
+            # Worker thread. Hold here until the UI thread has emitted, then look at
+            # the flag from inside the run -- which is the only place it matters.
+            if not reached_read.is_set():
+                reached_read.set()
+                cancel_emitted.wait(timeout=10.0)
+                seen["abort_inside_run"] = holder["worker"]._abort
+            return GOOD_ORDER[0]
+
+        def emit_from_ui_thread():
+            if reached_read.wait(timeout=0.01):
+                window.closed.emit()      # exactly what MeasureWindow.closeEvent does
+                cancel_emitted.set()
+            else:
+                QTimer.singleShot(10, emit_from_ui_thread)
+
+        thread, worker = measure_view.start(
+            window, read, 1000.0,
+            on_progress=lambda *_: None,
+            on_finished=lambda *_: loop.quit(),
+            sleep=lambda _s: None,
+        )
+        holder["worker"] = worker
+        QTimer.singleShot(0, emit_from_ui_thread)
+        QTimer.singleShot(20000, loop.quit)
+        loop.exec()
+        cancel_emitted.set()
+        thread.quit()
+        thread.wait(5000)
+
+        self.assertIn("abort_inside_run", seen, "the worker never reached a reading")
+        self.assertTrue(
+            seen["abort_inside_run"],
+            "cancel() had not landed while run() was still executing",
+        )
 
     def test_an_aborted_run_reports_neither_a_result_nor_an_error(self):
         """A cancelled run is not a failure and must not look like one."""

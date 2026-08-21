@@ -326,6 +326,14 @@ def render_overlay(
             lines.append(confirm)
         if any(control.write for control in controls) or pattern.level_driven:
             lines.append("E     type a value")
+        if step is None and accepted:
+            # Readings taken, but no longer in the sequence: pressing an advertised
+            # digit key leaves the guided run, and nothing said so or offered a way
+            # back. The results screen was then unreachable for the life of the window,
+            # even though the same hazard had already been fixed for the finished
+            # screen. Nothing is lost either way -- readings are persisted as they are
+            # taken -- but a dead end that the overlay itself invited is still a dead end.
+            lines.append("S     back to the results")
         lines += ["H     move this panel", "Esc   exit"]
         for line in lines:
             painter.drawText(margin, y, line)
@@ -851,8 +859,14 @@ class PatternWindow(QWidget):
         return value if value else None
 
     def show_summary(self) -> bool:
-        """Return to the results after looking at a pattern."""
-        if not self._complete:
+        """Return to the results after looking at a pattern.
+
+        Reachable once there is anything to show, not only after a finished run. A
+        digit key mid-sequence clears _guided while _complete stays False, so this
+        used to refuse for the rest of the window's life and the readings already
+        taken had nowhere to be seen.
+        """
+        if not self._complete and not self.accepted:
             return False
         self._showing_summary = True
         self.refresh()
@@ -1080,7 +1094,7 @@ class PatternWindow(QWidget):
         if key == Qt.Key.Key_E:
             self.begin_edit()
             return
-        if key == Qt.Key.Key_S and self._complete:
+        if key == Qt.Key.Key_S and (self._complete or self.accepted):
             # The summary invites browsing the patterns, so there has to be a way back to
             # it. Without one, a single digit key destroyed the results screen for good.
             self.show_summary()
