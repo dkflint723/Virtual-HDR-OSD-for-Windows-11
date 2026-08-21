@@ -671,9 +671,11 @@ before measuring.
 shown in absolute luminance. The first time, you will be asked where ArgyllCMS is; the
 answer is remembered per machine.
 
-The screen goes black and each patch appears in turn, centred. Put the meter over the
-middle of the screen and leave it there. Progress is reported in the status line, and
-Esc cancels -- a cancelled run changes nothing at all.
+Before anything happens you are told how many patches there are, roughly how long it
+takes, and that Esc stops it. That is deliberate: once the run starts the screen is black
+with a single patch on it and nothing else, because any text on the frame is light the
+meter would read along with the patch. Put the meter over the middle of the screen and
+leave it there. Esc cancels at any point -- a cancelled run changes nothing at all.
 
 When it finishes, the measured peak, black and white balance replace what the profile had.
 The primaries are deliberately left alone: the patches are presented in scRGB, which is

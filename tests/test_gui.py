@@ -2319,6 +2319,103 @@ class MeterIntegrationTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class MeasurementBriefingTests(WindowTestCase):
+    """What the user is told before a minute of black screen, and whether Esc works.
+
+    Once the run starts the screen shows one patch on black and nothing else -- that is
+    deliberate, since any text on the frame is light the meter integrates along with the
+    patch -- and _set_status writes to a status bar this window covers. So everything the
+    user needs has to be said beforehand, and the status line's promise of "Esc cancels"
+    was invisible. It was also untrue: nothing focused the window, so Escape went to
+    whatever had focus before and MeasureWindow.keyPressEvent was never reached.
+    """
+
+    def drive(self, answer):
+        """Run _measure_with_meter far enough to reach the confirmation."""
+        started = {}
+
+        class FakeWindow:
+            failure = ""
+            focused = False
+            activated = False
+
+            def __init__(self, *args, **kwargs):
+                FakeWindow.instance = self
+
+            def setGeometry(self, *args):
+                pass
+
+            def showFullScreen(self):
+                pass
+
+            def begin(self):
+                return True
+
+            def close(self):
+                pass
+
+            def activateWindow(self):
+                FakeWindow.activated = True
+
+            def setFocus(self, *args):
+                FakeWindow.focused = True
+
+        def fake_start(*args, **kwargs):
+            started["yes"] = True
+            return mock.MagicMock(), mock.MagicMock()
+
+        patches = [
+            mock.patch.object(app_module, "find_spotread", return_value=Path("spotread")),
+            mock.patch.object(app_module, "list_instruments",
+                              return_value=[app_module_instrument()]),
+            mock.patch.object(app_module, "read_panel_metadata", lambda _p: None),
+            mock.patch.object(app_module.measure_view, "MeasureWindow", FakeWindow),
+            mock.patch.object(app_module.measure_view, "start", fake_start),
+            mock.patch.object(app_module.QMessageBox, "question", return_value=answer),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.window._measure_with_meter()
+        return FakeWindow, started.get("yes", False)
+
+    def test_cancelling_the_briefing_measures_nothing(self):
+        _window, started = self.drive(QMessageBox.StandardButton.Cancel)
+        self.assertFalse(started, "a declined briefing still started the run")
+        self.assertIn("cancelled", self.window.status_label.text().lower())
+
+    def test_confirming_starts_the_run(self):
+        _window, started = self.drive(QMessageBox.StandardButton.Ok)
+        self.assertTrue(started)
+
+    def test_the_surface_is_focused_so_escape_can_reach_it(self):
+        """The abort path exists and is wired, but Escape has to arrive for any of it
+        to run. Measured with a real MeasureWindow: without setFocus the focus widget
+        is not the window and the closed signal never fires."""
+        window, _started = self.drive(QMessageBox.StandardButton.Ok)
+        self.assertTrue(window.focused, "the measurement surface never took focus")
+        self.assertTrue(window.activated, "the measurement surface was never activated")
+
+    def test_the_briefing_says_how_many_patches_and_how_to_stop(self):
+        with mock.patch.object(
+            app_module, "find_spotread", return_value=Path("spotread")
+        ), mock.patch.object(
+            app_module, "list_instruments", return_value=[app_module_instrument()]
+        ), mock.patch.object(
+            app_module, "read_panel_metadata", lambda _p: None
+        ), mock.patch.object(
+            app_module.QMessageBox, "question",
+            return_value=QMessageBox.StandardButton.Cancel,
+        ) as ask:
+            self.window._measure_with_meter()
+
+        body = " ".join(str(arg) for arg in ask.call_args.args)
+        steps = len(app_module.measure.plan(self.window.state.hdr.peak_luminance_nits))
+        self.assertIn(str(steps), body, "the patch count is not stated")
+        self.assertIn("Esc", body, "the way out is not stated")
+        self.assertIn("still", body.lower(), "holding the meter still is not stated")
+
+
 class PanelProvenanceTests(WindowTestCase):
     """One HDR ModeState serves every display, so its figures need an owner.
 
@@ -3085,6 +3182,14 @@ class PeakPatchTargetTests(WindowTestCase):
             def close(self):
                 pass
 
+            def activateWindow(self):
+                pass
+
+            def setFocus(self, *args):
+                # Recorded because Escape is unreachable without it; see
+                # MeasureFocusTests.
+                type(self).focused = True
+
         self.window.state.hdr.peak_luminance_nits = stored
         patches = [
             mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel),
@@ -3093,6 +3198,12 @@ class PeakPatchTargetTests(WindowTestCase):
                               return_value=[app_module_instrument()]),
             mock.patch.object(app_module.measure_view, "MeasureWindow", FakeWindow),
             mock.patch.object(app_module.measure_view, "start", fake_start),
+            # The run is preceded by a confirmation, because once the surface is up
+            # there is nowhere left to say how long it takes or how to stop it.
+            mock.patch.object(
+                app_module.QMessageBox, "question",
+                return_value=app_module.QMessageBox.StandardButton.Ok,
+            ),
         ]
         for patcher in patches:
             patcher.start()

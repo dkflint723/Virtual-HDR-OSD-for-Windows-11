@@ -609,3 +609,76 @@ class ThreadLifetimeTests(unittest.TestCase):
         seen = self.run_one()
         self.assertEqual("", seen.get("message"))
         self.assertIsInstance(seen.get("result"), Calibration)
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class EscapeReachabilityTests(unittest.TestCase):
+    """Escape only cancels a run if the window is the one holding focus.
+
+    MeasureWindow.keyPressEvent handles Escape and closeEvent emits `closed`, which
+    start() connects to worker.cancel. All of that was wired and none of it could fire:
+    the measure path showed the window fullscreen and never focused it, so Escape went
+    to whatever had focus before -- the main window, underneath -- while the status line
+    promised "Esc cancels" from behind the surface.
+
+    Split deliberately into the two halves that are ours to get right. Whether a key
+    press *routes* to a focused widget is Qt's business, and asserting it through
+    QApplication.focusWidget() is not stable in a shared offscreen QApplication: that
+    call reports focus within the active window, and whichever window another test left
+    activated decides the answer. So the routing is not asserted here. That the app
+    establishes the precondition is asserted in test_gui.MeasurementBriefingTests.
+    """
+
+    qt_app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def shown_window(self):
+        window = measure_view.MeasureWindow(None, 240.0, None)
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        window.showFullScreen()
+        QApplication.processEvents()
+        return window
+
+    def test_escape_closes_the_window_and_announces_it(self):
+        """The half that is ours: the key arrives, the run is told to stop."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        window = self.shown_window()
+        cancelled = []
+        window.closed.connect(lambda: cancelled.append(True))
+        window.keyPressEvent(
+            QKeyEvent(QKeyEvent.Type.KeyPress, Qt.Key.Key_Escape, Qt.KeyboardModifier.NoModifier)
+        )
+        QApplication.processEvents()
+        self.assertTrue(cancelled, "Escape did not stop the run")
+
+    def test_other_keys_do_not_stop_a_run(self):
+        """A stray keystroke on a black screen must not discard a measurement."""
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QKeyEvent
+
+        window = self.shown_window()
+        cancelled = []
+        window.closed.connect(lambda: cancelled.append(True))
+        for key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_A):
+            window.keyPressEvent(
+                QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+            )
+        QApplication.processEvents()
+        self.assertEqual([], cancelled)
+
+    def test_the_window_can_hold_focus(self):
+        """The precondition the app now establishes. Without it Escape is delivered to
+        whatever had focus before, and none of the above is ever reached."""
+        from PySide6.QtCore import Qt
+
+        window = self.shown_window()
+        window.activateWindow()
+        window.setFocus(Qt.FocusReason.OtherFocusReason)
+        QApplication.processEvents()
+        self.assertTrue(window.hasFocus(), "the measurement surface cannot take focus")

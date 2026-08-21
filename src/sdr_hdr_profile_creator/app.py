@@ -2172,6 +2172,29 @@ class MainWindow(FluentWidget):
         if panel is not None and panel.credible:
             peak = max(peak, panel.peak_nits)
 
+        # Said before the surface opens, because it cannot be said afterwards. The
+        # screen goes black with one patch on it and nothing else -- deliberately, since
+        # any text on the frame is light the meter would integrate along with the patch --
+        # and _set_status writes to a status bar that this window then covers. So the
+        # step count, the duration and the way out have to be given while there is still
+        # somewhere to put them. A minute of a black screen with no way out stated is
+        # indistinguishable from a hang.
+        steps = len(measure.plan(peak))
+        proceed = QMessageBox.question(
+            self,
+            "Measure with the colorimeter",
+            f"About to measure {display.friendly_name} with {instrument.label}.\n\n"
+            f"The screen goes black and shows {steps} patches in turn, taking about a "
+            "minute. Nothing is written to the profile until it finishes.\n\n"
+            "Place the meter flat against the centre of the screen and keep it still.\n\n"
+            "Press Esc at any point to stop. Nothing is changed if you do.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if proceed != QMessageBox.StandardButton.Ok:
+            self._set_status("Measurement cancelled. Nothing was changed.", "ok")
+            return
+
         window = measure_view.MeasureWindow(capability, sdr_white, panel)
         screen = self._screen_for(display)
         if screen is not None:
@@ -2188,6 +2211,15 @@ class MainWindow(FluentWidget):
                 "error",
             )
             return
+
+        # Without this the window never takes focus, so Escape goes to whatever had it
+        # before -- the covered main window -- and MeasureWindow.keyPressEvent is never
+        # reached. Measured: focusWidget was not the window and the closed signal never
+        # fired, which left the entire abort path unreachable for a meter run while the
+        # status line promised "Esc cancels". The pattern surface has always done this;
+        # this path was simply missing it.
+        window.activateWindow()
+        window.setFocus(Qt.FocusReason.OtherFocusReason)
 
         self._measure_window = window
         self._log_meter({
