@@ -45,7 +45,7 @@ from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
 from .hotkeys import GammaHotkeyListener
-from . import measure, measure_view
+from . import elevation, measure, measure_view
 from .edid import read_panel_metadata
 from .meter import MeterError, find_spotread, list_instruments, read_emissive
 from .hdr_display import capability_for_device_name
@@ -356,6 +356,23 @@ class MainWindow(FluentWidget):
         )
         watchdog_button.clicked.connect(self._show_watchdog_settings)
         heading.addWidget(watchdog_button)
+        # "Run as Admin" rather than "Run as Administrator": this row already carries a
+        # title, four buttons and the mode badge, and the longer label is wider than
+        # "Calibrate Display" -- the most important button here -- for a thing most
+        # people never need to press.
+        self.elevate_button = PushButton("Run as Admin", self)
+        self.elevate_button.setToolTip(
+            "Restart this app with administrator rights, keeping your current edits.\n\n"
+            "Most of what this app does needs no such thing: every colour setting it "
+            "writes is per-user, so profiles apply and lock perfectly well as an "
+            "ordinary user. It matters in two cases -- registering the watchdog as a "
+            "scheduled task rather than a plain startup entry, and installing a profile "
+            "on a machine whose Windows colour folder has been locked down.\n\n"
+            "This button is not here once the app is already elevated."
+        )
+        self.elevate_button.clicked.connect(self._relaunch_elevated)
+        self._refresh_elevation_button()
+        heading.addWidget(self.elevate_button)
         help_button = PushButton("Help", self)
         help_button.setToolTip("Open the complete usage guide, control reference, and safety notes.")
         help_button.clicked.connect(self._show_help)
@@ -1161,6 +1178,52 @@ class MainWindow(FluentWidget):
         self._lock_pending = "install" if checked else "uninstall"
         self._run_watchdog_script(
             "2- OPTIONAL - Install-Watchdog.bat" if checked else "Uninstall-Watchdog.bat"
+        )
+
+    def _refresh_elevation_button(self) -> None:
+        """The button is only present while it still has something left to offer."""
+        self.elevate_button.setVisible(not elevation.is_elevated())
+
+    def _relaunch_elevated(self) -> None:
+        """Restart as administrator, carrying the current edits across.
+
+        Asked first, because it closes this window. The prompt says what elevation is
+        actually for rather than implying the app needs it -- on most machines nothing
+        here does, and elevating out of habit costs the ability to drag a profile in
+        from an ordinary Explorer window, which UIPI blocks across that boundary.
+        """
+        if elevation.is_elevated():
+            self._refresh_elevation_button()
+            self._set_status("Already running as administrator.", "ok")
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Restart as Administrator",
+            "Restart this app with administrator rights?\n\n"
+            "Your edits are saved first and restored afterwards, and the profile "
+            "Windows is using right now does not change.\n\n"
+            "This is only worth doing for:\n"
+            + "".join(f"  • {reason}\n" for reason in elevation.BUYS)
+            + "\nEverything else works without it, because every colour setting this "
+            "app writes is per-user.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        # Written before Windows is asked, not after. The elevated copy reads this file
+        # as it starts, and closing this window is what would otherwise write it -- so
+        # the other order is a race the new process usually wins, losing the edits.
+        self._save_state_now()
+        result = elevation.relaunch_elevated()
+        if result.started:
+            self.close()
+            return
+        self._set_status(
+            result.message or "Could not restart as administrator.",
+            "warning" if result.outcome is elevation.Relaunch.DECLINED else "error",
         )
 
     def _show_watchdog_settings(self) -> None:

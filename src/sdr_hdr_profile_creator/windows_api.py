@@ -352,8 +352,8 @@ def _format_windows_error(prefix: str) -> WindowsColorError:
     detail = f"{prefix}: {ctypes.FormatError(error).strip()} (Win32 {error})"
     if error == 5:
         detail += (
-            '. Windows denied profile installation; close the app, right-click '
-            '"1- Install & Run.bat", choose Run as administrator, and retry'
+            ". Windows denied profile installation. Press Run as Admin at the top of "
+            "the window to restart with the rights it wants; your edits are kept"
         )
     return WindowsColorError(detail)
 

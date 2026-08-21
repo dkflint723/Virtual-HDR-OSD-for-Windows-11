@@ -2182,6 +2182,93 @@ class MeterIntegrationTests(WindowTestCase):
 
 
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class ElevationButtonTests(WindowTestCase):
+    """Restarting elevated closes this window, so the outcomes have to be told apart.
+
+    Dismissing the UAC prompt is the ordinary case -- it is one keystroke and people do
+    it by reflex -- and treating that as success would close the editor with no elevated
+    copy coming to replace it, taking the unapplied edits along with it.
+    """
+
+    def press(self, answer, outcome):
+        """Drive the handler, recording the order things happened in."""
+        log = []
+        result = app_module.elevation.RelaunchResult(outcome, "the prompt was dismissed")
+
+        def relaunch(*_args, **_kwargs):
+            log.append("relaunch")
+            return result
+
+        with mock.patch.object(QMessageBox, "question", return_value=answer), \
+             mock.patch.object(app_module.elevation, "is_elevated", return_value=False), \
+             mock.patch.object(app_module.elevation, "relaunch_elevated", relaunch), \
+             mock.patch.object(type(self.window), "close",
+                               lambda _self: log.append("close")), \
+             mock.patch.object(type(self.window), "_save_state_now",
+                               lambda _self: log.append("save")):
+            self.window._relaunch_elevated()
+        return log
+
+    def test_confirming_saves_before_asking_windows_and_only_then_closes(self):
+        """The elevated copy reads the state file while starting. Saving afterwards is
+        a race it usually wins, and the edits are gone."""
+        self.assertEqual(
+            ["save", "relaunch", "close"],
+            self.press(QMessageBox.StandardButton.Yes, app_module.elevation.Relaunch.STARTED),
+        )
+
+    def test_a_dismissed_prompt_leaves_the_window_open(self):
+        log = self.press(
+            QMessageBox.StandardButton.Yes, app_module.elevation.Relaunch.DECLINED
+        )
+        self.assertEqual(["save", "relaunch"], log)
+        self.assertNotIn("close", log)
+
+    def test_a_dismissed_prompt_is_reported_as_a_choice_not_an_error(self):
+        self.press(QMessageBox.StandardButton.Yes, app_module.elevation.Relaunch.DECLINED)
+        text = self.window.status_label.text()
+        self.assertIn("dismissed", text.lower())
+        self.assertNotIn("Error", text)
+
+    def test_a_real_failure_is_reported_as_an_error(self):
+        self.press(QMessageBox.StandardButton.Yes, app_module.elevation.Relaunch.FAILED)
+        self.assertIn("Error", self.window.status_label.text())
+
+    def test_cancelling_the_confirmation_touches_nothing(self):
+        self.assertEqual(
+            [], self.press(QMessageBox.StandardButton.Cancel,
+                           app_module.elevation.Relaunch.STARTED)
+        )
+
+    def test_pressing_it_while_already_elevated_asks_nothing(self):
+        with mock.patch.object(app_module.elevation, "is_elevated", return_value=True), \
+             mock.patch.object(QMessageBox, "question") as ask, \
+             mock.patch.object(app_module.elevation, "relaunch_elevated") as relaunch:
+            self.window._relaunch_elevated()
+        ask.assert_not_called()
+        relaunch.assert_not_called()
+
+    def test_the_button_is_withdrawn_once_the_app_is_elevated(self):
+        """It is the whole reason the button is conditional: offering a way to gain
+        rights the process already holds is noise in a row that has none to spare."""
+        with mock.patch.object(app_module.elevation, "is_elevated", return_value=True):
+            self.window._refresh_elevation_button()
+        self.assertTrue(self.window.elevate_button.isHidden())
+        with mock.patch.object(app_module.elevation, "is_elevated", return_value=False):
+            self.window._refresh_elevation_button()
+        self.assertFalse(self.window.elevate_button.isHidden())
+
+    def test_the_access_denied_message_names_the_button_that_fixes_it(self):
+        """The remedy used to be "close the app and relaunch it as administrator",
+        which is a chore rather than a remedy now that there is a button."""
+        from sdr_hdr_profile_creator import windows_api
+
+        with mock.patch.object(windows_api.ctypes, "get_last_error", return_value=5), \
+             mock.patch.object(windows_api.ctypes, "FormatError", return_value="Access is denied."):
+            error = windows_api._format_windows_error("InstallColorProfileW failed")
+        self.assertIn(self.window.elevate_button.text(), str(error))
+
+
 class LayoutMembershipTests(WindowTestCase):
     """A control with a parent but no layout is still a real widget.
 
