@@ -113,11 +113,14 @@ class WatchdogPackagingTests(unittest.TestCase):
 
     def test_a_surplus_launcher_stands_down_instead_of_respawning(self):
         """Exit 4 means another instance holds the singleton. Looping on that respawns
-        a doomed PowerShell every five seconds for the life of the session."""
+        a doomed PowerShell every five seconds for the life of the session -- but
+        standing down on the *first* one loses the handover the installer creates, so
+        it takes four in a row."""
         script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
         self.assertIn("exit 4", script, "losing the singleton needs its own exit code")
         self.assertIn("code = shell.Run(", script, "the launcher must read the exit code")
-        self.assertIn("If code = 4 Or code = 2 Or code = 3 Then", script)
+        self.assertIn("If code = 2 Or code = 3 Then", script, "these will not fix themselves")
+        self.assertIn("If surplus >= 4 Then", script, "a surplus supervisor must give up eventually")
         self.assertIn("WScript.Quit 0", script)
         # 9 is the startup guard asking for a fresh instance: it must NOT stand down.
         self.assertNotIn("code = 9", script, "the guard's restart request must be honoured")
@@ -186,8 +189,9 @@ class InstallerOutcomeTests(unittest.TestCase):
         in is behind a `pause` the user may never read."""
         script = self.install()
         self.assertEqual(
-            2, script.count("$script:InstallWarnings +="),
-            "each degraded startup path should record its own warning",
+            3, script.count("$script:InstallWarnings +="),
+            "each degraded outcome should record its own warning: the Run-key fallback, "
+            "the un-replaceable task, and a running watchdog that cannot be stopped",
         )
 
     def test_the_gui_reads_the_same_file_the_scripts_write(self):
@@ -279,6 +283,33 @@ class WatchdogIdentityTests(unittest.TestCase):
             script,
         )
 
+    def test_the_installer_notices_when_it_cannot_replace_the_running_watchdog(self):
+        """Both reaper filters require a readable CommandLine, and Windows returns null
+        for a process at a higher integrity level -- so a watchdog started by an
+        elevated run is invisible to them and cannot be terminated either. It keeps the
+        singleton, every replacement exits as surplus, and the install used to report
+        success while the old build carried on. Observed for a whole evening.
+        """
+        script = self.install()
+        self.assertIn("function Test-WatchdogSingletonHeld", script)
+        self.assertIn("$clearedTheWay = Stop-ExistingWatchdog", script)
+        self.assertIn("ok       = [bool]$clearedTheWay", script,
+                      "a blocked replacement is still being reported as a clean install")
+
+    def test_the_liveness_check_is_the_singleton_not_a_process_list(self):
+        """A process list cannot see what it is not allowed to read; the mutex can."""
+        script = self.install()
+        self.assertIn("OpenExisting('Local\ColorProfileModeWatchdogStandalone')", script)
+
+    def test_a_surplus_launcher_waits_before_standing_down(self):
+        """Standing down on the first surplus exit loses the install-time handover: the
+        installer stops the old watchdog and starts a new supervisor, and if the old
+        process has not released the singleton yet the replacement quits for good."""
+        script = self.install()
+        self.assertIn("surplus = surplus + 1", script)
+        self.assertIn("If surplus >= 4 Then", script)
+        self.assertIn("    surplus = 0", script, "the counter must reset on any other exit")
+
     def test_the_log_records_corrections_rather_than_every_reassertion(self):
         """614 of 618 lines were identical "Restored..." entries: 37 B/s, the 512 KB cap
         reached in about four hours, one .old kept, so eight hours of history at most --
@@ -316,8 +347,13 @@ class LauncherBehaviourTests(unittest.TestCase):
     """
 
     #: Long enough for a second attempt (the loop sleeps 5s), short enough to live in
-    #: a suite. A launcher that stands down does so in a fraction of a second.
+    #: a suite.
     LOOP_BUDGET = 7.0
+
+    #: A surplus supervisor now takes four consecutive refusals before quitting, so it
+    #: needs roughly four sleeps to get there. Deliberately not shortened by making the
+    #: production wait smaller: the wait is what survives the installer's handover.
+    SURPLUS_BUDGET = 30.0
 
     def launcher_body(self) -> str:
         raw = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
@@ -325,7 +361,7 @@ class LauncherBehaviourTests(unittest.TestCase):
         self.assertIsNotNone(found, "the Launcher.vbs here-string is gone")
         return found.group(1)
 
-    def outcome_for(self, exit_code: int) -> str:
+    def outcome_for(self, exit_code: int, budget: float | None = None) -> str:
         """"stood-down" or "still-looping" for a watchdog that exits with exit_code."""
         import subprocess
         import tempfile
@@ -348,7 +384,8 @@ class LauncherBehaviourTests(unittest.TestCase):
         try:
             subprocess.run(
                 ["cscript.exe", "//B", "//Nologo", str(launcher)],
-                timeout=self.LOOP_BUDGET, capture_output=True,
+                timeout=self.LOOP_BUDGET if budget is None else budget,
+                capture_output=True,
             )
             return "stood-down"
         except subprocess.TimeoutExpired:
@@ -356,8 +393,10 @@ class LauncherBehaviourTests(unittest.TestCase):
 
     def test_a_surplus_launcher_exits_rather_than_respawning_forever(self):
         """Exit 4 is "another instance owns the singleton". Restarting that every five
-        seconds is what burned a PowerShell process per five seconds, indefinitely."""
-        self.assertEqual("stood-down", self.outcome_for(4))
+        seconds is what burned a PowerShell process per five seconds, indefinitely --
+        but it waits out four of them first, so an install-time handover is not
+        mistaken for being permanently surplus."""
+        self.assertEqual("stood-down", self.outcome_for(4, budget=self.SURPLUS_BUDGET))
 
     def test_a_launcher_keeps_restarting_when_the_guard_asks_for_a_fresh_instance(self):
         """Exit 9 is the startup guard deliberately standing aside so a healthy

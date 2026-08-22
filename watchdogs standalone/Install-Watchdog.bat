@@ -103,6 +103,22 @@ function Write-Log {
     } catch {}
 }
 
+function Test-WatchdogSingletonHeld {
+    # The only honest liveness check. The script being on disk, and a scheduled task
+    # existing, both stay true after the watchdog has exited; and a process list is no
+    # good either, because Win32_Process returns a null CommandLine for a process at a
+    # higher integrity level than this one -- which is exactly the case that matters.
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting('Local\ColorProfileModeWatchdogStandalone')
+        try { $mutex.Dispose() } catch {}
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        return $false
+    } catch {
+        return $false
+    }
+}
+
 function Stop-ExistingWatchdog {
     # Two kinds of process, and the order matters. Launcher.vbs runs under
     # wscript.exe and restarts the watchdog five seconds after it exits, so killing
@@ -136,6 +152,21 @@ function Stop-ExistingWatchdog {
                 Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
             }
     } catch {}
+
+    # Whether any of that worked. Both filters require a readable CommandLine, and
+    # Windows returns null for a process running at a higher integrity level than this
+    # one, so a watchdog started by an elevated install is invisible here and cannot be
+    # terminated either -- Stop-Process answers "Access is denied" for the same reason.
+    # It then keeps the singleton, every replacement exits as surplus, and the install
+    # reports success while the old build goes on running. Observed exactly that.
+    #
+    # Give it a moment to release: termination is not instant, and a false alarm here
+    # would be worse than the problem.
+    for ($wait = 0; $wait -lt 12; $wait++) {
+        if (-not (Test-WatchdogSingletonHeld)) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
 }
 
 $nativeSource = @'
@@ -1273,7 +1304,18 @@ if ($Install) {
     Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
 
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-    Stop-ExistingWatchdog
+    $clearedTheWay = Stop-ExistingWatchdog
+    if (-not $clearedTheWay) {
+        # An install that cannot stop the old watchdog cannot replace it. Every file
+        # below gets written correctly and the running process keeps the singleton, so
+        # the new build never loads and the installer used to report success anyway.
+        # The cause is always the same: that watchdog was started by an elevated run,
+        # so this account cannot see its command line or terminate it.
+        $script:InstallWarnings += 'A watchdog is already running that this account cannot stop, because it was started with administrator rights. The new files were written but the running one will keep the old behaviour until it is stopped. Re-run this installer as administrator, or sign out and back in.'
+        Write-Warning 'A watchdog started with administrator rights is already running and cannot be stopped from here.'
+        Write-Warning 'The files below are updated, but that process keeps running the previous version until it is stopped.'
+        Write-Warning 'Re-run this installer as administrator, or sign out and back in.'
+    }
 
     $build = [Environment]::OSVersion.Version.Build
     if ($build -lt 20348) {
@@ -1319,15 +1361,31 @@ if ($Install) {
     # distinction a second supervisor -- one arrives whenever both the scheduled task
     # and the Run key are armed -- respawned a PowerShell that lost the singleton and
     # exited immediately, every five seconds, for as long as the session lasted.
-    #   4  another instance already holds the singleton  -> stand down
+    #   4  another instance already holds the singleton  -> stand down, but not at once
     #   2  no saved state    3  no saved displays        -> will not fix itself
     #   9  the startup guard asked for a fresh instance  -> restart, that is the point
+    #
+    # Four consecutive 4s, not one. Standing down immediately loses the race the
+    # installer creates: it stops the old watchdog and starts a new supervisor, and if
+    # the old process has not released the singleton yet the replacement reads as
+    # surplus and quits for good -- leaving nothing running once the old one does exit.
+    # Twenty seconds is far longer than a handover and still bounded, so a genuinely
+    # surplus supervisor stops rather than spinning for the session.
     $vbs = @"
 Set shell = CreateObject("WScript.Shell")
+surplus = 0
 Do
   code = shell.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, True)
-  If code = 4 Or code = 2 Or code = 3 Then
+  If code = 2 Or code = 3 Then
     WScript.Quit 0
+  End If
+  If code = 4 Then
+    surplus = surplus + 1
+    If surplus >= 4 Then
+      WScript.Quit 0
+    End If
+  Else
+    surplus = 0
   End If
   WScript.Sleep 5000
 Loop
@@ -1451,7 +1509,10 @@ Loop
     # Write down what actually happened instead, for the GUI to read.
     $result = [PSCustomObject]@{
         action   = 'install'
-        ok       = $true
+        # Not ok when the previous watchdog is still running: the files are right but
+        # the behaviour is not, and reporting that as success is what let an old build
+        # keep running for a whole evening while every reinstall looked like it worked.
+        ok       = [bool]$clearedTheWay
         startup  = $startupMethod
         fallback = ($startupMethod -notlike 'Task Scheduler*')
         warnings = @($script:InstallWarnings)
