@@ -806,13 +806,28 @@ class OverwriteInstalledProfileTests(unittest.TestCase):
         self.assertTrue(self.windows_api.overwrite_installed_profile(name, b"C" * 200))
         self.assertEqual(b"C" * 200, (self.color_dir / name).read_bytes())
 
-    def test_a_shorter_payload_is_refused_rather_than_leaving_a_tail(self):
-        """There is no truncate right, so a short write would leave the end of the old
-        profile behind -- a file that parses and describes the wrong display."""
+    def test_a_shorter_payload_truncates_rather_than_leaving_a_tail(self):
+        """A short write without truncation leaves the end of the old profile behind --
+        a file that still parses, because the ICC header carries the size, and describes
+        the wrong display.
+
+        This was refused outright until the truncation was measured: SetEndOfFile
+        succeeds on a FILE_WRITE_DATA handle against the files this actually writes. The
+        refusal was costing every apply once the embedded state grew a measured
+        greyscale response, because the JSON for 198 floats is not the same length twice
+        running and a profile 48 bytes shorter than the installed one is ordinary.
+        """
         name = self.installed()
-        self.assertFalse(self.windows_api.overwrite_installed_profile(name, b"D" * 20))
-        self.assertEqual(b"A" * 120, (self.color_dir / name).read_bytes(),
-                         "a refused write must not have modified anything")
+        self.assertTrue(self.windows_api.overwrite_installed_profile(name, b"D" * 20))
+        self.assertEqual(b"D" * 20, (self.color_dir / name).read_bytes(),
+                         "the tail of the old profile is still there")
+
+    def test_a_shorter_payload_leaves_nothing_of_the_old_file(self):
+        """Byte length as well as content: a tail is exactly what would not show up in a
+        comparison that only checked the prefix."""
+        name = self.installed()
+        self.windows_api.overwrite_installed_profile(name, b"E" * 7)
+        self.assertEqual(7, (self.color_dir / name).stat().st_size)
 
     def test_a_missing_destination_is_false_rather_than_an_exception(self):
         self.assertFalse(

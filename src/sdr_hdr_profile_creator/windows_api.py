@@ -533,9 +533,17 @@ def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
     silently freezes at whatever bytes were installed that day.
 
     Writing the bytes straight into the existing file is the way out, because the ACL
-    still allows FILE_WRITE_DATA even where it denies DELETE and GENERIC_WRITE. There
-    is no truncate right, so a payload shorter than the file on disk would leave the
-    tail of the old profile behind; that case is reported rather than attempted.
+    still allows FILE_WRITE_DATA even where it denies DELETE and GENERIC_WRITE.
+
+    A shorter payload used to be refused here, on the grounds that without a truncate
+    right it would leave the tail of the old profile behind. ``SetEndOfFile`` turns out
+    to succeed on a FILE_WRITE_DATA handle against exactly the files this has to write,
+    so the refusal cost more than it protected: the embedded state tag carries the
+    measured greyscale response now, and the JSON for 198 floats is not the same length
+    twice running. A profile 48 bytes shorter than the one installed is ordinary, and
+    every one of those applies failed with a message about elevation that had nothing to
+    do with it. The truncation is still checked, and a shorter payload that cannot be
+    truncated is still refused rather than written half over the old one.
 
     Never trusts the write. The return value is a read-back comparison, because every
     other step in this story returned success while changing nothing.
@@ -544,12 +552,7 @@ def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
         raise WindowsColorError("Colour profiles can only be installed on Windows")
 
     target = get_color_directory() / Path(profile_name).name
-    try:
-        existing = target.stat().st_size
-    except OSError:
-        return False
-    if len(payload) < existing:
-        # Only an equal or larger payload can be written safely without DELETE.
+    if not target.is_file():
         return False
 
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -563,6 +566,13 @@ def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
         ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p,
     ]
     kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.SetFilePointerEx.argtypes = [
+        wintypes.HANDLE, ctypes.c_longlong,
+        ctypes.POINTER(ctypes.c_longlong), wintypes.DWORD,
+    ]
+    kernel32.SetFilePointerEx.restype = wintypes.BOOL
+    kernel32.SetEndOfFile.argtypes = [wintypes.HANDLE]
+    kernel32.SetEndOfFile.restype = wintypes.BOOL
 
     # Retried, for the same reason _write_json_atomic retries: the watchdog re-asserts
     # the association every few seconds and Windows opens the profile to do it, so an
@@ -588,6 +598,17 @@ def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
         if not kernel32.WriteFile(handle, buffer, len(payload), ctypes.byref(written), None):
             return False
         if written.value != len(payload):
+            return False
+        # Cut off whatever the old profile had beyond the new one. Without this a
+        # shorter payload leaves a tail that no ICC reader would reach -- the header
+        # carries the size -- but that every byte-for-byte comparison would fail on,
+        # including the read-back below.
+        position = ctypes.c_longlong(0)
+        if not kernel32.SetFilePointerEx(
+            handle, ctypes.c_longlong(len(payload)), ctypes.byref(position), 0
+        ):
+            return False
+        if not kernel32.SetEndOfFile(handle):
             return False
     finally:
         kernel32.CloseHandle(handle)

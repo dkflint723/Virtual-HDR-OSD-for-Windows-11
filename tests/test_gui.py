@@ -2067,6 +2067,47 @@ class RefusedBalanceTests(WindowTestCase):
         self.assertNotIn("NOT updated", self.window.status_label.text())
 
 
+class MeasurementIntentTests(WindowTestCase):
+    """The log records what the profile asks for, not only what PQ says.
+
+    They are the same number only while every control is neutral. A reader that compares
+    a reading against the PQ level reports the SDR-in-HDR correction as a 70% error, in
+    exactly the part of the range someone would look at hardest.
+    """
+
+    def test_a_neutral_profile_intends_what_pq_says(self):
+        self.window.state.hdr.sdr_gamma_correction = "Off"
+        self.window.state.hdr.gamma = 2.2
+        intent = self.window._measurement_intent(1000.0)
+        self.assertTrue(intent)
+        for key, nits in intent.items():
+            asked = dict(
+                (s.key, s.nits) for s in app_module.measure.plan(1000.0)
+            )[key]
+            self.assertAlmostEqual(nits / asked, 1.0, delta=0.02, msg=key)
+
+    def test_the_sdr_correction_moves_the_intent_below_it(self):
+        """Not a fault to be corrected -- a preference to be measured against."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        intent = self.window._measurement_intent(1000.0)
+        asked = {s.key: s.nits for s in app_module.measure.plan(1000.0)}
+        low = [k for k, v in asked.items() if k.startswith("grey-") and v < 2.0]
+        self.assertTrue(low)
+        for key in low:
+            self.assertLess(intent[key], asked[key], key)
+
+    def test_it_covers_every_greyscale_point_and_nothing_else(self):
+        intent = self.window._measurement_intent(1000.0)
+        grey = {s.key for s in app_module.measure.plan(1000.0) if s.key.startswith("grey-")}
+        self.assertEqual(set(intent), grey)
+
+    def test_it_is_empty_rather_than_wrong_when_the_curve_cannot_be_built(self):
+        """A missing intent makes a reader fall back to PQ, which is merely
+        uninformative. A wrong one is worse than none."""
+        with mock.patch.object(app_module, "build_transform", side_effect=RuntimeError):
+            self.assertEqual(self.window._measurement_intent(1000.0), {})
+
+
 class RampReversalNoteTests(WindowTestCase):
     """A display that dims when asked for more light cannot be corrected by a curve.
 

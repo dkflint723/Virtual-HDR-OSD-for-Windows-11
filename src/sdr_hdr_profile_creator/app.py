@@ -43,7 +43,7 @@ from qfluentwidgets import (
 from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
-from .gamma_correction import CORRECTION_OPTIONS, pq_inverse_eotf, resolve_white_level
+from .gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
 from . import greyscale
 from .hotkeys import GammaHotkeyListener
 from . import elevation, measure, measure_view
@@ -2449,6 +2449,13 @@ class MainWindow(FluentWidget):
             # recovering the requests afterwards means knowing the peak the plan was
             # built with, which is not the peak the run then measured.
             "plan": {step.key: round(step.nits, 6) for step in measure.plan(peak)},
+            # What the profile *intends* each of those levels to be, which is not the
+            # same number whenever a control is not neutral. The SDR-in-HDR correction
+            # deliberately darkens the low end -- at 0.5 nits of PQ it asks for 0.105 --
+            # so a report that compares a reading against the PQ level calls that
+            # setting a 70% error and sends someone hunting a fault that is a preference.
+            "intent": self._measurement_intent(peak),
+            "sdr_gamma_correction": self.state.hdr.sdr_gamma_correction,
         })
         self._set_status(
             f"Measuring {display.friendly_name} with {instrument.label}. Keep the meter "
@@ -2473,6 +2480,27 @@ class MainWindow(FluentWidget):
         # provenance stamp the luminance figures carry or it will be applied to the
         # next display the user selects.
         self._measure_display_key = display.stable_key
+
+    def _measurement_intent(self, peak: float) -> dict:
+        """The luminance the profile asks for at each greyscale level, keyed like the plan.
+
+        Empty if the transform cannot be built. A missing intent means a reader falls
+        back to comparing against PQ, which is right when nothing is shaping the curve
+        and merely uninformative when something is.
+        """
+        try:
+            transform = build_transform(
+                self.state.hdr, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
+            )
+        except Exception:
+            return {}
+        intent = {}
+        for step in measure.plan(peak):
+            if not step.key.startswith("grey-"):
+                continue
+            code = pq_inverse_eotf(max(0.0, step.nits))
+            intent[step.key] = round(pq_eotf(greyscale.sample(transform.green, code)), 6)
+        return intent
 
     def _log_meter(self, record: dict) -> None:
         """Append one line to the meter log, and never fail the run over it."""

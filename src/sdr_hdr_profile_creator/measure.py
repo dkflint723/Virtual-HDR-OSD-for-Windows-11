@@ -803,14 +803,25 @@ def _apportion(
 
 
 def _channel_weights(readings: dict[str, Reading]) -> tuple[float, ...]:
-    """The reference white's luminance split. See ``Calibration.white_weights``."""
-    solved = _channel_matrix(readings)
+    """The reference white's luminance split. See ``Calibration.white_weights``.
+
+    Solved the same way the gains are, and for the same reason: taking each channel's
+    magnitude from its own patch inherits whatever the display did to that patch, and on
+    a panel that boosts saturated colour the three do not add up to the white they are
+    supposed to divide. Splitting the white itself cannot disagree with the white.
+
+    Using one method for the gains and another for the weights would also mean the two
+    halves of the correction were solved against different displays -- the matrix
+    balancing towards one white and the curves holding grey to another.
+    """
+    solved = channel_contributions(readings)
     if solved is None:
         return ()
-    _matrix, inverse = solved
-    primaries = tuple(_xyz(readings[channel]) for channel in ("red", "green", "blue"))
-    shares = _apportion(inverse, primaries, _xyz(readings["balance-white"]))
-    return () if shares is None else shares
+    contributions, _matrix = solved
+    total = sum(contributions)
+    if total <= 0.0:
+        return ()
+    return tuple(value / total for value in contributions)
 
 
 def _ramp_reversal(points: tuple[GreyPoint, ...]) -> float:

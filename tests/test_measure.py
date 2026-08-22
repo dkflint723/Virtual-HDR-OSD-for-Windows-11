@@ -473,6 +473,22 @@ class SolvedDespiteAdditivityTests(unittest.TestCase):
         """Solving through it is not the same as pretending it did not happen."""
         self.assertGreater(derive(self.readings()).additivity_error, 1.0)
 
+    def test_the_weights_are_the_same_contributions_the_gains_came_from(self):
+        """Both halves of the correction have to describe one display. Solving the
+        matrix against one white and holding grey to another is two calibrations of two
+        different displays, applied to the same one."""
+        contributions, _matrix = channel_contributions(self.readings())
+        total = sum(contributions)
+        expected = tuple(value / total for value in contributions)
+        for solved, want in zip(derive(self.readings()).white_weights, expected):
+            self.assertAlmostEqual(solved, want, places=12)
+
+    def test_the_weights_sum_to_one_and_sit_near_bt709(self):
+        weights = derive(self.readings()).white_weights
+        self.assertAlmostEqual(sum(weights), 1.0, places=9)
+        for solved, expected in zip(weights, (0.2126, 0.7152, 0.0722)):
+            self.assertAlmostEqual(solved, expected, delta=0.015)
+
 
 class RefusedBalanceTests(unittest.TestCase):
     """A run whose channels cannot be told apart still measured a display."""

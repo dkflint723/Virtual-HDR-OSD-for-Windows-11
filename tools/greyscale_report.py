@@ -1,15 +1,19 @@
-"""Read the meter log and say how well each run tracked PQ.
+"""Read the meter log and say how well each run tracked what the profile asked for.
 
 Usage:
 
     python tools/greyscale_report.py            # every run in the default log
     python tools/greyscale_report.py <path>     # a log kept somewhere else
 
-A measurement run is only worth anything next to what it asked for, so this pairs each
-greyscale patch with its target from the ``start`` record and prints the miss. Two runs
-either side of an Apply is the test that matters: the second should track far closer than
-the first, and a third should barely differ from the second. A second run that is *worse*
-than the first is the signature of a correction being applied twice.
+Against the profile's intent, not against PQ. The two are the same only while every
+control is neutral. The SDR-in-HDR correction deliberately darkens the low end -- at 0.5
+nits of PQ it asks for 0.105 -- so comparing a reading against the PQ level reports that
+setting as a 70% error, in exactly the part of the range someone would look at hardest.
+Runs logged before the intent was recorded fall back to PQ and say so.
+
+Two runs either side of an Apply is the test that matters: the second should track far
+closer than the first, and a third should barely differ from the second. A second run
+that is *worse* than the first is the signature of a correction being applied twice.
 
 Nothing here reads the display or the profile. It only reads the log, so it can be run
 long after the fact and on a different machine.
@@ -65,15 +69,24 @@ def describe(index, run):
         print("  No plan recorded -- this run predates the log carrying its targets.")
         return
 
+    # Against what the profile asks for, not against PQ. They differ whenever a control
+    # is not neutral: the SDR-in-HDR correction deliberately darkens the low end, and
+    # comparing a reading to the PQ level reports that setting as a 70% error.
+    intent = start.get("intent") or {}
     grey = sorted(key for key in plan if key.startswith("grey-"))
     paired = [
-        (plan[key], run["readings"][key])
+        (intent.get(key, plan[key]), run["readings"][key])
         for key in grey
-        if key in run["readings"] and plan[key] > 0
+        if key in run["readings"] and (intent.get(key, plan[key]) or 0) > 0
     ]
     if not paired:
         print(f"  No greyscale readings ({run['outcome'] or 'run did not finish'}).")
         return
+
+    against = "what the profile asks for" if intent else "PQ (no intent recorded)"
+    correction = start.get("sdr_gamma_correction")
+    print(f"  measured against: {against}"
+          + (f"   SDR-in-HDR correction: {correction}" if correction else ""))
 
     errors = [abs(reading["Y"] - target) / target for target, reading in paired]
     drifts = [math.dist((reading["x"], reading["y"]), D65_XY) for _t, reading in paired]
@@ -82,7 +95,7 @@ def describe(index, run):
     print(f"  {len(paired)} of {len(grey)} ramp points read"
           f"   outcome: {run['outcome'] or 'incomplete'}")
     print(f"  luminance error   median {_pct(_median(errors))}   worst {_pct(max(errors))}"
-          f"  (at {paired[worst][0]:.4g} nits, read {paired[worst][1]['Y']:.4g})")
+          f"  (asked {paired[worst][0]:.4g} nits, read {paired[worst][1]['Y']:.4g})")
     print(f"  drift from D65    median {_median(drifts):.4f}   worst {max(drifts):.4f}")
 
     # The bottom of the range is where a display is usually worst and where the ramp is
