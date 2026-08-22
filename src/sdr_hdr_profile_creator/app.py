@@ -2443,6 +2443,12 @@ class MainWindow(FluentWidget):
             "display": display.friendly_name,
             "instrument": instrument.label,
             "requested_peak_nits": peak,
+            # What each patch asked for, so the log can be read on its own. Without it a
+            # reading is a number with nothing to compare against: the ramp is only
+            # meaningful as the difference between requested and delivered, and
+            # recovering the requests afterwards means knowing the peak the plan was
+            # built with, which is not the peak the run then measured.
+            "plan": {step.key: round(step.nits, 6) for step in measure.plan(peak)},
         })
         self._set_status(
             f"Measuring {display.friendly_name} with {instrument.label}. Keep the meter "
