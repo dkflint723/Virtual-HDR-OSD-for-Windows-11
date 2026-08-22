@@ -13,6 +13,8 @@ import unittest
 
 from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
 from sdr_hdr_profile_creator.patterns import (
+    PLACEMENT_NITS,
+    placement_frame,
     PATTERNS,
     REFERENCE_WHITE_NITS,
     TONE_TRACKING_DELTA_PQ,
@@ -685,3 +687,72 @@ class MeasurementFrameTests(unittest.TestCase):
 
     def test_survives_a_surface_smaller_than_the_patch_maths(self):
         self.assertEqual(len(measurement_frame(1, 1, (1.0, 1.0, 1.0), 100.0, self.context)), 8)
+
+
+class PlacementTargetTests(unittest.TestCase):
+    """The green square the meter is placed on, and that it detects itself.
+
+    Shown before any reading is taken, which is the one moment anything may be lit on
+    this surface. Once the run starts the screen carries a single patch on black,
+    because every other lit pixel is light the instrument integrates.
+    """
+
+    def context(self):
+        return PatternContext(is_hdr=True, sdr_white_nits=240.0, peak_nits=1000.0)
+
+    def pixel(self, raw, width, x, y):
+        return struct.unpack_from("<4e", raw, (y * width + x) * 8)[:3]
+
+    def test_the_target_is_green_and_nothing_else(self):
+        """Green is what makes it self-verifying: it is the primary furthest from both
+        a dark screen and from room light, so "the meter sees the target" cannot be
+        confused with "the meter is picking up the room"."""
+        width, height = 400, 300
+        raw = placement_frame(width, height, self.context())
+        red, green, blue = self.pixel(raw, width, width // 2, height // 2)
+        self.assertEqual(0.0, red)
+        self.assertEqual(0.0, blue)
+        self.assertGreater(green, 0.0)
+
+    def test_it_is_drawn_at_the_luminance_it_declares(self):
+        width, height = 400, 300
+        raw = placement_frame(width, height, self.context())
+        _r, green, _b = self.pixel(raw, width, width // 2, height // 2)
+        self.assertAlmostEqual(PLACEMENT_NITS, green * 80.0, places=1)
+
+    def test_everything_outside_the_target_stays_black(self):
+        """A lit surround would be light under the meter's rim, and would also make the
+        detection threshold meaningless."""
+        width, height = 400, 300
+        raw = placement_frame(width, height, self.context())
+        for x, y in ((0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)):
+            with self.subTest(corner=(x, y)):
+                self.assertEqual((0.0, 0.0, 0.0), self.pixel(raw, width, x, y))
+
+    def test_it_matches_the_geometry_the_patches_will_use(self):
+        """A meter aligned to this target has to be aligned to every patch that
+        follows: a patch edge under the aperture reads part black and returns a
+        luminance nothing downstream can tell is wrong."""
+        width, height = 400, 300
+        target = placement_frame(width, height, self.context())
+        patch = measurement_frame(width, height, (1.0, 1.0, 1.0), 100.0, self.context())
+
+        def lit_columns(raw, row):
+            return [
+                x for x in range(width)
+                if any(v > 0.0 for v in self.pixel(raw, width, x, row))
+            ]
+
+        row = height // 2
+        self.assertEqual(lit_columns(patch, row), lit_columns(target, row))
+
+    def test_a_reading_of_the_target_is_what_detection_accepts(self):
+        """The two halves have to agree, or the meter watches for something the screen
+        never shows."""
+        from sdr_hdr_profile_creator.measure import sees_placement_target
+        from sdr_hdr_profile_creator.meter import Reading
+
+        # A plausible instrument reading of a green patch at PLACEMENT_NITS.
+        seen = Reading(X=0.34 * PLACEMENT_NITS, Y=PLACEMENT_NITS, Z=0.05 * PLACEMENT_NITS,
+                       x=0.24, y=0.71)
+        self.assertTrue(sees_placement_target(seen))

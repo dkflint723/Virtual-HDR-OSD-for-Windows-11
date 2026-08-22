@@ -39,6 +39,8 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+from .gamma_correction import pq_eotf, pq_inverse_eotf
+from .greyscale import PanelResponse
 from .meter import MeterError, Reading
 
 WHITE = (1.0, 1.0, 1.0)
@@ -145,7 +147,95 @@ class MeasurementStep:
     settle_seconds: float = 1.5
 
 
-def plan(peak_nits: float) -> tuple[MeasurementStep, ...]:
+#: What the instrument must see before the run starts by itself. The target is a green
+#: patch at PLACEMENT_NITS, and these say "that is what I am looking at" rather than
+#: "I am looking at a dark screen, or at the room".
+#:
+#: Deliberately loose. This is a yes/no about placement, not a measurement: the meter
+#: may be at an angle, the panel may be dimming the patch under its own limiter, and a
+#: cheap colorimeter's green primary can sit some way from the panel's. Anything tight
+#: enough to be a real chromaticity check would reject a meter that is correctly placed.
+PLACEMENT_MIN_NITS = 12.0
+PLACEMENT_MIN_GREEN_Y = 0.40
+
+
+def sees_placement_target(reading: Reading) -> bool:
+    """Whether this reading is of the green placement target.
+
+    Two conditions, and both are needed. Luminance alone would accept a bright room or a
+    meter still sitting on the desk under a lamp. Chromaticity alone would accept almost
+    anything at near-zero luminance, where xy is numerically unstable and a
+    black-screen reading can land anywhere on the diagram.
+
+    ``y > x`` and a high ``y`` is what green looks like in CIE 1931 and nothing else
+    does: the display's green primary sits near 0.24, 0.71 on the panel this was built
+    against, room light near 0.44, 0.40, and a dark screen produces noise. The gap is
+    wide enough that this needs no calibration for a particular meter or panel.
+    """
+    if reading.Y < PLACEMENT_MIN_NITS:
+        return False
+    return reading.y > reading.x and reading.y >= PLACEMENT_MIN_GREEN_Y
+
+
+#: Points on the greyscale ramp. More than Calman's usual 21 because this is HDR: the
+#: interesting part of the range is the bottom two stops, where a 5% step in signal is
+#: an enormous step in luminance, and a ramp coarse enough to miss it would miss the
+#: only part most displays get wrong.
+GREYSCALE_STEPS = 33
+
+#: The lowest level worth putting on the ramp. Below this the instrument is reading its
+#: own noise floor on an emissive panel, and a point that is mostly noise does not
+#: become useful for being included.
+GREYSCALE_FLOOR_NITS = 0.5
+
+#: Saturation levels swept for each hue, as Calman does. 100% alone says where a primary
+#: lands and nothing about the path taken to get there, which is where a display's
+#: colour management actually goes wrong.
+SATURATIONS = (0.20, 0.40, 0.60, 0.80, 1.00)
+
+#: The six hues at the corners of the RGB cube. Each entry is which channels stay at
+#: full drive; the others fall away as saturation rises.
+HUES = (
+    ("red", (1.0, 0.0, 0.0)),
+    ("yellow", (1.0, 1.0, 0.0)),
+    ("green", (0.0, 1.0, 0.0)),
+    ("cyan", (0.0, 1.0, 1.0)),
+    ("blue", (0.0, 0.0, 1.0)),
+    ("magenta", (1.0, 0.0, 1.0)),
+)
+
+
+def _saturated(mask: tuple[float, float, float], saturation: float) -> tuple[float, float, float]:
+    """Drive for one hue at one saturation.
+
+    Saturation is a path from white to the primary, not a scaling of the primary: at
+    0% every channel is at full and the patch is white, at 100% the channels outside
+    the hue are off. Scaling instead would change luminance along with colour and make
+    the sweep a measurement of two things at once.
+    """
+    saturation = max(0.0, min(1.0, float(saturation)))
+    return tuple(1.0 - saturation * (1.0 - channel) for channel in mask)
+
+
+def greyscale_levels(peak_nits: float, steps: int = GREYSCALE_STEPS) -> tuple[float, ...]:
+    """Ramp levels, spaced evenly in PQ rather than in nits.
+
+    Even spacing in nits would put almost every point in the highlights: half the
+    samples above half peak, where the eye can barely tell two levels apart, and three
+    or four in the whole of the shadows, where it can. PQ is designed to be
+    perceptually uniform, so even steps in it are even steps in what a viewer sees --
+    and the same reasoning the pattern viewer already uses for its probe.
+    """
+    target = max(80.0, min(10000.0, float(peak_nits)))
+    steps = max(2, int(steps))
+    low, high = pq_inverse_eotf(GREYSCALE_FLOOR_NITS), pq_inverse_eotf(target)
+    span = high - low
+    return tuple(
+        pq_eotf(low + span * (index / (steps - 1))) for index in range(steps)
+    )
+
+
+def plan(peak_nits: float, *, full: bool = True) -> tuple[MeasurementStep, ...]:
     """The patches to measure, in the order they should be shown.
 
     Black comes first while the panel is still cool: on an emissive display a
@@ -153,12 +243,22 @@ def plan(peak_nits: float) -> tuple[MeasurementStep, ...]:
     disturbed by that. The primaries follow white at the same drive, because a
     channel measured at some other level samples a different point on the
     display's response and cannot be combined with the others.
+
+    ``full`` adds what a Calman-style run measures and these six patches cannot: a
+    greyscale ramp, which is the only way to see RGB balance and tone response *across*
+    the range rather than at one point, and a saturation sweep per hue, which is where
+    a display's own colour handling shows itself. The six core patches stay first and
+    keep their keys, because everything the profile is built from is derived from those
+    and a longer run must not change what a short one would have produced.
+
+    Set ``full=False`` for the original six. It is the same measurement, just blind to
+    everything between black and white.
     """
     target = max(80.0, min(10000.0, float(peak_nits)))
     # Never ask for a balance level above half the peak, so a dim display is not
     # measured for balance at a level its own limiter is already fighting.
     balance = min(BALANCE_NITS, target / 2.0)
-    return (
+    core = (
         MeasurementStep("black", "Black level", BLACK, 0.0, settle_seconds=3.0),
         MeasurementStep("white", "Peak white", WHITE, target, settle_seconds=2.0),
         MeasurementStep("balance-white", "Reference white", WHITE, balance),
@@ -166,6 +266,46 @@ def plan(peak_nits: float) -> tuple[MeasurementStep, ...]:
         MeasurementStep("green", "Green channel", (0.0, 1.0, 0.0), balance),
         MeasurementStep("blue", "Blue channel", (0.0, 0.0, 1.0), balance),
     )
+    if not full:
+        return core
+
+    levels = greyscale_levels(target)
+    grey = tuple(
+        MeasurementStep(
+            f"grey-{index:02d}",
+            f"Grey {index + 1} of {len(levels)} ({nits:.4g} nits)",
+            WHITE,
+            nits,
+            # A ramp climbs, so each patch is a smaller change than the jump from black
+            # to peak the core patches make, and needs less time to settle.
+            settle_seconds=1.0,
+        )
+        for index, nits in enumerate(levels)
+    )
+    colour = tuple(
+        MeasurementStep(
+            f"colour-{name}-{int(round(saturation * 100)):03d}",
+            f"{name.capitalize()} at {int(round(saturation * 100))}%",
+            _saturated(mask, saturation),
+            balance,
+            settle_seconds=1.0,
+        )
+        for name, mask in HUES
+        for saturation in SATURATIONS
+    )
+    return core + grey + colour
+
+
+#: What one read costs beyond its settle time: spotread starts a process, opens the
+#: instrument and integrates. Measured at roughly this on an i1 Display Pro; it is used
+#: only to tell the user how long a run will take, so being approximate is fine and
+#: being absent is not -- a four minute wait nobody was warned about reads as a hang.
+SECONDS_PER_READING = 2.5
+
+
+def estimated_seconds(steps: tuple[MeasurementStep, ...]) -> float:
+    """Roughly how long a run of these patches takes, settle plus integration."""
+    return sum(step.settle_seconds for step in steps) + len(steps) * SECONDS_PER_READING
 
 
 REQUIRED = ("black", "white", "balance-white", "red", "green", "blue")
@@ -314,6 +454,50 @@ def validate(readings: dict[str, Reading]) -> list[str]:
 
 
 @dataclass(frozen=True, slots=True)
+class GreyPoint:
+    """One point on the greyscale ramp: what was asked for, and what came back.
+
+    ``target_nits`` is copied from the plan rather than recomputed, so there is still
+    only one place the number is decided. It has to be here because on its own a
+    reading says nothing -- the whole of the correction is the difference between the
+    two, and a caller that had to rebuild the plan to find the pair would need the peak
+    the plan was built with, which is not the peak that was then measured.
+
+    Zero means the point could not be paired with a plan step, which is how a
+    ``derive`` called without one deserialises. The correction refuses those rather
+    than treating "asked for nothing" as a measurement.
+    """
+
+    index: int
+    target_nits: float
+    measured_nits: float
+    x: float
+    y: float
+
+    @property
+    def xyz(self) -> tuple[float, float, float]:
+        """The reading as XYZ. Chromaticity plus luminance carries the same content."""
+        if self.y <= 0.0:
+            return (0.0, max(0.0, self.measured_nits), 0.0)
+        return (
+            (self.x / self.y) * self.measured_nits,
+            self.measured_nits,
+            ((1.0 - self.x - self.y) / self.y) * self.measured_nits,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ColourPoint:
+    """One patch from a saturation sweep."""
+
+    hue: str
+    saturation: float
+    measured_nits: float
+    x: float
+    y: float
+
+
+@dataclass(frozen=True, slots=True)
 class Calibration:
     """What a completed measurement run contributes to a profile."""
 
@@ -322,6 +506,19 @@ class Calibration:
     white_xy: tuple[float, float]
     channel_gains: tuple[float, float, float]
     window_fraction: float = WINDOW_AREA_FRACTION
+    #: The greyscale ramp, if one was measured. Empty from a six-patch run.
+    greyscale: tuple[GreyPoint, ...] = ()
+    #: Measured XYZ of the red, green and blue patches, in that order. The
+    #: white-balance solve already needs these; they are carried so a caller can
+    #: apportion a neutral reading among the channels without measuring again.
+    channel_xyz: tuple[tuple[float, float, float], ...] = ()
+    #: How the reference white's luminance divides between red, green and blue, summing
+    #: to 1. This is what "neutral" means for this display and this signal path, and it
+    #: is the target grey is held to at every other level. Empty if the channels did not
+    #: span a colour space, which ``validate`` would already have refused.
+    white_weights: tuple[float, ...] = ()
+    #: The saturation sweeps, if measured. Empty from a six-patch run.
+    colours: tuple[ColourPoint, ...] = ()
 
     @property
     def contrast(self) -> float:
@@ -411,7 +608,9 @@ def white_balance_gains(readings: dict[str, Reading]) -> tuple[float, float, flo
     return tuple(max(0.0, gain / largest) for gain in gains)
 
 
-def derive(readings: dict[str, Reading]) -> Calibration:
+def derive(
+    readings: dict[str, Reading], steps: tuple[MeasurementStep, ...] = ()
+) -> Calibration:
     """Reduce a set of readings to profile values, or refuse.
 
     Refusing is the point. Everything this returns goes into a profile as fact,
@@ -430,7 +629,143 @@ def derive(readings: dict[str, Reading]) -> Calibration:
         black_nits=max(0.0, readings["black"].Y),
         white_xy=(reference.x, reference.y),
         channel_gains=white_balance_gains(readings),
+        greyscale=_greyscale_points(readings, steps),
+        colours=_colour_points(readings),
+        channel_xyz=tuple(_xyz(readings[channel]) for channel in ("red", "green", "blue")),
+        white_weights=_channel_weights(readings),
     )
+
+
+def _channel_matrix(readings: dict[str, Reading]) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
+    """The channel-to-XYZ matrix and its inverse, or ``None`` if it does not invert."""
+    columns = [_xyz(readings[channel]) for channel in ("red", "green", "blue")]
+    matrix = tuple(columns[column][row] for row in range(3) for column in range(3))
+    inverse = _inverse3(matrix)
+    return None if inverse is None else (matrix, inverse)
+
+
+def _apportion(
+    inverse: tuple[float, ...],
+    primaries: tuple[tuple[float, float, float], ...],
+    xyz: tuple[float, float, float],
+) -> tuple[float, float, float] | None:
+    """How a neutral reading's luminance divides between the three channels.
+
+    Ratios only, and deliberately. Solving for absolute channel amounts and adding them
+    up would inherit the problem the module docstring describes at the top of the
+    range: white asks for roughly three times the power of one channel, so the
+    brightness limiter dims it much harder, and the three no longer sum to the white
+    measured beside them. The split between them survives that; the sum does not. So
+    the solve decides only the proportions and the measured luminance decides the
+    total.
+    """
+    drives = _matvec3(inverse, xyz)
+    contributions = [
+        max(0.0, drive) * primaries[channel][1] for channel, drive in enumerate(drives)
+    ]
+    total = sum(contributions)
+    if total <= 0.0:
+        return None
+    return tuple(value / total for value in contributions)  # type: ignore[return-value]
+
+
+def _channel_weights(readings: dict[str, Reading]) -> tuple[float, ...]:
+    """The reference white's luminance split. See ``Calibration.white_weights``."""
+    solved = _channel_matrix(readings)
+    if solved is None:
+        return ()
+    _matrix, inverse = solved
+    primaries = tuple(_xyz(readings[channel]) for channel in ("red", "green", "blue"))
+    shares = _apportion(inverse, primaries, _xyz(readings["balance-white"]))
+    return () if shares is None else shares
+
+
+def panel_response(
+    calibration: Calibration, sent: Callable[[float], tuple[float, float, float]]
+) -> PanelResponse | None:
+    """Pair each channel's delivered luminance with the code it was actually sent.
+
+    ``sent`` maps a requested level to the three codes the pipeline put on the wire for
+    it -- which is the LUT in force at measurement time, not the identity, and is why
+    this describes the panel rather than the correction currently sitting on top of it.
+    A later pass therefore replaces the result instead of composing with it.
+
+    ``None`` when the run cannot support a correction: a short ramp, a plan that was
+    never paired with the readings, or channels that do not span a colour space.
+    """
+    if len(calibration.channel_xyz) != 3 or len(calibration.white_weights) != 3:
+        return None
+    matrix = tuple(
+        calibration.channel_xyz[column][row] for row in range(3) for column in range(3)
+    )
+    inverse = _inverse3(matrix)
+    if inverse is None:
+        return None
+
+    red: list[tuple[float, float]] = []
+    green: list[tuple[float, float]] = []
+    blue: list[tuple[float, float]] = []
+    for point in calibration.greyscale:
+        # target_nits is 0 when the readings were never paired with a plan. A point
+        # whose request is unknown says nothing about the panel's transfer function.
+        if point.target_nits <= 0.0 or point.measured_nits <= 0.0:
+            continue
+        shares = _apportion(inverse, calibration.channel_xyz, point.xyz)
+        if shares is None:
+            continue
+        codes = sent(point.target_nits)
+        if len(codes) != 3:
+            continue
+        for channel, bucket in enumerate((red, green, blue)):
+            bucket.append((codes[channel], shares[channel] * point.measured_nits))
+
+    response = PanelResponse(
+        tuple(red), tuple(green), tuple(blue), tuple(calibration.white_weights)
+    )
+    return response if response.usable else None
+
+
+def _greyscale_points(
+    readings: dict[str, Reading], steps: tuple[MeasurementStep, ...] = ()
+) -> tuple[GreyPoint, ...]:
+    """The ramp, in the order it was measured.
+
+    Absent from a six-patch run, and that is not a failure -- everything the profile is
+    built from comes from the core patches, and the ramp is what makes the *report*
+    worth reading. Anything here that is missing is simply not shown.
+    """
+    targets = {step.key: step.nits for step in steps}
+    points = []
+    for key in sorted(k for k in readings if k.startswith("grey-")):
+        reading = readings[key]
+        points.append(
+            GreyPoint(
+                index=int(key.split("-", 1)[1]),
+                target_nits=targets.get(key, 0.0),
+                measured_nits=reading.Y,
+                x=reading.x,
+                y=reading.y,
+            )
+        )
+    return tuple(points)
+
+
+def _colour_points(readings: dict[str, Reading]) -> tuple[ColourPoint, ...]:
+    """The saturation sweeps, grouped by nothing -- the caller decides how to read them."""
+    points = []
+    for key in sorted(k for k in readings if k.startswith("colour-")):
+        _prefix, hue, percent = key.split("-", 2)
+        reading = readings[key]
+        points.append(
+            ColourPoint(
+                hue=hue,
+                saturation=int(percent) / 100.0,
+                measured_nits=reading.Y,
+                x=reading.x,
+                y=reading.y,
+            )
+        )
+    return tuple(points)
 
 
 class Aborted(Exception):
@@ -452,6 +787,7 @@ def run(
     on_reading: Callable[[MeasurementStep, Reading], None] | None = None,
     should_abort: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    full: bool = True,
 ) -> Calibration:
     """Show each patch, read it, and reduce the set to profile values.
 
@@ -463,7 +799,7 @@ def run(
     without their matching white cannot be combined, and a peak carried over from
     a previous attempt is not a measurement of anything.
     """
-    steps = plan(peak_nits)
+    steps = plan(peak_nits, full=full)
     readings: dict[str, Reading] = {}
 
     for index, step in enumerate(steps):
@@ -489,4 +825,4 @@ def run(
             # later refused still leaves the numbers that caused it.
             on_reading(step, reading)
 
-    return derive(readings)
+    return derive(readings, steps)

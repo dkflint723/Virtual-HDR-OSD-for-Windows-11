@@ -11,6 +11,9 @@ from __future__ import annotations
 import unittest
 
 from sdr_hdr_profile_creator.measure import (
+    estimated_seconds,
+    greyscale_levels,
+    sees_placement_target,
     D65_XY,
     VERIFIED_DELTA_UV,
     compose_gains,
@@ -19,13 +22,16 @@ from sdr_hdr_profile_creator.measure import (
     MAX_CHANNEL_TRIM,
     Aborted,
     Calibration,
+    GreyPoint,
     MeasurementError,
     derive,
+    panel_response,
     plan,
     run,
     validate,
     white_balance_gains,
 )
+from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf
 from sdr_hdr_profile_creator.meter import MeterError, Reading
 
 
@@ -100,11 +106,11 @@ def without(key: str) -> dict[str, Reading]:
 
 
 class PlanTests(unittest.TestCase):
+    CORE = ["black", "white", "balance-white", "red", "green", "blue"]
+
     def test_measures_black_peak_and_a_balance_set(self):
-        self.assertEqual(
-            [step.key for step in plan(1000.0)],
-            ["black", "white", "balance-white", "red", "green", "blue"],
-        )
+        """The short plan is exactly the six patches the profile is built from."""
+        self.assertEqual([step.key for step in plan(1000.0, full=False)], self.CORE)
 
     def test_black_is_measured_first_while_the_panel_is_still_cool(self):
         """A long bright sequence warms an emissive panel, and the black floor
@@ -353,6 +359,10 @@ class RunTests(unittest.TestCase):
         self.slept = []
 
     def run_sequence(self, reader, **kwargs):
+        # The six-patch plan: these tests are about sequencing -- order, settling,
+        # progress, what a bad reading does -- and none of that changes with sixty-three
+        # more patches of the same two kinds. PlanTests owns what the long sweep contains.
+        kwargs.setdefault("full", False)
         return run(
             self.display, reader, peak_nits=1015.24, sleep=self.slept.append, **kwargs
         )
@@ -387,7 +397,7 @@ class RunTests(unittest.TestCase):
             order.append("settle")
             self.slept.append(seconds)
 
-        run(self.display, read, peak_nits=1015.24, sleep=sleep)
+        run(self.display, read, peak_nits=1015.24, sleep=sleep, full=False)
 
         self.assertEqual(len(self.slept), 6)
         self.assertTrue(all(delay > 0 for delay in self.slept))
@@ -503,3 +513,198 @@ class ComposeGainsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlacementDetectionTests(unittest.TestCase):
+    """Whether the instrument is looking at the green placement target.
+
+    A yes/no about placement, not a measurement, so the thresholds are deliberately
+    loose: the meter may sit at a slight angle, the panel may be pulling the patch down
+    under its own brightness limiter, and a colorimeter's idea of green can be some way
+    from the panel's. Anything tight enough to be a real chromaticity check would refuse
+    a meter that is correctly placed, which is the one outcome that makes the feature
+    worse than the keypress it replaces.
+    """
+
+    def reading(self, Y, x, y):
+        from sdr_hdr_profile_creator.meter import Reading
+
+        return Reading(X=(x / y) * Y if y else 0.0, Y=Y, Z=0.0, x=x, y=y)
+
+    def test_the_meter_on_the_target_is_detected(self):
+        self.assertTrue(sees_placement_target(self.reading(95.0, 0.24, 0.71)))
+
+    def test_a_dark_screen_is_not(self):
+        """xy is numerically unstable near zero luminance, so a black reading can land
+        anywhere on the diagram -- including on green."""
+        self.assertFalse(sees_placement_target(self.reading(0.0003, 0.24, 0.71)))
+
+    def test_the_room_is_not(self):
+        """A meter face-up on the desk under a lamp is bright and warm, not green."""
+        self.assertFalse(sees_placement_target(self.reading(38.0, 0.44, 0.40)))
+
+    def test_a_white_patch_is_not(self):
+        """Bright enough, but this is what the run itself shows -- confusing it with the
+        target would mean the meter could 'detect' placement mid-measurement."""
+        self.assertFalse(sees_placement_target(self.reading(100.0, 0.3127, 0.3290)))
+
+    def test_a_dimmed_target_is_still_detected(self):
+        """The limiter, an angled meter, or a filter over the aperture all cost
+        luminance without changing the colour."""
+        self.assertTrue(sees_placement_target(self.reading(20.0, 0.21, 0.72)))
+
+    def test_green_too_dim_to_trust_is_not(self):
+        """Below the floor the reading is as likely to be stray light as the target."""
+        self.assertFalse(sees_placement_target(self.reading(8.0, 0.24, 0.71)))
+
+    def test_both_conditions_are_required(self):
+        """Either alone accepts something it should not: luminance alone takes a lit
+        room, chromaticity alone takes black-screen noise."""
+        bright_not_green = self.reading(200.0, 0.45, 0.40)
+        green_not_bright = self.reading(1.0, 0.24, 0.71)
+        self.assertFalse(sees_placement_target(bright_not_green))
+        self.assertFalse(sees_placement_target(green_not_bright))
+        self.assertTrue(sees_placement_target(self.reading(200.0, 0.24, 0.71)))
+
+
+class PanelResponseTests(unittest.TestCase):
+    """Reducing a ramp to what each channel delivered for the code it was sent."""
+
+    def full_readings(self):
+        steps = plan(1000.0)
+        readings = {}
+        for step in steps:
+            # A display that tracks PQ but leans blue, so the split is not the same at
+            # every level and there is something for a per-level correction to find.
+            lean = 1.0 + 0.2 * (step.nits / 1000.0)
+            weights = (0.2126, 0.7152, 0.0722 * lean)
+            luminance = max(1e-6, step.nits)
+            X = Y = Z = 0.0
+            for level, weight, name in zip(step.rgb, weights, ("red", "green", "blue")):
+                share = level * weight * luminance
+                x, y = {"red": (0.64, 0.33), "green": (0.30, 0.60), "blue": (0.15, 0.06)}[name]
+                X += share * x / y
+                Y += share
+                Z += share * (1.0 - x - y) / y
+            total = max(1e-9, X + Y + Z)
+            readings[step.key] = Reading(X, Y, Z, X / total, Y / total)
+        return steps, readings
+
+    def test_the_weights_describe_the_reference_white(self):
+        steps, readings = self.full_readings()
+        result = derive(readings, steps)
+        self.assertAlmostEqual(sum(result.white_weights), 1.0, places=9)
+        red, green, blue = result.white_weights
+        self.assertGreater(green, red)
+        self.assertGreater(red, blue)
+
+    def test_a_response_pairs_every_ramp_point_with_the_code_it_was_sent(self):
+        steps, readings = self.full_readings()
+        result = derive(readings, steps)
+        response = panel_response(result, lambda nits: (pq_inverse_eotf(nits),) * 3)
+        self.assertIsNotNone(response)
+        self.assertEqual(len(response.red), len(result.greyscale))
+        self.assertEqual(len(response.red), len(response.blue))
+
+    def test_a_six_patch_run_yields_no_response(self):
+        """There is no ramp in it, so there is no transfer function to solve for. The
+        six patches still produce a profile; they just cannot shape a curve."""
+        steps = plan(1000.0, full=False)
+        readings = {step.key: NEUTRAL[step.key] for step in steps}
+        result = derive(readings, steps)
+        self.assertEqual(result.greyscale, ())
+        self.assertIsNone(panel_response(result, lambda nits: (0.5, 0.5, 0.5)))
+
+    def test_readings_never_paired_with_a_plan_yield_no_response(self):
+        """Without the level that was asked for, a reading says nothing about the
+        panel's transfer function -- only that some light came out."""
+        steps, readings = self.full_readings()
+        unpaired = derive(readings)
+        self.assertTrue(unpaired.greyscale)
+        self.assertTrue(all(point.target_nits == 0.0 for point in unpaired.greyscale))
+        self.assertIsNone(panel_response(unpaired, lambda nits: (pq_inverse_eotf(nits),) * 3))
+
+    def test_a_grey_point_reports_its_reading_as_xyz(self):
+        point = GreyPoint(index=3, target_nits=100.0, measured_nits=92.0, x=0.3127, y=0.3290)
+        X, Y, Z = point.xyz
+        self.assertAlmostEqual(Y, 92.0, places=9)
+        self.assertAlmostEqual(X / (X + Y + Z), 0.3127, places=9)
+        self.assertAlmostEqual(Y / (X + Y + Z), 0.3290, places=9)
+
+
+class FullSweepPlanTests(unittest.TestCase):
+    """The Calman-style run: a greyscale ramp and a saturation sweep per hue.
+
+    Six patches say what peak, black and white are and nothing about the range between
+    them, which is where a display's tone response and RGB balance actually live.
+    """
+
+    PEAK = 1015.24
+
+    def test_the_core_six_still_come_first_and_unchanged(self):
+        """Everything the profile is built from is derived from these, so a longer run
+        must not change what a short one would have produced."""
+        full = plan(self.PEAK)
+        quick = plan(self.PEAK, full=False)
+        self.assertEqual(len(quick), 6)
+        self.assertEqual([s.key for s in full[:6]], [s.key for s in quick])
+        for long, short in zip(full[:6], quick):
+            self.assertEqual((long.rgb, long.nits), (short.rgb, short.nits))
+
+    def test_it_measures_more_than_thirty_of_each(self):
+        full = plan(self.PEAK)
+        grey = [s for s in full if s.key.startswith("grey-")]
+        colour = [s for s in full if s.key.startswith("colour-")]
+        self.assertGreaterEqual(len(grey), 30)
+        self.assertGreaterEqual(len(colour), 30)
+
+    def test_every_key_is_unique(self):
+        """Readings are collected into a dict; a repeated key silently discards one."""
+        keys = [s.key for s in plan(self.PEAK)]
+        self.assertEqual(len(keys), len(set(keys)))
+
+    def test_the_ramp_is_spaced_perceptually_not_linearly(self):
+        """Even steps in nits would put half the samples above half peak, where the eye
+        can barely separate two levels, and three or four across the whole of the
+        shadows, where it easily can."""
+        levels = greyscale_levels(self.PEAK)
+        self.assertGreaterEqual(sum(1 for v in levels if v < 10.0), 8)
+        # And it is monotonic, or it is not a ramp.
+        self.assertEqual(list(levels), sorted(levels))
+
+    def test_the_ramp_reaches_the_panels_peak_and_starts_above_the_noise(self):
+        levels = greyscale_levels(self.PEAK)
+        self.assertAlmostEqual(self.PEAK, levels[-1], delta=1.0)
+        self.assertGreater(levels[0], 0.0)
+
+    def test_saturation_is_a_path_from_white_to_the_primary(self):
+        """Scaling the primary instead would change luminance along with colour, making
+        the sweep a measurement of two things at once."""
+        full = plan(self.PEAK)
+        by_key = {s.key: s for s in full}
+        full_red = by_key["colour-red-100"]
+        part_red = by_key["colour-red-020"]
+        self.assertEqual((1.0, 0.0, 0.0), full_red.rgb)
+        # At 20% the off-channels have only come down a fifth of the way.
+        self.assertAlmostEqual(1.0, part_red.rgb[0], places=6)
+        self.assertAlmostEqual(0.8, part_red.rgb[1], places=6)
+        self.assertAlmostEqual(0.8, part_red.rgb[2], places=6)
+
+    def test_all_six_hues_are_swept(self):
+        """Cyan, magenta and yellow are where a display's own colour handling shows
+        itself; the three primaries alone cannot see it."""
+        hues = {s.key.split("-")[1] for s in plan(self.PEAK) if s.key.startswith("colour-")}
+        self.assertEqual({"red", "yellow", "green", "cyan", "blue", "magenta"}, hues)
+
+    def test_the_colours_are_measured_at_one_level(self):
+        """A hue read at a different drive samples a different point on the response
+        and cannot be compared with the others."""
+        levels = {s.nits for s in plan(self.PEAK) if s.key.startswith("colour-")}
+        self.assertEqual(1, len(levels))
+
+    def test_the_estimate_is_honest_about_how_long_this_takes(self):
+        """Four minutes nobody was warned about reads as a hang."""
+        full, quick = plan(self.PEAK), plan(self.PEAK, full=False)
+        self.assertGreater(estimated_seconds(full), estimated_seconds(quick) * 5)
+        self.assertGreater(estimated_seconds(full), 180.0)
+        self.assertLess(estimated_seconds(full), 600.0)

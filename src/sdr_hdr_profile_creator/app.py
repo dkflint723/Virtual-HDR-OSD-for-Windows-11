@@ -8,7 +8,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, QTimer
+from PySide6.QtCore import QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -43,7 +43,8 @@ from qfluentwidgets import (
 from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
-from .gamma_correction import CORRECTION_OPTIONS, resolve_white_level
+from .gamma_correction import CORRECTION_OPTIONS, pq_inverse_eotf, resolve_white_level
+from . import greyscale
 from .hotkeys import GammaHotkeyListener
 from . import elevation, measure, measure_view
 from .edid import read_panel_metadata
@@ -161,6 +162,10 @@ class MainWindow(FluentWidget):
         self._last_detected_mode: DisplayMode | None = None
         self._current_display_snapshot: DisplayInfo | None = None
         self._persisted_live_registry = self._load_live_registry()
+        # Set before any measurement so _stop_placement_watch is safe to call from
+        # closeEvent even if a run was never started.
+        self._placement_thread = None
+        self._placement_watcher = None
         self._remembered_sdr_profiles: dict[str, str | None] = {}
         self._base_hdr_profiles: dict[str, dict[str, str]] = {}
         # name -> (mtime_ns, size, generated). Keyed by stat so a profile that is
@@ -1092,8 +1097,41 @@ class MainWindow(FluentWidget):
                 setattr(self.state.hdr, key, control.spec.default)
         finally:
             self._loading_controls = False
+        # Asked separately, and only when there is one. A measured correction is not a
+        # slider -- it took four minutes of the user's time and a meter -- so a reset
+        # that silently threw it away would be a very expensive misunderstanding of
+        # what "reset the sliders" means. Keeping it silently would be its own trap,
+        # because the profile would go on being shaped by something the dialog just
+        # implied had been cleared.
+        discarded = False
+        if self.state.hdr.panel_response:
+            answer = QMessageBox.question(
+                self,
+                "Measured Greyscale Correction",
+                "The sliders are back to neutral.\n\n"
+                "A measured greyscale correction is also stored for this display, from "
+                "the last colorimeter run. It is a measurement rather than a slider, so "
+                "it has been kept and the profile is still shaped by it.\n\n"
+                "Discard it as well? Getting it back means measuring again.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer == QMessageBox.StandardButton.Yes:
+                self.state.hdr.panel_response = ()
+                self.state.hdr.panel_response_weights = ()
+                discarded = True
+
         self._save_state_now()
-        self._set_status("All sliders reset to neutral. Apply Edits to install the neutral profile.", "ok")
+        kept = (
+            " The measured greyscale correction was kept."
+            if self.state.hdr.panel_response
+            else " The measured greyscale correction was discarded." if discarded else ""
+        )
+        self._set_status(
+            "All sliders reset to neutral." + kept
+            + " Apply Edits to install the neutral profile.",
+            "ok",
+        )
         self._update_activity_bar()
         self._queue_live_apply()
 
@@ -2265,14 +2303,22 @@ class MainWindow(FluentWidget):
         # step count, the duration and the way out have to be given while there is still
         # somewhere to put them. A minute of a black screen with no way out stated is
         # indistinguishable from a hang.
-        steps = len(measure.plan(peak))
+        patches = measure.plan(peak)
+        steps = len(patches)
+        # Stated rather than guessed at. A four minute wait nobody was warned about
+        # reads as a hang, and the run cannot say anything once it starts -- the screen
+        # is one patch on black and the status bar is behind it.
+        minutes = max(1, round(measure.estimated_seconds(patches) / 60.0))
         proceed = QMessageBox.question(
             self,
             "Measure with the colorimeter",
             f"About to measure {display.friendly_name} with {instrument.label}.\n\n"
-            f"The screen goes black and shows {steps} patches in turn, taking about a "
-            "minute. Nothing is written to the profile until it finishes.\n\n"
-            "Place the meter flat against the centre of the screen and keep it still.\n\n"
+            f"The screen goes black and shows {steps} patches in turn — a greyscale "
+            f"ramp and a saturation sweep for each colour — taking about {minutes} "
+            "minutes. Nothing is written to the profile until it finishes.\n\n"
+            "A target appears first, marking exactly where the patches will be. Put the "
+            "meter flat on the glass inside it and keep it still, then press Enter to "
+            "start.\n\n"
             "Press Esc at any point to stop. Nothing is changed if you do.",
             QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Ok,
@@ -2308,6 +2354,90 @@ class MainWindow(FluentWidget):
         window.setFocus(Qt.FocusReason.OtherFocusReason)
 
         self._measure_window = window
+
+        # Where the meter goes, drawn before anything is read. The patches cover a tenth
+        # of the screen area, so "the centre" is not precise enough to aim an instrument
+        # by: one overhanging the edge reads part black and returns a luminance that
+        # looks entirely plausible. Nothing but a patch may be lit once the run starts,
+        # so this is the only moment it can be shown at all.
+        # Connected before the target goes up, not after: the signal is the only thing
+        # that starts the run, and a window between showing the target and listening for
+        # it is a window in which a fast keypress does nothing at all.
+        # The run starts on that keypress rather than on a timer, because the panel is
+        # not what has to be ready -- the person holding the instrument is.
+        window.ready.connect(
+            lambda: self._start_measurement(window, display, spotread, instrument, peak)
+        )
+
+        if not window.show_placement_target():
+            window.close()
+            self._measure_window = None
+            self._set_status(
+                f"Could not show the placement target: {window.failure}", "error"
+            )
+            return
+
+        self._set_status(
+            f"Put the meter flat on the green square. {instrument.label} starts the "
+            "measurement by itself once it can see it. Esc cancels.",
+            "warning",
+        )
+
+        # The meter watches for the target rather than the user pressing a key. Someone
+        # holding an instrument flat against a screen cannot see the keyboard, and
+        # reaching for one moves the thing they have just placed.
+        watcher_thread = QThread()
+        watcher = measure_view.PlacementWatcher(
+            lambda: read_emissive(spotread, port=instrument.port)
+        )
+        watcher.moveToThread(watcher_thread)
+        watcher_thread.started.connect(watcher.run)
+        watcher.detected.connect(window.ready)
+        watcher.gave_up.connect(self._placement_timed_out)
+        # Esc closes the window; the poll must stop with it, or it goes on driving the
+        # instrument after the run it was preparing has been abandoned. Direct, for the
+        # same reason the measurement worker's cancel is: this thread's event loop is
+        # busy inside run() and a queued call would not arrive until it had finished.
+        window.closed.connect(watcher.cancel, Qt.ConnectionType.DirectConnection)
+        window.ready.connect(watcher.cancel, Qt.ConnectionType.DirectConnection)
+        # Esc during placement never reaches _measure_finished, because no run was ever
+        # started -- so the thread has to be joined from here as well, or it outlives
+        # the window it was polling for.
+        window.closed.connect(self._stop_placement_watch)
+        self._placement_thread = watcher_thread
+        self._placement_watcher = watcher
+        watcher_thread.start()
+
+    def _placement_timed_out(self) -> None:
+        """The meter never saw the target. Say so, and leave the way out obvious."""
+        self._set_status(
+            "The meter did not find the green square. Check it is flat against the "
+            "screen with nothing between it and the glass, and that no other "
+            "calibration software is holding it. Press Enter to start anyway, or Esc "
+            "to stop.",
+            "warning",
+        )
+
+    def _stop_placement_watch(self) -> None:
+        """Stop polling the instrument, whatever ended the wait."""
+        watcher = getattr(self, "_placement_watcher", None)
+        thread = getattr(self, "_placement_thread", None)
+        if watcher is not None:
+            watcher.cancel()
+        if thread is not None:
+            thread.quit()
+            # Joined rather than left to finish: an unjoined QThread whose last
+            # reference goes is a fail-fast abort, which is how the measurement path
+            # used to take the app down at the end of every run.
+            thread.wait(5000)
+        self._placement_watcher = None
+        self._placement_thread = None
+
+    def _start_measurement(self, window, display, spotread, instrument, peak) -> None:
+        """Begin the sequence, once the meter is on the target."""
+        if getattr(self, "_measure_thread", None) is not None:
+            return   # Detected and Enter pressed; one run is enough.
+        self._stop_placement_watch()
         self._log_meter({
             "event": "start",
             "display": display.friendly_name,
@@ -2315,8 +2445,8 @@ class MainWindow(FluentWidget):
             "requested_peak_nits": peak,
         })
         self._set_status(
-            f"Measuring {display.friendly_name} with {instrument.label}. Place the meter "
-            "over the centre of the screen. Esc cancels.",
+            f"Measuring {display.friendly_name} with {instrument.label}. Keep the meter "
+            "still. Esc cancels.",
             "warning",
         )
 
@@ -2332,6 +2462,11 @@ class MainWindow(FluentWidget):
         # scope takes its worker with it and reports nothing useful about why.
         self._measure_thread = thread
         self._measure_worker = worker
+        # Which panel this run is about. The response it produces describes one display
+        # and there is a single HDR ModeState for all of them, so it needs the same
+        # provenance stamp the luminance figures carry or it will be applied to the
+        # next display the user selects.
+        self._measure_display_key = display.stable_key
 
     def _log_meter(self, record: dict) -> None:
         """Append one line to the meter log, and never fail the run over it."""
@@ -2361,6 +2496,9 @@ class MainWindow(FluentWidget):
 
     def _measure_finished(self, result, message: str) -> None:
         """Adopt a completed measurement, or explain why there is not one."""
+        # Esc during placement ends the run before it starts, and the poll has to stop
+        # with it or it goes on driving the instrument for another minute and a half.
+        self._stop_placement_watch()
         window = getattr(self, "_measure_window", None)
         if window is not None:
             window.close()
@@ -2397,6 +2535,10 @@ class MainWindow(FluentWidget):
         })
 
         state = self.state.hdr
+        # Solved against the profile that was on the display while the patches were
+        # read, so it must happen before anything below changes the state that profile
+        # was built from.
+        response = self._capture_panel_response(result, state)
         state.peak_luminance_nits = max(80.0, min(10000.0, result.peak_nits))
         state.minimum_luminance_nits = max(0.0, min(100.0, result.black_nits))
         # Full frame cannot exceed peak; a panel that did that would be reporting
@@ -2474,12 +2616,71 @@ class MainWindow(FluentWidget):
                 "colour temperature setting first"
             )
             level = "warning"
+        grey_note = ""
+        if response is not None:
+            grey_note = (
+                f" Greyscale corrected from {len(response.red)} points: the curve now "
+                "targets PQ up to the measured peak, and holds grey to the reference "
+                "white at every level."
+            )
         self._set_status(
             f"Measured {result.peak_nits:.1f} nits peak on a "
             f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
-            f"({contrast_text}). {white_note}. Press Apply Edits to store it.",
+            f"({contrast_text}). {white_note}.{grey_note} Press Apply Edits to store it.",
             level,
         )
+
+    def _capture_panel_response(self, result, state: ModeState):
+        """Store how the panel answered each code, so the curves can correct for it.
+
+        The patches went out through whatever profile was already on the display, so
+        what the meter saw is the panel *and* that profile together. Sampling the
+        transform in force separates the two: pairing a delivered luminance with the
+        code that was actually sent describes the panel alone, which is what makes a
+        second run a replacement rather than a correction stacked on a correction.
+
+        A run that cannot support one leaves any existing response alone. It is still
+        the best description of the panel there is -- nothing about a short run
+        contradicts it -- and discarding a good calibration because a later check was
+        brief would be a silent, expensive surprise.
+        """
+        try:
+            transform = build_transform(
+                state, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
+            )
+        except Exception:
+            # Diagnostics and refinements must never be the reason a measurement fails.
+            return None
+
+        tables = (transform.red, transform.green, transform.blue)
+
+        def sent(nits: float) -> tuple[float, float, float]:
+            code = pq_inverse_eotf(max(0.0, nits))
+            return tuple(greyscale.sample(table, code) for table in tables)
+
+        try:
+            response = measure.panel_response(result, sent)
+        except Exception:
+            response = None
+
+        if response is None:
+            self._log_meter({
+                "event": "response-unavailable",
+                "ramp_points": len(getattr(result, "greyscale", ())),
+                "kept_previous": bool(state.panel_response),
+            })
+            return None
+
+        state.panel_response = greyscale.to_values(response)
+        state.panel_response_weights = tuple(response.weights)
+        state.panel_source_key = getattr(self, "_measure_display_key", "") or state.panel_source_key
+        self._log_meter({
+            "event": "response",
+            "points": len(response.red),
+            "weights": list(response.weights),
+            "measured_peak_nits": response.measured_peak_nits,
+        })
+        return response
 
     def _pattern_view_closed(self, previous_live: bool) -> None:
         """Forget the window as it closes, so the next open is not refused."""
@@ -3139,6 +3340,8 @@ class MainWindow(FluentWidget):
         state.full_frame_luminance_nits = max(
             80.0, min(state.peak_luminance_nits, panel.max_frame_average_nits or panel.peak_nits)
         )
+        state.panel_response = ()
+        state.panel_response_weights = ()
         state.panel_source_key = display.stable_key
         self._save_state_soon()
         return True
@@ -3463,6 +3666,9 @@ class MainWindow(FluentWidget):
         # A fullscreen surface outlives this window otherwise, holding a swapchain
         # and leaving a black screen with nothing left to close it.
         self._close_fullscreen_surfaces()
+        # And a placement poll outlives it too, driving the instrument after the window
+        # it was waiting for has gone.
+        self._stop_placement_watch()
         self.live_timer.stop()
         self.mode_timer.stop()
         self.watchdog_timer.stop()

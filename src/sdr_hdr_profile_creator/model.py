@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import PurePath
 from typing import Any, Literal
 
+from . import greyscale
+
 DisplayMode = Literal["SDR", "HDR"]
 
 
@@ -83,6 +85,21 @@ class ModeState:
     # this field existed deserialises.
     panel_source_key: str = ""
 
+    # The measured greyscale response, flattened -- see greyscale.RESPONSE_STRIDE. It
+    # pairs each channel's delivered luminance with the code that channel was sent, so
+    # it describes the panel rather than the correction on top of it and a fresh
+    # measurement replaces it instead of composing with it. Empty means the curves come
+    # from the controls alone, which is how every state written before this existed
+    # deserialises and how a display that has never been measured behaves.
+    #
+    # Guarded by panel_source_key, exactly as the luminance figures are: there is one
+    # HDR ModeState for all displays, and a transfer function measured on one panel is
+    # not merely stale on another, it is a correction for a display that is not there.
+    panel_response: tuple[float, ...] = ()
+    # The reference white's channel luminance split, which is what grey is held to.
+    # Stored beside the response and validated with it; neither is usable alone.
+    panel_response_weights: tuple[float, ...] = ()
+
     @classmethod
     def neutral(cls, mode: DisplayMode) -> "ModeState":
         if mode == "SDR":
@@ -142,6 +159,20 @@ class ModeState:
             merged[key] = max(low, min(high, value))
 
         merged["panel_primaries"] = normalize_primaries(merged.get("panel_primaries"))
+
+        # Round-tripped through the validator rather than merely length-checked, so the
+        # pair can never be half-valid: a response without its weights corrects grey
+        # towards nothing, and weights without a response are inert but look meaningful
+        # to anything that reads them.
+        response = greyscale.from_values(
+            merged.get("panel_response") or (), merged.get("panel_response_weights") or ()
+        )
+        if response is None:
+            merged["panel_response"] = ()
+            merged["panel_response_weights"] = ()
+        else:
+            merged["panel_response"] = greyscale.to_values(response)
+            merged["panel_response_weights"] = tuple(response.weights)
 
         # Removed controls are neutralized when legacy profiles are imported.
         merged["exposure"] = 0.0

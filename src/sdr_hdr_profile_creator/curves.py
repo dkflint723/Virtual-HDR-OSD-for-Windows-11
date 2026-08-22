@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from . import greyscale
 from .model import ModeState
 from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma
 
@@ -279,13 +280,30 @@ def build_transform(state: ModeState, hdr: bool, sdr_white_nits: float | None = 
         curve[index] = previous
     curve[-1] = 1.0
 
-    # Chromatic corrections live in the MHC2 XYZ matrix. Keeping one common LUT
-    # for R/G/B prevents channel-specific clipping and makes blends much smoother.
+    # The curve so far is intent: what the controls asked for, with the display not
+    # yet considered. A measured response layers the display on top of it, which is the
+    # only thing here that knows what a code actually produces.
+    #
+    # Without one the three channels stay identical, and deliberately: absolute white
+    # balance belongs to the MHC2 XYZ matrix, and inventing per-channel curves from
+    # controls alone would only add channel-specific clipping and rougher blends for a
+    # correction the matrix already makes better. SDR keeps the common curve either
+    # way -- this app never modifies the SDR path, so there is nothing to correct.
+    response = (
+        greyscale.from_values(state.panel_response, state.panel_response_weights)
+        if hdr
+        else None
+    )
+    if response is None:
+        red, green, blue = list(curve), list(curve), list(curve)
+    else:
+        red, green, blue = greyscale.correct(curve, response)
+
     return CalibrationTransform(
         matrix=_safe_color_matrix(state, hdr),
-        red=list(curve),
-        green=list(curve),
-        blue=list(curve),
+        red=red,
+        green=green,
+        blue=blue,
     )
 
 

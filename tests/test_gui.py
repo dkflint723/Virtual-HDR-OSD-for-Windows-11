@@ -7,6 +7,7 @@ actual colour configuration.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import shutil
@@ -19,6 +20,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import QObject, QTimer, Signal
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from sdr_hdr_profile_creator import app as app_module
@@ -2007,6 +2009,152 @@ class BlackLevelPlausibilityTests(WindowTestCase):
         self.assertNotIn("darkest level you can see", self.window.status_label.text())
 
 
+class MeasuredResponseTests(WindowTestCase):
+    """The greyscale response a meter run leaves behind, and what guards it.
+
+    The arithmetic of the correction is proved against a synthetic panel in
+    test_greyscale; what is checked here is only the wiring -- that a run stores one,
+    that a run without a ramp does not throw one away, and that it never follows the
+    user to a different display.
+    """
+
+    WEIGHTS = (0.2126, 0.7152, 0.0722)
+    PRIMARY_XY = ((0.64, 0.33), (0.30, 0.60), (0.15, 0.06))
+
+    def channel_xyz(self, reference=100.0):
+        columns = []
+        for (x, y), weight in zip(self.PRIMARY_XY, self.WEIGHTS):
+            luminance = weight * reference
+            columns.append((x / y * luminance, luminance, (1.0 - x - y) / y * luminance))
+        return tuple(columns)
+
+    def calibration(self, ramp=True):
+        from sdr_hdr_profile_creator import measure
+
+        points = []
+        if ramp:
+            levels = measure.greyscale_levels(1000.0)
+            for index, target in enumerate(levels):
+                # Twelve percent dim, and drifting blue as level rises: an error that
+                # varies with level is the only kind the curves can do anything about.
+                drift = 0.0077 * index / (len(levels) - 1)
+                points.append(
+                    measure.GreyPoint(
+                        index=index,
+                        target_nits=target,
+                        measured_nits=target * 0.88,
+                        x=0.3127 - drift,
+                        y=0.3290,
+                    )
+                )
+        return measure.Calibration(
+            peak_nits=1000.0,
+            black_nits=0.0005,
+            white_xy=(0.3127, 0.3290),
+            channel_gains=(1.0, 1.0, 1.0),
+            greyscale=tuple(points),
+            channel_xyz=self.channel_xyz(),
+            white_weights=self.WEIGHTS,
+        )
+
+    def test_a_measured_run_stores_a_response(self):
+        self.window._measure_finished(self.calibration(), "")
+        state = self.window.state.hdr
+        self.assertTrue(state.panel_response)
+        self.assertAlmostEqual(sum(state.panel_response_weights), 1.0, places=6)
+
+    def test_the_stored_response_reaches_the_curves(self):
+        """Storing it and never using it would be the quietest possible failure."""
+        self.window._measure_finished(self.calibration(), "")
+        transform = app_module.build_transform(self.window.state.hdr, hdr=True)
+        self.assertNotEqual(transform.red, transform.blue)
+
+    def test_a_run_without_a_ramp_keeps_the_response_it_cannot_replace(self):
+        """A short check says nothing that contradicts the ramp already measured, and
+        discarding a calibration because a later run was brief would be an expensive
+        surprise with no warning attached."""
+        self.window._measure_finished(self.calibration(), "")
+        stored = self.window.state.hdr.panel_response
+        self.assertTrue(stored)
+
+        self.window._measure_finished(self.calibration(ramp=False), "")
+        self.assertEqual(self.window.state.hdr.panel_response, stored)
+
+    def test_the_response_is_stamped_with_the_display_it_came_from(self):
+        self.window._measure_display_key = "PANEL-A"
+        self.window._measure_finished(self.calibration(), "")
+        self.assertEqual(self.window.state.hdr.panel_source_key, "PANEL-A")
+
+    def test_resetting_the_sliders_keeps_the_measurement_unless_asked(self):
+        """A reset that silently threw away a four minute meter run would be an
+        expensive misunderstanding of what "reset the sliders" means."""
+        self.window._measure_finished(self.calibration(), "")
+        stored = self.window.state.hdr.panel_response
+        answers = [
+            app_module.QMessageBox.StandardButton.Yes,   # yes, reset the sliders
+            app_module.QMessageBox.StandardButton.No,    # no, keep the measurement
+        ]
+        with mock.patch.object(
+            app_module.QMessageBox, "question", side_effect=answers
+        ) as ask:
+            self.window._reset_all_controls()
+        self.assertEqual(ask.call_count, 2, "the measurement should be asked about")
+        self.assertEqual(self.window.state.hdr.panel_response, stored)
+        self.assertIn("kept", self.window.status_label.text())
+
+    def test_the_measurement_can_be_discarded_with_the_sliders(self):
+        self.window._measure_finished(self.calibration(), "")
+        answers = [
+            app_module.QMessageBox.StandardButton.Yes,
+            app_module.QMessageBox.StandardButton.Yes,
+        ]
+        with mock.patch.object(app_module.QMessageBox, "question", side_effect=answers):
+            self.window._reset_all_controls()
+        self.assertEqual(self.window.state.hdr.panel_response, ())
+        self.assertEqual(self.window.state.hdr.panel_response_weights, ())
+        self.assertIn("discarded", self.window.status_label.text())
+
+    def test_nothing_is_asked_when_there_is_no_measurement(self):
+        """A dialog about a correction that does not exist is just noise."""
+        with mock.patch.object(
+            app_module.QMessageBox, "question",
+            return_value=app_module.QMessageBox.StandardButton.Yes,
+        ) as ask:
+            self.window._reset_all_controls()
+        self.assertEqual(ask.call_count, 1)
+
+    def test_the_status_line_says_the_greyscale_was_corrected(self):
+        """A four minute run that silently reshapes the tone curve is worse than one
+        that says what it did."""
+        self.window._measure_finished(self.calibration(), "")
+        self.assertIn("Greyscale corrected", self.window.status_label.text())
+
+    def test_a_run_without_a_ramp_claims_no_greyscale_correction(self):
+        self.window._measure_finished(self.calibration(ramp=False), "")
+        self.assertNotIn("Greyscale corrected", self.window.status_label.text())
+
+    def test_another_panel_does_not_inherit_it(self):
+        """There is one HDR ModeState for every display. A transfer function measured
+        on one panel is not stale on another, it is a correction for a display that is
+        not there."""
+        self.window._measure_display_key = "PANEL-A"
+        self.window._measure_finished(self.calibration(), "")
+        self.assertTrue(self.window.state.hdr.panel_response)
+
+        from sdr_hdr_profile_creator.edid import PanelMetadata
+
+        other = dataclasses.replace(
+            self.display, device_path=r"\?\DISPLAY#OTHER#{guid}", friendly_name="Other"
+        )
+        panel = PanelMetadata(
+            peak_nits=600.0, max_frame_average_nits=300.0, min_nits=0.001, supports_pq=True
+        )
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: panel):
+            self.assertTrue(self.window._prefill_luminance_from_panel(other))
+        self.assertEqual(self.window.state.hdr.panel_response, ())
+        self.assertEqual(self.window.state.hdr.panel_response_weights, ())
+
+
 class PanelPrefillTests(WindowTestCase):
     """A profile generated before anyone opens the patterns used to claim 1000 nits peak
     and 400 full-frame for every display in the world. The panel states its own figures;
@@ -2382,13 +2530,28 @@ class MeasurementBriefingTests(WindowTestCase):
         """Run _measure_with_meter far enough to reach the confirmation."""
         started = {}
 
-        class FakeWindow:
+        class FakeWindow(QObject):
+            # The run now starts on the window's ready signal rather than immediately,
+            # so the fake has to be a QObject and has to emit it. `closed` is wired to
+            # the placement poll, which has to stop when the window does.
+            ready = Signal()
+            closed = Signal()
             failure = ""
             focused = False
             activated = False
+            targeted = False
 
             def __init__(self, *args, **kwargs):
+                super().__init__()
                 FakeWindow.instance = self
+
+            def show_placement_target(self):
+                FakeWindow.targeted = True
+                # Stands in for the user putting the meter down and pressing Enter.
+                # Emitted synchronously, which only works because the app connects the
+                # signal before showing the target -- and that ordering is the point.
+                self.ready.emit()
+                return True
 
             def setGeometry(self, *args):
                 pass
@@ -3349,13 +3512,16 @@ class PeakPatchTargetTests(WindowTestCase):
             captured["peak"] = peak
             raise RuntimeError("stop before the run begins")
 
-        class FakeWindow:
+        class FakeWindow(QObject):
             """The real one needs a D3D swapchain, which offscreen Qt cannot give."""
 
+            # The run starts on this rather than immediately, so the stand-in needs it.
+            ready = Signal()
+            closed = Signal()
             failure = ""
 
             def __init__(self, *args, **kwargs):
-                pass
+                super().__init__()
 
             def setGeometry(self, *args):
                 pass
@@ -3376,6 +3542,12 @@ class PeakPatchTargetTests(WindowTestCase):
                 # Recorded because Escape is unreachable without it; see
                 # MeasureFocusTests.
                 type(self).focused = True
+
+            def show_placement_target(self):
+                # The target is shown, then the run waits for the user to confirm the
+                # meter is on it. Confirm immediately so the sequence still runs here.
+                self.ready.emit()
+                return True
 
         self.window.state.hdr.peak_luminance_nits = stored
         patches = [

@@ -213,7 +213,10 @@ class MeasurementWorkerTests(unittest.TestCase):
         display = FakeDisplay()
         # Real settling delays would charge these tests 24 seconds for nothing.
         worker = measure_view.MeasurementWorker(
-            display, reader, peak_nits, sleep=lambda _seconds: None
+            display, reader, peak_nits, sleep=lambda _seconds: None,
+            # These exercise the mechanics of a run, not the sweep, so the six-patch
+            # plan is enough and sixty-nine readings would only slow them down.
+            full=False,
         )
         outcomes = []
         worker.finished.connect(lambda result, message: outcomes.append((result, message)))
@@ -505,7 +508,8 @@ class CancellationTests(unittest.TestCase):
         unittest run does not provide -- which deadlocks rather than fails."""
         window = self.window()
         worker = measure_view.MeasurementWorker(
-            FakeDisplay(), lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None
+            FakeDisplay(), lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None,
+            full=False,
         )
         window.closed.connect(worker.cancel)
         self.assertFalse(worker._abort)
@@ -570,6 +574,7 @@ class CancellationTests(unittest.TestCase):
             on_progress=lambda *_: None,
             on_finished=lambda *_: loop.quit(),
             sleep=lambda _s: None,
+            full=False,
         )
         holder["worker"] = worker
         QTimer.singleShot(0, emit_from_ui_thread)
@@ -589,7 +594,7 @@ class CancellationTests(unittest.TestCase):
         """A cancelled run is not a failure and must not look like one."""
         display = FakeDisplay()
         worker = measure_view.MeasurementWorker(
-            display, lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None
+            display, lambda: GOOD_ORDER[0], 1000.0, sleep=lambda _s: None, full=False
         )
         outcomes = []
         worker.finished.connect(lambda r, m: outcomes.append((r, m)))
@@ -662,6 +667,7 @@ class ThreadLifetimeTests(unittest.TestCase):
             on_progress=lambda *_: None,
             on_finished=on_finished,
             sleep=lambda _seconds: None,
+            full=False,
         )
         holder["thread"], holder["worker"] = thread, worker
 
@@ -766,3 +772,95 @@ class EscapeReachabilityTests(unittest.TestCase):
         window.setFocus(Qt.FocusReason.OtherFocusReason)
         QApplication.processEvents()
         self.assertTrue(window.hasFocus(), "the measurement surface cannot take focus")
+
+
+@unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)
+class PlacementWatcherTests(unittest.TestCase):
+    """The poll that lets the meter start the run by noticing the target.
+
+    Polling an instrument is not free -- each read starts a spotread process, opens the
+    device and integrates -- so what matters here is that it stops: on success, on
+    cancel, and on running out of patience. An earlier version of this project once left
+    spotread running for 200 seconds against a USB HID device, and that is the failure
+    mode to design against.
+    """
+
+    qt_app = None
+
+    @classmethod
+    def setUpClass(cls):
+        cls.qt_app = QApplication.instance() or QApplication([])
+
+    def reading(self, Y, x, y):
+        return Reading(X=(x / y) * Y if y else 0.0, Y=Y, Z=0.0, x=x, y=y)
+
+    def watcher(self, readings):
+        """A watcher over a fixed script of readings, with the waits removed."""
+        supplied = iter(readings)
+
+        def read():
+            try:
+                return next(supplied)
+            except StopIteration:
+                return self.reading(0.0, 0.31, 0.33)
+
+        watcher = measure_view.PlacementWatcher(read, sleep=lambda _s: None)
+        seen = {"detected": 0, "gave_up": 0}
+        watcher.detected.connect(lambda: seen.__setitem__("detected", seen["detected"] + 1))
+        watcher.gave_up.connect(lambda: seen.__setitem__("gave_up", seen["gave_up"] + 1))
+        return watcher, seen
+
+    GREEN = (95.0, 0.24, 0.71)
+    DARK = (0.0002, 0.31, 0.33)
+
+    def test_it_stops_as_soon_as_the_target_is_seen(self):
+        watcher, seen = self.watcher([self.reading(*self.DARK), self.reading(*self.GREEN)])
+        watcher.run()
+        self.assertEqual(1, seen["detected"])
+        self.assertEqual(0, seen["gave_up"])
+        self.assertEqual(2, watcher.attempts, "it kept reading after finding the target")
+
+    def test_it_gives_up_rather_than_polling_for_ever(self):
+        """An unattended run that never sees the target must not sit there driving the
+        instrument indefinitely."""
+        watcher, seen = self.watcher([])
+        watcher.run()
+        self.assertEqual(0, seen["detected"])
+        self.assertEqual(1, seen["gave_up"])
+        self.assertEqual(measure_view.PlacementWatcher.MAX_ATTEMPTS, watcher.attempts)
+
+    def test_cancelling_stops_it_without_claiming_either_outcome(self):
+        """Esc during placement. Neither signal should fire: nothing was detected and
+        the wait did not run out, the user simply left."""
+        watcher, seen = self.watcher([self.reading(*self.DARK)] * 5)
+        watcher.cancel()
+        watcher.run()
+        self.assertEqual(0, seen["detected"])
+        self.assertEqual(0, seen["gave_up"])
+        self.assertEqual(0, watcher.attempts, "it read the instrument after being cancelled")
+
+    def test_a_meter_that_errors_is_retried_rather_than_abandoned(self):
+        """Unplugged, busy, or still warming up. The run has not started, so nothing is
+        at stake in trying again -- and giving up here would be worse than waiting."""
+        calls = {"n": 0}
+
+        def read():
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise MeterError("instrument is busy")
+            return self.reading(*self.GREEN)
+
+        watcher = measure_view.PlacementWatcher(read, sleep=lambda _s: None)
+        seen = []
+        watcher.detected.connect(lambda: seen.append(True))
+        watcher.run()
+        self.assertEqual([True], seen)
+        self.assertEqual(3, calls["n"])
+
+    def test_a_white_patch_does_not_count_as_placement(self):
+        """The run itself shows white; confusing it with the target would let placement
+        'succeed' from a stray reading rather than from the meter being on the glass."""
+        watcher, seen = self.watcher([self.reading(100.0, 0.3127, 0.3290)] * 3)
+        watcher.cancel()   # keep the test short; the point is what it did not emit
+        watcher.run()
+        self.assertEqual(0, seen["detected"])

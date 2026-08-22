@@ -839,6 +839,63 @@ def compose(
     return bytes(frame)
 
 
+#: How bright the placement target is drawn, in nits. Bright enough for the instrument
+#: to be sure of it over any ambient light leaking under its rim, dim enough that the
+#: panel is not left adapting to it -- an emissive display's brightness limiter responds
+#: to what was on screen a moment ago, so a target at peak white would still be
+#: affecting the first reading of the run.
+PLACEMENT_NITS = 100.0
+
+#: Drawn in green rather than white, because green is what makes the target
+#: self-verifying. The instrument is looking for a specific chromaticity, and green is
+#: the primary furthest from both a dark screen and from the warm cast of typical room
+#: lighting -- so "the meter can see the target" and "the meter is picking up the room"
+#: cannot be confused. White would sit close enough to ambient to be ambiguous.
+PLACEMENT_RGB = (0.0, 1.0, 0.0)
+
+
+def placement_frame(
+    width: int,
+    height: int,
+    context: PatternContext,
+    *,
+    fraction: float = WINDOW_AREA_FRACTION,
+) -> bytes:
+    """The target the meter is placed on, at the exact geometry the patches will use.
+
+    Filled rather than outlined, and green rather than white, because the instrument
+    reads it: once the meter covers this square it sees green and the run can start by
+    itself. That is the whole point -- the alternative is asking someone to find Enter
+    on a keyboard they cannot look at while holding an instrument flat against a screen.
+
+    Shown only before the run, which is the one moment anything may be lit here. Once
+    measuring starts the screen carries a single patch on black, because every other lit
+    pixel is light the instrument would integrate along with the patch.
+
+    A tenth of the screen *area*, matching ``measurement_frame`` exactly, so a meter
+    aligned to this target is aligned to every patch that follows. That matters more
+    than it sounds: a patch edge under the instrument's aperture reads part black and
+    returns a luminance that is wrong in a way nothing downstream can detect.
+    """
+    width, height = max(1, int(width)), max(1, int(height))
+    level = context.encode(PLACEMENT_NITS)
+    red, green, blue = (max(0.0, channel) * level for channel in PLACEMENT_RGB)
+
+    patch_width, patch_height = window_size(width, height, fraction)
+    left = (width - patch_width) // 2
+    top = (height - patch_height) // 2
+
+    black_row = _pixel(0.0) * width
+    patch_row = (
+        _pixel(0.0) * left
+        + _colour_pixel(red, green, blue) * patch_width
+        + _pixel(0.0) * (width - left - patch_width)
+    )
+    return b"".join(
+        patch_row if top <= y < top + patch_height else black_row for y in range(height)
+    )
+
+
 def measurement_frame(
     width: int,
     height: int,

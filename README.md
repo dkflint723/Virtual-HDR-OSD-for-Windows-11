@@ -26,9 +26,13 @@ It now also generates its own calibration patterns. A guided sequence measures b
 > reading made by eye is genuinely useful, but it is not metrology: it depends on the
 > room, on adaptation, and on the observer.
 >
-> **Measured with an instrument.** The optional colorimeter path measures luminance and
-> white balance. It does not characterise the gamut and cannot: the patches are presented
-> in scRGB, so they report the encoding rather than the panel. A colorimeter also needs a
+> **Measured with an instrument.** The optional colorimeter path measures luminance,
+> white balance, and how the display tracks the PQ curve across a 33-point greyscale
+> ramp -- the last of which it also corrects. It does not characterise the gamut and
+> cannot: the patches are presented in scRGB, so they report the encoding rather than
+> the panel. The colour sweeps it measures are reported and never applied, because the
+> profile carries a matrix and three per-channel curves, and no such thing can express
+> an error that depends on both hue and saturation. A colorimeter also needs a
 > spectral correction matched to the panel type, and without one its chromaticity readings
 > can be several hundred kelvin out on a quantum-dot display.
 
@@ -639,7 +643,8 @@ While the GUI is open, **Auto** reads the current Windows SDR white level and re
 Everything the app can work out on its own is *declared* rather than measured: the EDID
 carries the luminance and the primaries the panel's model was specified at. That is not
 your individual unit measured, and it does not notice that a panel drifts. A colorimeter
-closes part of that gap -- luminance and white balance, but not the gamut; see below.
+closes part of that gap -- luminance, white balance and greyscale tracking, but not
+the gamut; see below.
 
 ## What you need
 
@@ -674,11 +679,29 @@ answer is remembered per machine.
 Before anything happens you are told how many patches there are, roughly how long it
 takes, and that Esc stops it. That is deliberate: once the run starts the screen is black
 with a single patch on it and nothing else, because any text on the frame is light the
-meter would read along with the patch. Put the meter over the middle of the screen and
-leave it there. Esc cancels at any point -- a cancelled run changes nothing at all.
+meter would read along with the patch. Esc cancels at any point -- a cancelled run
+changes nothing at all.
 
-When it finishes, the measured peak, black and white balance replace what the profile had.
-The primaries are deliberately left alone: the patches are presented in scRGB, which is
+A green target appears first, exactly where the patches will be. Put the meter flat on
+the glass inside it; the app reads the target until it sees green at a plausible
+brightness, so it can tell you the meter is in place rather than leaving you to guess.
+Press Enter to start once it is.
+
+The run is a Calman-style sweep: the six patches the profile is built from, then a
+33-point greyscale ramp spaced evenly in PQ, then five saturations of each of the six
+hues. About four minutes in total. The ramp is dense at the bottom on purpose -- in HDR
+the bottom two stops are where a 5% step in signal is an enormous step in luminance, and
+where most displays go wrong.
+
+When it finishes, the measured peak, black and white balance replace what the profile
+had, and the greyscale ramp is turned into the three per-channel curves the profile
+carries. Those do two things a single set of RGB trims cannot: they make a code deliver
+the luminance ST.2084 says it means, all the way up the range, and they hold grey to the
+reference white at every level rather than only at the one the trims were solved at.
+Above the measured peak nothing is corrected -- the display is rolling off there by rules
+that were not measured, and replacing that with a hard clip would be worse than leaving
+it alone -- so the correction fades out between the measured peak and the top of the
+range. The primaries are deliberately left alone: the patches are presented in scRGB, which is
 defined on BT.709, so a measured "red" is BT.709 red as the display renders it rather than
 the display's own primary. On a P3 panel whose native green is (0.2698, 0.6859) the green
 patch read (0.3141, 0.5892) -- 0.0141 from BT.709 and 0.0967 from the panel. Those readings
@@ -687,14 +710,25 @@ as a description of the gamut. Press **Apply Edits** to write the result out.
 
 ## Measuring more than once
 
-Each measurement is folded into the correction already applied rather than replacing it,
-because it describes the display *as currently corrected*. That makes a second run a
-verification: a calibration that worked re-measures as neutral, leaves the correction
-untouched and reports "verified", while one that fell short tightens and converges.
+The white balance trims are folded into the correction already applied rather than
+replacing it, because a measurement describes the display *as currently corrected*. That
+makes a second run a verification: a calibration that worked re-measures as neutral,
+leaves the correction untouched and reports "verified", while one that fell short
+tightens and converges.
+
+The greyscale curves work the other way round, and deliberately. Each ramp point is
+paired with the code that was actually sent for it -- after whatever curve was already in
+force -- so what is stored describes the panel itself rather than the correction sitting
+on top of it. A later run therefore *replaces* it instead of stacking on it, which is
+what stops two passes doubling a correction that only needed applying once. Measured
+against a simulated display, one pass takes a 17% luminance error to 0.1%, and three
+further passes leave it there.
 
 It also means the correction in force has to still be valid. **If you change anything on
 the monitor -- picture mode, colour temperature, brightness, HDR mode -- press Reset
-Sliders before measuring again.** The old correction was solved for a display that no
+Sliders before measuring again.** Reset Sliders asks separately about the measured
+greyscale correction, and keeps it unless you say otherwise; after a change to the
+monitor itself, discard it. The old correction was solved for a display that no
 longer exists, and folding a new measurement into it gives a result that describes
 neither. Reset, rebuild from the panel, apply, then measure.
 
@@ -1375,15 +1409,22 @@ It is:
 
 - a by-eye HDR calibration tool with its own pattern generator;
 - a way to measure black level, peak and full-frame luminance and record them in a profile;
+- optionally, a front end for a colorimeter driven through ArgyllCMS, which measures
+  luminance, white balance and greyscale tracking and corrects the last two;
 - a virtual replacement for OSD adjustments unavailable in HDR;
 - a live ICC/ICM editor for the MHC2 block Windows applies;
 - a Windows 11 profile-association helper.
 
 It is not:
 
-- a measurement instrument. No colorimeter or spectrophotometer is involved, and every
-  reading depends on the observer;
-- a colour characterisation. Primaries, gamut and white point are read, never measured;
+- a measurement instrument in its own right. Without a colorimeter every reading depends
+  on the observer, and with one the accuracy is the instrument's, not this app's;
+- a colour characterisation. Primaries and gamut are read from the panel, never measured
+  -- the patches are scRGB, which is defined on BT.709, so they cannot describe the
+  panel's own primaries however carefully they are read;
+- a gamut correction. The colour sweeps are diagnostic: MHC2 carries a matrix and three
+  per-channel curves, and that cannot express an error depending on hue and saturation
+  together;
 - a guarantee of reference-grade accuracy;
 - a substitute for mastering or reference equipment.
 

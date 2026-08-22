@@ -28,7 +28,7 @@ from .hdr_display import DisplayCapability, HdrDisplayError, HdrSurface
 from .measure import Calibration, MeasurementStep
 from .meter import Reading
 from .pattern_view import context_for, dim_cursor
-from .patterns import measurement_frame
+from .patterns import measurement_frame, placement_frame
 
 
 class MeasureWindow(QWidget):
@@ -36,6 +36,8 @@ class MeasureWindow(QWidget):
 
     #: Emitted as the window goes away, so a run in flight can be stopped.
     closed = Signal()
+    #: Emitted once the meter is reported to be in place and the run may start.
+    ready = Signal()
 
     def __init__(
         self,
@@ -59,6 +61,10 @@ class MeasureWindow(QWidget):
         self.failure = ""
         #: Whether the most recent patch actually reached the display.
         self.shown = False
+        #: True while the placement target is up and the run has not started.
+        self.placing = False
+        #: Set when the user confirms placement, so the caller can begin.
+        self.placed = False
 
     def paintEngine(self):  # noqa: D102 - Qt must not paint into a D3D surface
         return None
@@ -78,6 +84,27 @@ class MeasureWindow(QWidget):
             self.failure = str(exc)
             return False
         self.show_patch(MeasurementStep("blank", "", (0.0, 0.0, 0.0), 0.0, 0.0))
+        return True
+
+    def show_placement_target(self) -> bool:
+        """Draw where the meter goes, at the exact geometry the patches will use.
+
+        Only safe before the run: this is the one moment anything other than a patch may
+        be lit, because nothing is being read yet. "The centre of the screen" is what the
+        briefing can say in words and it is not enough -- the patch is a tenth of the
+        screen *area*, so its edges matter, and an instrument overhanging one reads part
+        black and returns a luminance nothing downstream can tell is wrong.
+        """
+        if self._surface is None:
+            return False
+        width, height = self.device_size()
+        frame = placement_frame(width, height, self._context)
+        try:
+            self._surface.present(frame)
+        except HdrDisplayError as exc:
+            self.failure = str(exc)
+            return False
+        self.placing = True
         return True
 
     @Slot(object)
@@ -123,9 +150,18 @@ class MeasureWindow(QWidget):
         super().closeEvent(event)
 
     def keyPressEvent(self, event):  # noqa: D102
-        # Escape is the only control; everything else is automatic.
+        # Escape is the only control once measuring; everything else is automatic. While
+        # the placement target is up there is one more, because the run has to start
+        # when the meter is actually on the glass rather than when a timer says so.
         if event.key() == Qt.Key.Key_Escape:
             self.close()
+            return
+        if self.placing and event.key() in (
+            Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space
+        ):
+            self.placing = False
+            self.placed = True
+            self.ready.emit()
 
 
 class _WindowDisplay(QObject):
@@ -172,6 +208,67 @@ class _WindowDisplay(QObject):
             raise measure.Aborted()
 
 
+class PlacementWatcher(QObject):
+    """Polls the meter until it is looking at the green target, then says so.
+
+    This is the difference between "press Enter when the meter is in place" and the
+    meter simply noticing. The person doing it has both hands on an instrument held flat
+    against a screen and cannot see the keyboard; asking them to find a key is asking
+    them to move the thing they have just positioned.
+
+    Polling an instrument is not free. Each read starts a spotread process, opens the
+    device and integrates, so this waits between attempts rather than spinning, and
+    gives up after a bounded number of them -- an unattended run that never sees the
+    target must not sit there driving a USB device indefinitely.
+    """
+
+    #: Emitted once the instrument reports it can see the target.
+    detected = Signal()
+    #: Emitted when the attempt budget runs out, so the caller can offer a way forward.
+    gave_up = Signal()
+
+    #: Roughly a minute and a half of trying, which is far longer than placing a meter
+    #: takes and short enough not to look like a hang if the target is never found.
+    MAX_ATTEMPTS = 45
+    INTERVAL_SECONDS = 2.0
+
+    def __init__(
+        self,
+        read: Callable[[], Reading],
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__()
+        self._read = read
+        self._sleep = sleep
+        self._abort = False
+        #: How many reads it took, for the log.
+        self.attempts = 0
+
+    def cancel(self) -> None:
+        self._abort = True
+
+    @Slot()
+    def run(self) -> None:
+        for _ in range(self.MAX_ATTEMPTS):
+            if self._abort:
+                return
+            self.attempts += 1
+            try:
+                reading = self._read()
+            except Exception:
+                # A meter that is unplugged, busy, or still warming up is not a reason
+                # to abandon placement -- the next attempt may well succeed, and the
+                # run has not started, so nothing is at stake in trying again.
+                reading = None
+            if reading is not None and measure.sees_placement_target(reading):
+                if not self._abort:
+                    self.detected.emit()
+                return
+            self._sleep(self.INTERVAL_SECONDS)
+        if not self._abort:
+            self.gave_up.emit()
+
+
 class MeasurementWorker(QObject):
     """Runs the measurement sequence off the UI thread."""
 
@@ -185,6 +282,7 @@ class MeasurementWorker(QObject):
         read: Callable[[], Reading],
         peak_nits: float,
         sleep: Callable[[float], None] = time.sleep,
+        full: bool = True,
     ) -> None:
         super().__init__()
         # A display rather than a window: the worker has no business knowing about
@@ -197,6 +295,9 @@ class MeasurementWorker(QObject):
         # Injected so tests are not charged the panel's settling time; the real
         # delays exist for the display, not for the code.
         self._sleep = sleep
+        # The long sweep by default; the short six-patch plan is for exercising
+        # the mechanics of a run without paying for sixty-nine readings.
+        self._full = full
         self._abort = False
 
     def cancel(self) -> None:
@@ -216,6 +317,7 @@ class MeasurementWorker(QObject):
                 on_reading=lambda step, value: self.reading.emit(step.key, value),
                 should_abort=lambda: self._abort,
                 sleep=self._sleep,
+                full=self._full,
             )
         except measure.Aborted:
             self.finished.emit(None, "")
@@ -235,6 +337,7 @@ def start(
     on_finished: Callable[[Calibration | None, str], None],
     on_reading: Callable[[str, Reading], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
+    full: bool = True,
 ) -> tuple[QThread, MeasurementWorker]:
     """Begin a run, returning the thread and worker so the caller can cancel.
 
@@ -246,7 +349,7 @@ def start(
     # MeasurementWorker takes an injectable sleep so tests are not charged the panel's
     # settling time; start() used not to forward one, which put every end-to-end test
     # of this function back on the real delays and is why there were none.
-    worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep)
+    worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep, full=full)
     worker.moveToThread(thread)
     # "Esc cancels" is what the status line and the README both promise. Nothing
     # called cancel() before this, so the whole abort path -- measure.Aborted,
