@@ -708,6 +708,65 @@ patch read (0.3141, 0.5892) -- 0.0141 from BT.709 and 0.0967 from the panel. Tho
 are exactly right for white balance, which acts on the signal this app sends, and useless
 as a description of the gamut. Press **Apply Edits** to write the result out.
 
+## Displays whose channels do not add up
+
+The white balance used to be solved from red plus green plus blue equalling the white
+measured beside them, and refused when they did not. Some displays never satisfy that. A
+QD-OLED measured here reads its saturated primaries far brighter than their share of
+white -- 2.30x, 2.26x and 2.04x for red, green and blue -- so the three sum to 2.11 times
+the white patch. It is repeatable to within 1% across consecutive readings, identical on
+both of the instrument's calibration tables, and not a brightness limiter: a yellow patch
+at 213 nits is unaffected while cyan at a predicted 176 is not. It weakens as level rises
+-- 111% additivity error at 100 nits, 82% at 200, 17% at 300 -- but on this panel there is
+no level where it comes inside the 8% the old check allowed.
+
+That is now solved rather than refused. The primaries' *chromaticities* are steady and
+close to the BT.709 the patches ask for, so the direction of each channel survives even
+though its magnitude does not. Only the magnitudes are rebuilt, from the one patch a
+saturated-colour boost cannot touch: white. Solving for the three luminances that make
+the measured white out of the measured primary directions gives contributions that add up
+to it by construction, and a white balance solved through those needs no additivity
+assumption at all.
+
+On the panel above that recovers **R -20.9%, G 0.0%, B -0.4%** -- within half a percent of
+what the same display returned on the rare runs that did satisfy the old check. On a
+display whose channels do add up, the solve returns exactly the luminances that were
+measured, so nothing changes. The run reports the departure, because a display doing this
+is worth knowing about; it no longer refuses over it.
+
+What is still refused is a set where the three channels are the same colour, or where the
+white sits outside the triangle its own primaries make. Neither is a display being
+unusual -- both mean a patch was misread, and no amount of solving recovers three
+directions from one.
+
+## When the display gets dimmer as you ask for more
+
+A curve corrects a display by reversing its response, and a response that goes backwards
+cannot be reversed -- there is no single drive that produces a level the display reaches
+twice. Measured on a PG32UCDM in one of its HDR presets: asked for 47.5 nits it emitted
+106.6, and asked for 58.5 it emitted 61.9. Everything below about 50 nits came out at
+roughly 2.2x what was asked for, then dropped back to correct.
+
+That was the monitor, not the profile and not the instrument. The LUT in the applied
+profile is smooth and near-identity across the whole region; three of the instrument's
+integration modes give the same numbers to three significant figures; and 10% and 25%
+windows put the step in the same place, so it is not driven by average picture level
+either. **It is a property of the monitor's HDR mode**, and changing that mode removed it
+completely -- the ramp became monotonic and the additivity error fell from 111% to
+around 1-3%. Two different presets on the same panel both measured clean afterwards, so
+this is not about finding one blessed mode: it is about the run being able to tell you
+that the one you are on is not calibratable.
+
+So the app measures the reversal, refuses to build a curve from it, and says which
+setting to go and change. An inverse built from a running maximum does not fail on a
+ramp like that; it flattens the reversal and produces a curve that is wrong across
+exactly the range the ramp puts most of its points in. That is worth refusing loudly.
+
+**EOTF tracking is unaffected by a refused white balance.** The ramp is neutral patches whose luminance is
+read directly. Per-level grey *balance* is approximate on a display that boosts saturated
+colour, because it is apportioned through those same primaries: the drift it reports is
+real, but the target it is held to inherits the spread between those factors.
+
 ## Measuring more than once
 
 The white balance trims are folded into the correction already applied rather than

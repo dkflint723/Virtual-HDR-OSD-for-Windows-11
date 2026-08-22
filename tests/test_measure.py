@@ -23,6 +23,11 @@ from sdr_hdr_profile_creator.measure import (
     Aborted,
     Calibration,
     GreyPoint,
+    MAX_RAMP_REVERSAL,
+    _additivity_error,
+    _ramp_reversal,
+    balance_problems,
+    channel_contributions,
     MeasurementError,
     derive,
     panel_response,
@@ -320,19 +325,187 @@ class ValidationTests(unittest.TestCase):
         best display this could be pointed at."""
         self.assertEqual(validate(changed(black=reading(0.0, 0.31, 0.33))), [])
 
-    def test_rejects_channels_that_do_not_add_up_to_the_reference_white(self):
-        """Additivity is the assumption the correction rests on. If red plus
-        green plus blue is not the white measured beside them, something in the
-        path is not linear and gains derived from it would be wrong."""
+    def test_additivity_is_not_a_reason_to_throw_the_run_away(self):
+        """Peak, black and the ramp are read directly or derived from ratios. Refusing
+        all of them because the channels do not add up discards four minutes of good
+        measurements to avoid one bad correction."""
         broken = reading(BALANCE * 1.6, 0.3127, 0.3290)
-        problems = validate(changed(**{"balance-white": broken}))
-        self.assertTrue(any("not linear" in p for p in problems), problems)
+        self.assertEqual(validate(changed(**{"balance-white": broken})), [])
 
-    def test_small_departures_from_additivity_are_tolerated(self):
-        """Instrument noise on a dim blue channel should not fail a good run."""
-        base = NEUTRAL["balance-white"]
-        nudged = reading(base.Y * 1.03, base.x, base.y)
-        self.assertEqual(validate(changed(**{"balance-white": nudged})), [])
+
+class BalanceProblemTests(unittest.TestCase):
+    """What stops a white balance being solved, as distinct from what ruins a run."""
+
+    def test_a_good_set_can_be_solved(self):
+        self.assertEqual(balance_problems(NEUTRAL), [])
+        self.assertEqual(balance_problems(WARM), [])
+
+    def test_channels_that_do_not_add_up_can_still_be_solved(self):
+        """Magnitudes come from the white measured beside the primaries, so the
+        primaries' own luminances being wrong no longer stops anything."""
+        broken = reading(BALANCE * 1.6, 0.3127, 0.3290)
+        self.assertEqual(balance_problems(changed(**{"balance-white": broken})), [])
+
+    def test_a_white_outside_its_own_primaries_cannot_be_solved(self):
+        """No combination of three primaries produces a colour outside the triangle
+        they make, so a white that sits outside one was misread."""
+        outside = reading(BALANCE, 0.7, 0.25)
+        problems = balance_problems(changed(**{"balance-white": outside}))
+        self.assertTrue(any("outside the triangle" in p for p in problems), problems)
+
+    def test_channels_that_are_the_same_colour_cannot_be_solved(self):
+        same = NEUTRAL["balance-white"]
+        problems = balance_problems(changed(red=same, green=same, blue=same))
+        self.assertTrue(any("no white balance to solve" in p for p in problems), problems)
+
+    def test_an_incomplete_set_is_left_to_validate(self):
+        """Missing readings are a problem with the run, and saying so twice in two
+        different vocabularies helps nobody."""
+        self.assertEqual(balance_problems(without("red")), [])
+
+
+class RampReversalTests(unittest.TestCase):
+    """A display that gets dimmer when asked for more light cannot be corrected.
+
+    A 1-D LUT inverts the transfer function, and a function that is not monotonic has no
+    inverse. The inverse built here forces its table non-decreasing, so a reversal does
+    not crash anything -- it silently flattens, and the curve comes out wrong across
+    exactly the range the reversal ruined. That is the failure this refuses.
+    """
+
+    def ramp(self, pairs):
+        return tuple(
+            GreyPoint(index=i, target_nits=t, measured_nits=m, x=0.3127, y=0.3290)
+            for i, (t, m) in enumerate(pairs)
+        )
+
+    def test_a_climbing_ramp_reverses_by_nothing(self):
+        points = self.ramp([(1.0, 1.1), (10.0, 10.4), (100.0, 104.0), (400.0, 402.0)])
+        self.assertEqual(_ramp_reversal(points), 0.0)
+
+    def test_the_pg32ucdm_reversal_is_measured(self):
+        """The real readings: asked for 47.5 nits it emitted 106.3, asked for 58.5 it
+        emitted 61.5. Switching the monitor to DisplayHDR True Black 400 removed it."""
+        points = self.ramp([(38.44, 85.36), (47.53, 106.28), (58.52, 61.55), (71.80, 75.06)])
+        self.assertAlmostEqual(_ramp_reversal(points), (106.28 - 61.55) / 106.28, places=6)
+
+    def test_noise_in_the_deep_shadows_does_not_count(self):
+        """The ramp floor is half a nit, where the instrument's own noise is a large
+        fraction of the reading. A step backwards there says nothing about the display."""
+        points = self.ramp([(0.50, 0.40), (0.78, 0.20), (10.0, 10.4), (100.0, 104.0)])
+        self.assertEqual(_ramp_reversal(points), 0.0)
+
+    def test_a_reversed_ramp_yields_no_correction(self):
+        readings = dict(NEUTRAL)
+        steps = plan(1000.0)
+        for step in steps:
+            if step.key.startswith("grey-"):
+                # Climbs to the halfway point, then falls back and climbs again.
+                measured = step.nits * (2.2 if step.nits < 50.0 else 1.05)
+                readings[step.key] = reading(measured, 0.3127, 0.3290)
+        result = derive(readings, steps)
+        self.assertGreater(result.ramp_reversal, MAX_RAMP_REVERSAL)
+        self.assertIsNone(panel_response(result, lambda nits: (pq_inverse_eotf(nits),) * 3))
+
+    def test_the_same_ramp_climbing_does_yield_one(self):
+        """The guard must not swallow the ordinary case it was carved out of."""
+        readings = dict(NEUTRAL)
+        steps = plan(1000.0)
+        for step in steps:
+            readings[step.key] = readings.get(step.key) or reading(
+                step.nits * 1.08, 0.3127, 0.3290
+            )
+        result = derive(readings, steps)
+        self.assertEqual(result.ramp_reversal, 0.0)
+        self.assertIsNotNone(panel_response(result, lambda nits: (pq_inverse_eotf(nits),) * 3))
+
+
+class SolvedDespiteAdditivityTests(unittest.TestCase):
+    """The PG32UCDM, exactly as logged on 2026-08-22.
+
+    Its primaries read 2.30x, 2.26x and 2.04x their share of the white beside them, so
+    the three sum to 2.11x it. Every earlier build refused this outright. The numbers
+    below are the measurement, not a model of it, and the correction they now yield is
+    within half a percent of what the same display returned on the runs that happened to
+    satisfy the old check -- which is the only independent check available that the
+    answer is right rather than merely produced.
+    """
+
+    def readings(self):
+        return {
+            "black": reading(0.0001, 0.3333, 0.3333),
+            "white": reading(450.0045, 0.3273, 0.3293),
+            "balance-white": reading(106.5509, 0.3289, 0.3285),
+            "red": reading(48.8282, 0.6629, 0.3275),
+            "green": reading(161.5608, 0.3156, 0.5991),
+            "blue": reading(14.7438, 0.1476, 0.0562),
+        }
+
+    def test_the_readings_really_do_not_add_up(self):
+        """If this ever stops being true the test below is proving nothing."""
+        self.assertGreater(_additivity_error(self.readings()), 1.0)
+
+    def test_it_is_no_longer_refused(self):
+        self.assertEqual(balance_problems(self.readings()), [])
+        self.assertEqual(derive(self.readings()).balance_refused, ())
+
+    def test_the_contributions_add_up_to_the_white_by_construction(self):
+        contributions, _matrix = channel_contributions(self.readings())
+        self.assertAlmostEqual(sum(contributions), 106.5509, places=3)
+
+    def test_the_contributions_are_close_to_bt709_shares(self):
+        """The patches ask for BT.709 primaries, so their shares of white should land
+        near BT.709's coefficients however badly the panel reads them."""
+        contributions, _matrix = channel_contributions(self.readings())
+        total = sum(contributions)
+        for solved, expected in zip(contributions, (0.2126, 0.7152, 0.0722)):
+            self.assertAlmostEqual(solved / total, expected, delta=0.015)
+
+    def test_the_correction_matches_what_the_display_needed(self):
+        """R -21%, G and B near zero: what this display returned on 2026-08-19 from the
+        two runs that did add up."""
+        red, green, blue = derive(self.readings()).channel_trims
+        self.assertAlmostEqual(red, -20.9, delta=0.6)
+        self.assertAlmostEqual(green, 0.0, delta=1.7)
+        self.assertAlmostEqual(blue, -0.4, delta=0.6)
+
+    def test_the_departure_is_still_reported(self):
+        """Solving through it is not the same as pretending it did not happen."""
+        self.assertGreater(derive(self.readings()).additivity_error, 1.0)
+
+
+class RefusedBalanceTests(unittest.TestCase):
+    """A run whose channels cannot be told apart still measured a display."""
+
+    def broken(self):
+        same = NEUTRAL["balance-white"]
+        return changed(red=same, green=same, blue=same)
+
+    def test_the_rest_of_the_measurement_survives(self):
+        result = derive(self.broken())
+        self.assertAlmostEqual(result.peak_nits, PEAK, places=2)
+        self.assertGreaterEqual(result.black_nits, 0.0)
+
+    def test_no_correction_is_invented(self):
+        for gain in derive(self.broken()).channel_gains:
+            self.assertAlmostEqual(gain, 1.0, places=9)
+
+    def test_it_says_why_rather_than_looking_neutral(self):
+        """(1, 1, 1) is also what a display that needs no correction measures. The two
+        must not be indistinguishable to the caller -- one is a finished calibration and
+        the other is a refusal."""
+        result = derive(self.broken())
+        self.assertTrue(result.balance_refused)
+        self.assertTrue(any("no white balance to solve" in p for p in result.balance_refused))
+
+    def test_a_good_run_refuses_nothing(self):
+        self.assertEqual(derive(NEUTRAL).balance_refused, ())
+
+    def test_a_warm_display_is_still_corrected(self):
+        """The refusal must not swallow the ordinary case it was carved out of."""
+        result = derive(WARM)
+        self.assertEqual(result.balance_refused, ())
+        self.assertNotEqual(result.channel_gains, (1.0, 1.0, 1.0))
 
     def test_a_peak_white_the_limiter_dimmed_is_not_an_additivity_failure(self):
         """This is the whole reason the balance set exists. Peak white is
@@ -441,12 +614,27 @@ class RunTests(unittest.TestCase):
         self.assertEqual(self.display.shown, [])
 
     def test_readings_that_do_not_survive_validation_are_refused(self):
-        """The run completing is not the same as the readings being usable."""
+        """The run completing is not the same as the readings being usable.
+
+        A peak no display produces means the meter was not against the screen, so
+        nothing the run measured describes the display and there is nothing to keep.
+        """
+        order = iter([NEUTRAL["black"], reading(3.0, 0.3127, 0.3290),
+                      NEUTRAL["balance-white"], NEUTRAL["red"],
+                      NEUTRAL["green"], NEUTRAL["blue"]])
+        with self.assertRaises(MeasurementError):
+            self.run_sequence(lambda: next(order))
+
+    def test_a_run_whose_channels_do_not_add_up_still_returns_what_it_measured(self):
+        """Peak and black were read directly. They do not stop being measurements
+        because the white balance could not be solved from the patches beside them."""
         same = reading(BALANCE / 3.0, 0.3127, 0.3290)
         order = iter([NEUTRAL["black"], NEUTRAL["white"],
                       reading(BALANCE, 0.3127, 0.3290), same, same, same])
-        with self.assertRaises(MeasurementError):
-            self.run_sequence(lambda: next(order))
+        result = self.run_sequence(lambda: next(order))
+        self.assertAlmostEqual(result.peak_nits, PEAK, places=2)
+        self.assertEqual(result.channel_gains, (1.0, 1.0, 1.0))
+        self.assertTrue(result.balance_refused)
 
 
 class WhiteErrorMetricTests(unittest.TestCase):

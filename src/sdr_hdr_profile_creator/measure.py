@@ -183,6 +183,24 @@ def sees_placement_target(reading: Reading) -> bool:
 #: only part most displays get wrong.
 GREYSCALE_STEPS = 33
 
+#: How far a ramp may go backwards before no curve can correct it. A 1-D LUT inverts
+#: the display's transfer function, and a function that is not monotonic has no inverse:
+#: there is no single drive that produces a level the display reaches twice. Flattening
+#: the reversal and carrying on -- which is what an inverse built from a running maximum
+#: quietly does -- produces a curve through exactly the range the reversal ruined.
+#:
+#: Measured on a PG32UCDM in one of its HDR presets: asked for 47.5 nits it emitted
+#: 106.6, and asked for 58.5 it emitted 61.9. Switching the monitor to DisplayHDR True
+#: Black 400 removed it entirely. So this is worth detecting and naming rather than
+#: working around -- it is a setting on the display, and no profile can substitute for
+#: changing it.
+MAX_RAMP_REVERSAL = 0.05
+
+#: Reversals below this level are ignored. The ramp floor is half a nit, where the
+#: instrument's own noise is a large fraction of the reading, and a step backwards there
+#: says nothing about the display.
+REVERSAL_FLOOR_NITS = 1.0
+
 #: The lowest level worth putting on the ramp. Below this the instrument is reading its
 #: own noise floor on an emissive panel, and a point that is mostly noise does not
 #: become useful for being included.
@@ -435,21 +453,49 @@ def validate(readings: dict[str, Reading]) -> list[str]:
                 f"The {name} reading has an impossible chromaticity ({x:.4f}, {y:.4f})."
             )
 
-    if not problems:
-        separation = _channel_separation(readings)
-        if separation < MIN_CHANNEL_SEPARATION:
-            problems.append(
-                f"The red, green and blue readings are nearly the same colour (area "
-                f"{separation:.4f}). The patch cannot have changed between them, so there "
-                "is no white balance to solve."
-            )
-        error = _additivity_error(readings)
-        if error > MAX_ADDITIVITY_ERROR:
-            problems.append(
-                f"Red, green and blue add up to {error:.0%} away from the measured white. "
-                "Something between the signal and the panel is not linear, so a white "
-                "balance derived from these would be wrong."
-            )
+    return problems
+
+
+def balance_problems(readings: dict[str, Reading]) -> list[str]:
+    """What stops a *white balance* being solved, as distinct from what ruins a run.
+
+    Both checks below are about the three channel patches agreeing with the white
+    measured beside them, which is the one thing ``white_balance_gains`` assumes and the
+    only thing it needs. Neither says anything about peak, black, or the greyscale ramp:
+    those are read directly, or derived from ratios that survive a scale error on the
+    primaries, so refusing the whole run over either used to throw away four minutes of
+    good measurements to avoid one bad correction.
+
+    Only one thing does, now. Channels that are the same colour cannot be told apart at
+    all, and no amount of solving recovers three directions from one.
+
+    Channels that do not *add up* used to refuse a run too, and no longer do.
+    :func:`channel_contributions` recovers each channel's magnitude from the white
+    measured beside it instead of from the primary patches, so additivity holds by
+    construction rather than by assumption. On a PG32UCDM whose channels sum to 2.11x
+    their white -- repeatably, on both of the instrument's calibration tables, and at
+    every level from 100 nits to 350 -- that recovers R -20.9%, G 0.0%, B -0.4%, which
+    is within half a percent of what the same display returned on the rare runs that
+    did satisfy the old check. The departure is still worth reporting, because it says
+    the display is doing something unusual; it is no longer worth refusing over.
+    """
+    problems: list[str] = []
+    if [key for key in REQUIRED if key not in readings]:
+        return problems
+
+    separation = _channel_separation(readings)
+    if separation < MIN_CHANNEL_SEPARATION:
+        problems.append(
+            f"The red, green and blue readings are nearly the same colour (area "
+            f"{separation:.4f}). The patch cannot have changed between them, so there "
+            "is no white balance to solve."
+        )
+    if channel_contributions(readings) is None and not problems:
+        problems.append(
+            "The reference white sits outside the triangle its own primaries make, so "
+            "there is no combination of them that produces it. One of the four patches "
+            "was misread."
+        )
     return problems
 
 
@@ -506,6 +552,20 @@ class Calibration:
     white_xy: tuple[float, float]
     channel_gains: tuple[float, float, float]
     window_fraction: float = WINDOW_AREA_FRACTION
+    #: Why no white balance was solved, if none was. Non-empty means ``channel_gains``
+    #: is (1, 1, 1) because the readings could not support a correction -- not because
+    #: the display measured neutral. The two look identical in the numbers and must not
+    #: look identical to the caller.
+    balance_refused: tuple[str, ...] = ()
+    #: The largest step backwards in the measured ramp, as a fraction of the level
+    #: already reached. Anything above ``MAX_RAMP_REVERSAL`` means the display's
+    #: transfer function has no inverse and no curve can correct it.
+    ramp_reversal: float = 0.0
+    #: How far the three channels were from summing to the white beside them. No longer
+    #: a reason to refuse -- see ``channel_contributions`` -- but a large value means the
+    #: primaries' own luminances were discarded, and a display that does that is worth
+    #: telling someone about rather than quietly working around.
+    additivity_error: float = 0.0
     #: The greyscale ramp, if one was measured. Empty from a six-patch run.
     greyscale: tuple[GreyPoint, ...] = ()
     #: Measured XYZ of the red, green and blue patches, in that order. The
@@ -577,24 +637,87 @@ class Calibration:
         return any(abs(trim) > MAX_CHANNEL_TRIM * 100.0 for trim in self.channel_trims)
 
 
+def _unit_xyz(reading: Reading) -> tuple[float, float, float] | None:
+    """A reading's chromaticity as an XYZ vector of luminance exactly 1."""
+    if reading.y <= 0.0:
+        return None
+    return (reading.x / reading.y, 1.0, (1.0 - reading.x - reading.y) / reading.y)
+
+
+def channel_contributions(
+    readings: dict[str, Reading],
+) -> tuple[tuple[float, float, float], tuple[float, ...]] | None:
+    """What each channel contributes to the reference white, and the matrix that says so.
+
+    Solved from the primaries' *chromaticities* and the white measured beside them,
+    rather than read off the primaries' own luminances. The two are the same thing on a
+    display whose channels add up: solving ``a R + b G + c B = W`` for unit-luminance
+    primaries returns exactly the luminances that were measured, so nothing changes for
+    a well-behaved panel.
+
+    They stop being the same thing on a panel that boosts saturated colour. A PG32UCDM
+    reads its primaries at 2.30x, 2.26x and 2.04x their share of the white beside them,
+    so a matrix built from those luminances describes a display that emits twice the
+    light it does, and a white balance solved through it is solved for a fiction. Their
+    chromaticities are steady and plausible -- repeatable to 1%, and close to BT.709,
+    which is what the patches ask for -- so the direction of each primary survives even
+    though its magnitude does not.
+
+    This keeps the directions and recovers the magnitudes from the one patch the boost
+    cannot touch: white is not a saturated colour, so there is nothing there to boost.
+    Additivity then holds by construction rather than by assumption, which is what makes
+    a white balance solvable on a display that cannot satisfy the check at all.
+
+    ``None`` if the primaries do not span a colour space, which is the one case no
+    amount of solving fixes.
+    """
+    units = [_unit_xyz(readings[channel]) for channel in ("red", "green", "blue")]
+    if any(unit is None for unit in units):
+        return None
+    span = tuple(units[column][row] for row in range(3) for column in range(3))  # type: ignore[index]
+    inverse = _inverse3(span)
+    if inverse is None:
+        return None
+
+    contributions = _matvec3(inverse, _xyz(readings["balance-white"]))
+    if any(value <= 0.0 for value in contributions):
+        # A negative contribution means the white measured outside the triangle its own
+        # primaries make. Nothing physical does that; something was misread.
+        return None
+
+    # The columns scaled to the luminance each channel actually puts into the white.
+    matrix = tuple(
+        units[column][row] * contributions[column]  # type: ignore[index]
+        for row in range(3)
+        for column in range(3)
+    )
+    return contributions, matrix
+
+
 def white_balance_gains(readings: dict[str, Reading]) -> tuple[float, float, float]:
     """Per-channel gains that move measured white onto D65.
 
-    Solves ``M g = T``, where the columns of ``M`` are the measured XYZ of the
-    three channels at full drive and ``T`` is D65 at the same luminance. If the
-    display were already neutral the answer would be (1, 1, 1).
+    Solves ``M g = T``, where the columns of ``M`` are each channel's contribution to
+    the reference white and ``T`` is D65 at the same luminance. If the display were
+    already neutral the answer would be (1, 1, 1).
+
+    ``M`` comes from :func:`channel_contributions` rather than straight from the primary
+    patches, so this works on a display whose channels do not add up -- see there for
+    why that matters and why it changes nothing on a display whose channels do.
 
     The result is scaled so the largest gain is exactly 1.0. Correcting white by
     boosting a channel would ask for output the panel has already run out of, so
     the excess channels come down to meet the weakest instead. That costs
     luminance, which is the honest price of a neutral white.
     """
-    columns = [_xyz(readings[channel]) for channel in ("red", "green", "blue")]
-    matrix = tuple(columns[column][row] for row in range(3) for column in range(3))
+    solved = channel_contributions(readings)
+    if solved is None:
+        # Three channels that do not span a colour space; balance_problems() will have
+        # said why, and a neutral answer is the only safe one.
+        return (1.0, 1.0, 1.0)
+    _contributions, matrix = solved
     inverse = _inverse3(matrix)
     if inverse is None:
-        # Three channels that do not span a colour space; validate() will have
-        # said why, and a neutral answer is the only safe one.
         return (1.0, 1.0, 1.0)
 
     luminance = max(readings["balance-white"].Y, 1e-6)
@@ -623,12 +746,22 @@ def derive(
     # Peak comes from the patch driven to peak; the white point comes from the
     # one the channels were measured beside, which is the white the correction
     # is actually solved against.
+    # Solved only if it can be. Everything else here is read directly or derived from
+    # ratios, so a display whose channels do not add up still yields a usable peak,
+    # black, white point and ramp -- and refusing all of that to avoid one bad
+    # correction discards far more than it protects.
+    refused = tuple(balance_problems(readings))
+    gains = (1.0, 1.0, 1.0) if refused else white_balance_gains(readings)
+
     reference = readings["balance-white"]
     return Calibration(
         peak_nits=readings["white"].Y,
         black_nits=max(0.0, readings["black"].Y),
         white_xy=(reference.x, reference.y),
-        channel_gains=white_balance_gains(readings),
+        channel_gains=gains,
+        balance_refused=refused,
+        additivity_error=_additivity_error(readings),
+        ramp_reversal=_ramp_reversal(_greyscale_points(readings, steps)),
         greyscale=_greyscale_points(readings, steps),
         colours=_colour_points(readings),
         channel_xyz=tuple(_xyz(readings[channel]) for channel in ("red", "green", "blue")),
@@ -680,6 +813,22 @@ def _channel_weights(readings: dict[str, Reading]) -> tuple[float, ...]:
     return () if shares is None else shares
 
 
+def _ramp_reversal(points: tuple[GreyPoint, ...]) -> float:
+    """The largest step backwards in a measured ramp, as a fraction of the peak so far.
+
+    Zero for a ramp that only ever climbs, which is every display that can be corrected.
+    """
+    worst = 0.0
+    highest = 0.0
+    for point in sorted(points, key=lambda p: p.target_nits):
+        if point.target_nits <= 0.0 or point.measured_nits < REVERSAL_FLOOR_NITS:
+            continue
+        if highest > 0.0 and point.measured_nits < highest:
+            worst = max(worst, (highest - point.measured_nits) / highest)
+        highest = max(highest, point.measured_nits)
+    return worst
+
+
 def panel_response(
     calibration: Calibration, sent: Callable[[float], tuple[float, float, float]]
 ) -> PanelResponse | None:
@@ -692,8 +841,26 @@ def panel_response(
 
     ``None`` when the run cannot support a correction: a short ramp, a plan that was
     never paired with the readings, or channels that do not span a colour space.
+
+    **How much of this survives a display whose channels do not add up.** The luminance
+    half is untouched: every ramp point is a neutral patch and its total ``Y`` is read
+    directly, so EOTF tracking is as good as the instrument. The balance half is only as
+    good as the channel matrix, which comes from the three primary patches -- and on a
+    panel that boosts saturated colour those are wrong by different amounts (measured
+    2.30, 2.26 and 2.04 on a PG32UCDM). The reference white and the ramp are apportioned
+    through the same matrix, so the *drift* between them still means something, but the
+    weights it is measured against can be off by the spread between those factors.
+
+    That is why this is computed even when ``balance_problems`` refuses the white
+    balance. A skewed grey-tracking target is worth having; a white balance solved from
+    channels that sum to twice their white is not.
     """
     if len(calibration.channel_xyz) != 3 or len(calibration.white_weights) != 3:
+        return None
+    if calibration.ramp_reversal > MAX_RAMP_REVERSAL:
+        # No inverse exists. Building one anyway is worse than building none: the
+        # flattening is invisible, and the curve it produces is wrong precisely where
+        # the ramp puts most of its points.
         return None
     matrix = tuple(
         calibration.channel_xyz[column][row] for row in range(3) for column in range(3)

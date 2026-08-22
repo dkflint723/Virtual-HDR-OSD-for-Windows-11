@@ -2009,6 +2009,127 @@ class BlackLevelPlausibilityTests(WindowTestCase):
         self.assertNotIn("darkest level you can see", self.window.status_label.text())
 
 
+class RefusedBalanceTests(WindowTestCase):
+    """A run whose channels do not add up still measured peak, black and the ramp.
+
+    The white balance is the only thing that rests on red plus green plus blue equalling
+    the white beside them, so it is the only thing refused. Everything else was read
+    directly or derived from ratios that survive a scale error on the primaries.
+    """
+
+    def calibration(self, refused=("Red, green and blue add up to 111% away from the "
+                                   "measured white. Something between the signal and the "
+                                   "panel is not linear, so a white balance derived from "
+                                   "these would be wrong.")):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        return Calibration(
+            peak_nits=450.0,
+            black_nits=0.0,
+            white_xy=(0.3289, 0.3285),
+            channel_gains=(1.0, 1.0, 1.0),
+            balance_refused=tuple(refused) if isinstance(refused, tuple) else (refused,),
+        )
+
+    def test_peak_and_black_are_still_adopted(self):
+        self.window._measure_finished(self.calibration(), "")
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 450.0, places=2)
+
+    def test_the_trims_already_in_force_are_left_alone(self):
+        """Not merely unchanged by arithmetic -- deliberately not written. A correction
+        that survives by accident survives only until the arithmetic changes."""
+        self.window.state.hdr.red_channel = -12.5
+        self.window.state.hdr.green_channel = -3.25
+        self.window._measure_finished(self.calibration(), "")
+        self.assertAlmostEqual(self.window.state.hdr.red_channel, -12.5)
+        self.assertAlmostEqual(self.window.state.hdr.green_channel, -3.25)
+
+    def test_the_status_says_which_half_was_rejected(self):
+        """This is the one outcome where the profile keeps a correction the run did not
+        verify. A user who is not told has no way to tell it from success."""
+        self.window._measure_finished(self.calibration(), "")
+        text = self.window.status_label.text()
+        self.assertIn("NOT updated", text)
+        self.assertIn("not linear", text)
+
+    def test_it_does_not_report_success(self):
+        self.window._measure_finished(self.calibration(), "")
+        self.assertNotIn("Ready", self.window.status_label.text())
+
+    def test_a_solved_run_says_nothing_about_a_refusal(self):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        solved = Calibration(
+            peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
+            channel_gains=(0.8, 1.0, 0.97),
+        )
+        self.window._measure_finished(solved, "")
+        self.assertNotIn("NOT updated", self.window.status_label.text())
+
+
+class RampReversalNoteTests(WindowTestCase):
+    """A display that dims when asked for more light cannot be corrected by a curve.
+
+    The fix is a setting on the monitor, so the message has to say that. "No correction
+    was stored" on its own sends someone looking for the fault in the profile.
+    """
+
+    def calibration(self, reversal):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        return Calibration(
+            peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
+            channel_gains=(1.0, 1.0, 1.0), ramp_reversal=reversal,
+        )
+
+    def test_it_says_the_greyscale_was_not_corrected(self):
+        self.window._measure_finished(self.calibration(0.42), "")
+        text = self.window.status_label.text()
+        self.assertIn("NOT corrected", text)
+        self.assertIn("42%", text)
+
+    def test_it_points_at_the_monitor_not_the_profile(self):
+        self.window._measure_finished(self.calibration(0.42), "")
+        self.assertIn("HDR preset", self.window.status_label.text())
+
+    def test_peak_and_black_are_still_kept(self):
+        """The ramp being uncorrectable does not unmeasure the two figures that were
+        read directly."""
+        self.window._measure_finished(self.calibration(0.42), "")
+        self.assertAlmostEqual(self.window.state.hdr.peak_luminance_nits, 450.0, places=2)
+
+    def test_an_ordinary_ramp_says_nothing_about_it(self):
+        self.window._measure_finished(self.calibration(0.0), "")
+        self.assertNotIn("NOT corrected", self.window.status_label.text())
+
+
+class AdditivityNoteTests(WindowTestCase):
+    """Channels that do not add up are solved through, and said out loud."""
+
+    def calibration(self, error):
+        from sdr_hdr_profile_creator.measure import Calibration
+
+        return Calibration(
+            peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
+            channel_gains=(0.79, 1.0, 0.996), additivity_error=error,
+        )
+
+    def test_a_large_departure_is_reported(self):
+        self.window._measure_finished(self.calibration(1.147), "")
+        text = self.window.status_label.text()
+        self.assertIn("115%", text)
+        self.assertIn("discarded", text)
+
+    def test_the_correction_is_still_applied(self):
+        """Reporting it is not refusing it. The trims have to actually move."""
+        self.window._measure_finished(self.calibration(1.147), "")
+        self.assertLess(self.window.state.hdr.red_channel, -15.0)
+
+    def test_an_ordinary_run_says_nothing_about_it(self):
+        self.window._measure_finished(self.calibration(0.02), "")
+        self.assertNotIn("discarded", self.window.status_label.text())
+
+
 class MeasuredResponseTests(WindowTestCase):
     """The greyscale response a meter run leaves behind, and what guards it.
 

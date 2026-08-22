@@ -2532,6 +2532,8 @@ class MainWindow(FluentWidget):
             "white_delta_uv": result.white_delta_uv,
             "verified": result.verified,
             "channel_gains": list(result.channel_gains),
+            "balance_refused": list(result.balance_refused),
+            "additivity_error": result.additivity_error,
             "channel_trims": list(result.channel_trims),
             "trims_already_applied": [
                 self.state.hdr.red_channel,
@@ -2580,9 +2582,15 @@ class MainWindow(FluentWidget):
             round((gain - 1.0) * 100.0, 3)
             for gain in measure.compose_gains(applied, result.channel_gains)
         )
-        state.red_channel = max(-limit, min(limit, red))
-        state.green_channel = max(-limit, min(limit, green))
-        state.blue_channel = max(-limit, min(limit, blue))
+        # A refused balance leaves the trims exactly where they were. The gains are
+        # (1, 1, 1) in that case so composing them would be a no-op anyway, but relying
+        # on that would mean the trims survive by accident rather than on purpose --
+        # and "the display measured neutral" and "the readings could not say" produce
+        # the same numbers and must not produce the same behaviour.
+        if not result.balance_refused:
+            state.red_channel = max(-limit, min(limit, red))
+            state.green_channel = max(-limit, min(limit, green))
+            state.blue_channel = max(-limit, min(limit, blue))
 
         self._save_state_now()
         self._load_mode_into_controls()
@@ -2597,7 +2605,18 @@ class MainWindow(FluentWidget):
         # it, which is what makes every pass after the first a verification.
         error = result.white_delta_uv
         cct = result.white_cct
-        if result.verified:
+        if result.balance_refused:
+            # Said in full rather than summarised. This is the one outcome where the
+            # profile keeps a correction the run did not verify, and a user who is not
+            # told which half was rejected has no way to tell that from success.
+            white_note = (
+                f"White measured {cct:,.0f}K, {error:.4f} from D65 in u'v'. The white "
+                f"balance was NOT updated: {' '.join(result.balance_refused)} Peak, "
+                "black and the greyscale were kept -- they do not depend on the "
+                "channels adding up"
+            )
+            level = "warning"
+        elif result.verified:
             white_note = (
                 f"White is neutral: {cct:,.0f}K, {error:.4f} from D65 in u'v', inside the "
                 f"{measure.VERIFIED_DELTA_UV} a calibrated display is held to"
@@ -2614,14 +2633,50 @@ class MainWindow(FluentWidget):
                 white_note = (
                     f"Still {error:.4f} off after the last correction. " + white_note
                 )
-        level = "ok"
-        if result.trims_exceed_range:
+        if not result.balance_refused:
+            level = "ok"
+        if result.trims_exceed_range and not result.balance_refused:
             white_note += (
                 f". The correction needed exceeds the {limit:.0f}% a profile can carry and "
                 "has been clamped, so white will still be off -- check the monitor's own "
                 "colour temperature setting first"
             )
             level = "warning"
+        # Solved through, not ignored. A display whose primaries read twice their share
+        # of white is doing something worth knowing about, even though the correction no
+        # longer depends on them.
+        additivity_note = ""
+        if result.additivity_error > measure.MAX_ADDITIVITY_ERROR:
+            additivity_note = (
+                f" Red, green and blue read {result.additivity_error:.0%} away from "
+                "adding up to the white beside them, so their own luminances were "
+                "discarded and each channel's share was solved from that white instead. "
+                "The white balance above is unaffected; per-level grey balance is "
+                "approximate on a display that does this."
+            )
+
+        # The one outcome where the answer is a setting on the monitor rather than
+        # anything a profile can carry. Saying "no correction was stored" without saying
+        # why would send someone looking for the fault in the wrong place entirely.
+        if result.ramp_reversal > measure.MAX_RAMP_REVERSAL:
+            grey_note = (
+                f" The greyscale was NOT corrected: the display got {result.ramp_reversal:.0%} "
+                "dimmer partway up the ramp when it was asked for more light. A curve "
+                "corrects a display by reversing its response, and a response that goes "
+                "backwards cannot be reversed. This is a tone-mapping mode on the monitor "
+                "-- try its HDR preset (DisplayHDR True Black rather than a Gaming or "
+                "Cinema mode) and measure again."
+            )
+            level = "warning"
+            self._set_status(
+                f"Measured {result.peak_nits:.1f} nits peak on a "
+                f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
+                f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
+                "Press Apply Edits to store what was measured.",
+                level,
+            )
+            return
+
         grey_note = ""
         if response is not None:
             grey_note = (
@@ -2632,7 +2687,8 @@ class MainWindow(FluentWidget):
         self._set_status(
             f"Measured {result.peak_nits:.1f} nits peak on a "
             f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
-            f"({contrast_text}). {white_note}.{grey_note} Press Apply Edits to store it.",
+            f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
+            "Press Apply Edits to store it.",
             level,
         )
 
@@ -2674,6 +2730,7 @@ class MainWindow(FluentWidget):
                 "event": "response-unavailable",
                 "ramp_points": len(getattr(result, "greyscale", ())),
                 "kept_previous": bool(state.panel_response),
+                "ramp_reversal": getattr(result, "ramp_reversal", 0.0),
             })
             return None
 
