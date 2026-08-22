@@ -759,12 +759,12 @@ class MainWindow(FluentWidget):
             "rather than hidden.",
         )
         luminance_card.add_widget(self._make_control(ControlSpec(
-            "peak_luminance_nits", "Peak Luminance", 80.0, 10000.0, 1000.0, 1.0, " nits", 1, "panel",
+            "peak_luminance_nits", "Peak Luminance", 80.0, 10000.0, 1000.0, 0.01, " nits", 2, "panel",
             "The brightest a small highlight can go. Written into the MHC2 header and "
             "used as the ceiling for the sustained figure below."
         )))
         luminance_card.add_widget(self._make_control(ControlSpec(
-            "full_frame_luminance_nits", "Sustained Luminance", 80.0, 10000.0, 400.0, 1.0, " nits", 1, "panel",
+            "full_frame_luminance_nits", "Sustained Luminance", 80.0, 10000.0, 400.0, 0.01, " nits", 2, "panel",
             "What the display holds with the whole screen lit, which on an emissive "
             "panel is far below peak because of its brightness limiter. This is the "
             "profile's lumi tag. It cannot exceed peak; raising it past peak raises "
@@ -2852,9 +2852,11 @@ class MainWindow(FluentWidget):
             if not overwrite_installed_profile(name, payload):
                 raise WindowsColorError(
                     f"Windows kept the previous {name} instead of the profile just "
-                    "built, and it could not be replaced by this account. It was "
-                    "installed by an earlier elevated run, so press Run as Admin at "
-                    "the top of the window and apply again."
+                    "built, and it could not be replaced. Try applying again — the "
+                    "watchdog re-asserts the profile every few seconds and a write "
+                    "landing in that window is refused. If it keeps failing, the file "
+                    "belongs to an earlier elevated run: press Run as Admin at the top "
+                    "of the window and apply once from there."
                 )
             self._installed_digests[path.name] = digest
 

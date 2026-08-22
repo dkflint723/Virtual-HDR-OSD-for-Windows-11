@@ -314,8 +314,11 @@ class EditorStructureTests(WindowTestCase):
             "blue_channel": (-25.0, 25.0, 0.0, 0.05),
             # Matching ModeState's own limits, so a typed value and a loaded one are
             # constrained alike rather than the editor allowing what the model clamps.
-            "peak_luminance_nits": (80.0, 10000.0, 1000.0, 1.0),
-            "full_frame_luminance_nits": (80.0, 10000.0, 400.0, 1.0),
+            # 0.01, matching the two decimals shown. set_value quantises to the
+            # declared step, so a whole-nit step silently snapped every typed value to
+            # an integer -- this panel declares 1015.24 and the field would take 1015.
+            "peak_luminance_nits": (80.0, 10000.0, 1000.0, 0.01),
+            "full_frame_luminance_nits": (80.0, 10000.0, 400.0, 0.01),
             "minimum_luminance_nits": (0.0, 100.0, 0.0, 0.0001),
         }
         for key, (low, high, default, step) in expected.items():
@@ -2481,6 +2484,36 @@ class LuminanceControlTests(WindowTestCase):
                 self.widget(key).set_value(300.0 if "minimum" not in key else 0.01, emit=True)
         self.assertAlmostEqual(300.0, self.window.state.hdr.peak_luminance_nits, places=3)
         self.assertAlmostEqual(0.01, self.window.state.hdr.minimum_luminance_nits, places=4)
+
+    def test_a_typed_fraction_is_not_snapped_to_a_whole_number(self):
+        """What the owner hit: the field took 1015 for a panel declaring 1015.24.
+
+        set_value quantises to the declared step so the slider and the field agree, so
+        a step of one nit silently rounded every typed value — including the panel's
+        own figure, which meant the number on screen was not the number in the profile.
+        The step now matches the two decimals the field displays.
+        """
+        for key, typed in (
+            ("peak_luminance_nits", 1015.24),
+            ("full_frame_luminance_nits", 265.05),
+        ):
+            with self.subTest(control=key):
+                widget = self.widget(key)
+                widget.set_value(typed, emit=True)
+                self.assertAlmostEqual(typed, widget.value(), places=2)
+                self.assertAlmostEqual(typed, getattr(self.window.state.hdr, key), places=2)
+
+    def test_the_declared_figures_survive_being_shown(self):
+        """Loading the panel's own numbers into the controls must not round them into
+        something the display never claimed."""
+        state = self.window.state.hdr
+        state.peak_luminance_nits = 1015.2407657533865
+        state.full_frame_luminance_nits = 265.0473286319483
+        state.minimum_luminance_nits = 0.00015613083671716822
+        self.window._load_mode_into_controls()
+        self.assertAlmostEqual(1015.24, self.widget("peak_luminance_nits").value(), places=2)
+        self.assertAlmostEqual(265.05, self.widget("full_frame_luminance_nits").value(), places=2)
+        self.assertAlmostEqual(0.0002, self.widget("minimum_luminance_nits").value(), places=4)
 
     def test_black_keeps_the_precision_an_oled_needs(self):
         """0.00015613 is this panel's real black. Two decimals would store zero."""

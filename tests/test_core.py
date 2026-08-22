@@ -1029,3 +1029,106 @@ class NormalizePrimariesTests(unittest.TestCase):
         payload = state.to_dict()
         payload["panel_primaries"] = [0.5, 0.5]
         self.assertEqual(ModeState.from_dict(payload, "HDR").panel_primaries, ())
+
+
+class InPlaceProfileRetryTests(unittest.TestCase):
+    """A collision is not a permissions failure.
+
+    The watchdog re-asserts the profile association every few seconds and Windows opens
+    the file to do it, so an apply landing in that window is refused with a sharing
+    violation. Without a retry that was reported as "installed by an earlier elevated
+    run, press Run as Admin" -- useless advice for something that clears in
+    milliseconds, and it switched Live Apply off as well. _write_json_atomic already
+    retried for exactly this reason; this did not.
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+
+        from sdr_hdr_profile_creator import windows_api
+
+        self.windows_api = windows_api
+        self.color_dir = Path(tempfile.mkdtemp(prefix="vhdr-retry-"))
+        self.addCleanup(shutil.rmtree, self.color_dir, True)
+        patcher = mock.patch.object(windows_api, "get_color_directory", lambda: self.color_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        (self.color_dir / "probe.icm").write_bytes(b"A" * 120)
+
+    def hold_open_without_sharing_writes(self, name, seconds):
+        """Do to the file exactly what Windows does while re-asserting a profile.
+
+        Opened with FILE_SHARE_READ only, so any other writer is refused with a
+        sharing violation until this handle closes. Released on a timer, which is what
+        makes the retry observable rather than merely asserted.
+        """
+        import ctypes
+        import threading
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateFileW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        ]
+        kernel32.CreateFileW.restype = wintypes.HANDLE
+        GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING = 0x80000000, 0x00000001, 3
+        invalid = wintypes.HANDLE(-1).value
+
+        handle = kernel32.CreateFileW(
+            str(self.color_dir / name), GENERIC_READ, FILE_SHARE_READ,
+            None, OPEN_EXISTING, 0, None,
+        )
+        self.assertNotEqual(invalid, handle, "could not hold the file open")
+        released = threading.Timer(seconds, lambda: kernel32.CloseHandle(handle))
+        released.daemon = True
+        released.start()
+        self.addCleanup(lambda: kernel32.CloseHandle(handle))
+        return handle
+
+    @unittest.skipUnless(sys.platform == "win32", "sharing semantics are a Windows thing")
+    def test_a_write_blocked_by_another_process_succeeds_once_it_lets_go(self):
+        """The owner hit this for real: a Live Apply edit collided with the watchdog
+        re-asserting the association, and the failure was reported as a permissions
+        problem telling them to elevate."""
+        self.hold_open_without_sharing_writes("probe.icm", seconds=0.10)
+        self.assertTrue(
+            self.windows_api.overwrite_installed_profile("probe.icm", b"B" * 120),
+            "a transient sharing violation was reported as a permanent failure",
+        )
+        self.assertEqual(b"B" * 120, (self.color_dir / "probe.icm").read_bytes())
+
+    @unittest.skipUnless(sys.platform == "win32", "sharing semantics are a Windows thing")
+    def test_a_write_blocked_for_longer_than_the_retries_still_fails(self):
+        """The retry is a collision window, not a guarantee; a file genuinely held
+        open must still be reported rather than waited on indefinitely."""
+        self.hold_open_without_sharing_writes("probe.icm", seconds=30.0)
+        self.assertFalse(self.windows_api.overwrite_installed_profile("probe.icm", b"C" * 120))
+        self.assertEqual(b"A" * 120, (self.color_dir / "probe.icm").read_bytes(),
+                         "a refused write must not have modified anything")
+
+    def test_the_retry_only_covers_sharing_violations(self):
+        """A genuine permissions failure must fail fast rather than stalling the UI
+        for a fifth of a second on every apply."""
+        import inspect
+
+        source = inspect.getsource(self.windows_api.overwrite_installed_profile)
+        self.assertIn("ERROR_SHARING_VIOLATION", source)
+        self.assertIn("if ctypes.get_last_error() != ERROR_SHARING_VIOLATION:", source)
+        self.assertIn("return False", source)
+
+    def test_the_message_leads_with_the_likely_cause(self):
+        """Telling the user to elevate first is wrong for the common case, and
+        elevating is not something to advise lightly."""
+        from pathlib import Path as _Path
+
+        app_source = _Path("src/sdr_hdr_profile_creator/app.py").read_text(encoding="utf-8")
+        start = app_source.index("Windows kept the previous")
+        message = app_source[start:start + 420]
+        self.assertLess(
+            message.index("Try applying again"), message.index("Run as Admin"),
+            "the transient cause should be offered before the drastic one",
+        )

@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import os
 import platform
+import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -514,6 +515,9 @@ def resolve_profile_path(profile_name: str) -> Path:
 #: FILE_WRITE_ATTRIBUTES, which are refused, so asking for it fails outright -- and so
 #: does open(path, "wb"), which asks for exactly that.
 FILE_WRITE_DATA = 0x0002
+# Another process has the file open without sharing writes. Transient, unlike a
+# permissions failure, and the watchdog causes one every few seconds.
+ERROR_SHARING_VIOLATION = 32
 FILE_SHARE_ALL = 0x00000007
 OPEN_EXISTING = 3
 INVALID_HANDLE_VALUE = wintypes.HANDLE(-1).value
@@ -560,9 +564,22 @@ def overwrite_installed_profile(profile_name: str, payload: bytes) -> bool:
     ]
     kernel32.WriteFile.restype = wintypes.BOOL
 
-    handle = kernel32.CreateFileW(
-        str(target), FILE_WRITE_DATA, FILE_SHARE_ALL, None, OPEN_EXISTING, 0, None
-    )
+    # Retried, for the same reason _write_json_atomic retries: the watchdog re-asserts
+    # the association every few seconds and Windows opens the profile to do it, so an
+    # apply that collides with one gets a sharing violation rather than a permissions
+    # failure. Without this, a Live Apply edit landing in that window was reported as
+    # "installed by an earlier elevated run, press Run as Admin" -- advice that is
+    # useless for a collision that clears in a few milliseconds.
+    handle = INVALID_HANDLE_VALUE
+    for attempt in range(5):
+        handle = kernel32.CreateFileW(
+            str(target), FILE_WRITE_DATA, FILE_SHARE_ALL, None, OPEN_EXISTING, 0, None
+        )
+        if handle != INVALID_HANDLE_VALUE:
+            break
+        if ctypes.get_last_error() != ERROR_SHARING_VIOLATION:
+            return False
+        time.sleep(0.04 * (attempt + 1))
     if handle == INVALID_HANDLE_VALUE:
         return False
     try:
