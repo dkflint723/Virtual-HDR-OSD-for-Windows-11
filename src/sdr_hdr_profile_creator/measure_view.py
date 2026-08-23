@@ -86,19 +86,22 @@ class MeasureWindow(QWidget):
         self.show_patch(MeasurementStep("blank", "", (0.0, 0.0, 0.0), 0.0, 0.0))
         return True
 
-    def show_placement_target(self) -> bool:
+    def show_placement_target(self, fraction: float = measure.PEAK_WINDOW_FRACTION) -> bool:
         """Draw where the meter goes, at the exact geometry the patches will use.
 
         Only safe before the run: this is the one moment anything other than a patch may
         be lit, because nothing is being read yet. "The centre of the screen" is what the
-        briefing can say in words and it is not enough -- the patch is a tenth of the
-        screen *area*, so its edges matter, and an instrument overhanging one reads part
-        black and returns a luminance nothing downstream can tell is wrong.
+        briefing can say in words and it is not enough -- the patches cover a few percent
+        of the screen *area*, so their edges matter, and an instrument overhanging one
+        reads part black and returns a luminance nothing downstream can tell is wrong.
+
+        ``fraction`` defaults to the smallest window any patch uses rather than the
+        common one, so a meter placed on this target covers every patch in the run.
         """
         if self._surface is None:
             return False
         width, height = self.device_size()
-        frame = placement_frame(width, height, self._context)
+        frame = placement_frame(width, height, self._context, fraction=fraction)
         try:
             self._surface.present(frame)
         except HdrDisplayError as exc:
@@ -120,7 +123,11 @@ class MeasureWindow(QWidget):
         if self._surface is None:
             return
         width, height = self.device_size()
-        self._frame = measurement_frame(width, height, step.rgb, step.nits, self._context)
+        self._frame = measurement_frame(
+            width, height, step.rgb, step.nits, self._context,
+            # Per patch, because peak is measured on a smaller window than the rest.
+            fraction=step.window_fraction,
+        )
         try:
             self._surface.present(self._frame)
         except HdrDisplayError as exc:
@@ -327,6 +334,88 @@ class MeasurementWorker(QObject):
             self.finished.emit(None, f"Measurement failed: {exc}")
         else:
             self.finished.emit(result, "")
+
+
+class SustainedWorker(QObject):
+    """Runs :func:`measure.sustained` off the UI thread.
+
+    Its own worker rather than a flag on MeasurementWorker: the two report different
+    things, stop for different reasons, and the sweep's progress signal has no meaning
+    for a measurement whose length is decided by the readings rather than by a plan.
+    """
+
+    #: Emitted per reading, so a slow settle looks like progress rather than a hang.
+    reading = Signal(int, float)
+    #: The result and a message. Never both, and never neither.
+    finished = Signal(object, str)
+
+    def __init__(
+        self,
+        display: measure.Display,
+        read: Callable[[], Reading],
+        peak_nits: float,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        super().__init__()
+        self._display = display
+        self._read = read
+        self._peak_nits = peak_nits
+        self._sleep = sleep
+        self._abort = False
+
+    def cancel(self) -> None:
+        self._abort = True
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            result = measure.sustained(
+                self._display,
+                self._read,
+                peak_nits=self._peak_nits,
+                sleep=self._sleep,
+                should_abort=lambda: self._abort,
+                on_reading=lambda index, nits: self.reading.emit(index, nits),
+            )
+        except measure.Aborted:
+            self.finished.emit(None, "")
+        except measure.MeasurementError as exc:
+            self.finished.emit(None, str(exc))
+        except Exception as exc:  # noqa: BLE001 - a worker must never die silently
+            self.finished.emit(None, f"Sustained measurement failed: {exc}")
+        else:
+            self.finished.emit(result, "")
+
+
+def start_sustained(
+    window: MeasureWindow,
+    read: Callable[[], Reading],
+    peak_nits: float,
+    on_reading: Callable[[int, float], None],
+    on_finished: Callable[[object, str], None],
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[QThread, SustainedWorker]:
+    """Begin a sustained measurement, returning the thread and worker to keep alive.
+
+    Wired exactly as :func:`start` is, and for the same reasons: Esc must reach the
+    worker directly because its event loop is busy, and the thread has to be joined
+    before the outcome is handed back or finalising it aborts the process.
+    """
+    thread = QThread()
+    worker = SustainedWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep)
+    worker.moveToThread(thread)
+    window.closed.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
+    thread.started.connect(worker.run)
+    worker.reading.connect(on_reading)
+
+    def _done(result, message):
+        thread.quit()
+        thread.wait()
+        on_finished(result, message)
+
+    worker.finished.connect(_done)
+    thread.start()
+    return thread, worker
 
 
 def start(

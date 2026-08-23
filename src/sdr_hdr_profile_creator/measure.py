@@ -145,6 +145,9 @@ class MeasurementStep:
     rgb: tuple[float, float, float]
     nits: float
     settle_seconds: float = 1.5
+    #: How much of the screen this patch covers. Per-patch because peak is not specified
+    #: at the same size as everything else -- see ``PEAK_WINDOW_FRACTION``.
+    window_fraction: float = WINDOW_AREA_FRACTION
 
 
 #: What the instrument must see before the run starts by itself. The target is a green
@@ -182,6 +185,37 @@ def sees_placement_target(reading: Reading) -> bool:
 #: an enormous step in luminance, and a ramp coarse enough to miss it would miss the
 #: only part most displays get wrong.
 GREYSCALE_STEPS = 33
+
+#: The window peak is measured on. Smaller than everything else on purpose.
+#:
+#: An emissive panel's peak is a small-highlight figure: the limiter responds to total
+#: output, so the largest number the display reaches is the one it only has to hold over
+#: a few percent of the screen. That is what the EDID reports and what a manufacturer
+#: means by "1000 nits". Measuring it on the 10% window the rest of the run uses answers
+#: a different question -- a PG32UCDM gives 456 there against a declared 1015, and both
+#: are correct.
+#:
+#: A smaller window is not a more accurate measurement, it is a different operating
+#: point: the instrument's accuracy does not change, the panel's limiter does. Which
+#: figure belongs in the profile is a judgement, because the peak reaches Windows as
+#: tone-mapping metadata. Declare the 10% number and a 900-nit highlight is mapped down
+#: to 456 even where the panel could have shown it; declare the small-window number and
+#: small highlights land where they were graded while large bright areas are left to the
+#: panel's own limiter. The second is how HDR peak is normally specified.
+#:
+#: 3% because it was measured, not because it is conventional. Asking a PG32UCDM for full
+#: drive at every size gives 969, 974 and 978 nits at 1%, 2% and 3% -- within 1% of each
+#: other, because the limiter does not engage at all down there -- then 760 at 5%, 464 at
+#: 10%, and 243 full screen. So 3% is the *largest* window that still reaches peak, which
+#: makes it the one to use: the most light for the instrument to read, and no limiting.
+#: Going smaller costs signal and buys nothing.
+#:
+#: It also settles the declared figure. 978 against a declared 1015 is 96%, and the rest
+#: is about what an uncorrected colorimeter gives up on quantum-dot primaries, so the
+#: EDID's number is a 3%-or-smaller rating rather than something the panel never does.
+#: ``window_peak_nits`` records the 10% figure alongside so the gap is visible rather
+#: than inferred.
+PEAK_WINDOW_FRACTION = 0.03
 
 #: How far a ramp may go backwards before no curve can correct it. A 1-D LUT inverts
 #: the display's transfer function, and a function that is not monotonic has no inverse:
@@ -278,7 +312,14 @@ def plan(peak_nits: float, *, full: bool = True) -> tuple[MeasurementStep, ...]:
     balance = min(BALANCE_NITS, target / 2.0)
     core = (
         MeasurementStep("black", "Black level", BLACK, 0.0, settle_seconds=3.0),
-        MeasurementStep("white", "Peak white", WHITE, target, settle_seconds=2.0),
+        MeasurementStep(
+            "white", "Peak white", WHITE, target, settle_seconds=2.0,
+            window_fraction=PEAK_WINDOW_FRACTION,
+        ),
+        # The same drive on the window everything else uses. Not what the profile
+        # declares, but measured so the gap between the two is a number someone can look
+        # at rather than a discrepancy they have to work out for themselves.
+        MeasurementStep("window-white", "Peak white on the measurement window", WHITE, target),
         MeasurementStep("balance-white", "Reference white", WHITE, balance),
         MeasurementStep("red", "Red channel", (1.0, 0.0, 0.0), balance),
         MeasurementStep("green", "Green channel", (0.0, 1.0, 0.0), balance),
@@ -551,7 +592,13 @@ class Calibration:
     black_nits: float
     white_xy: tuple[float, float]
     channel_gains: tuple[float, float, float]
+    #: Peak on the window the rest of the run uses, when it was measured. Zero means it
+    #: was not. At or below ``peak_nits`` on any display with a brightness limiter, and
+    #: far below it on an emissive one.
+    window_peak_nits: float = 0.0
     window_fraction: float = WINDOW_AREA_FRACTION
+    #: The window ``peak_nits`` came from, which is deliberately not ``window_fraction``.
+    peak_window_fraction: float = PEAK_WINDOW_FRACTION
     #: Why no white balance was solved, if none was. Non-empty means ``channel_gains``
     #: is (1, 1, 1) because the readings could not support a correction -- not because
     #: the display measured neutral. The two look identical in the numbers and must not
@@ -756,6 +803,7 @@ def derive(
     reference = readings["balance-white"]
     return Calibration(
         peak_nits=readings["white"].Y,
+        window_peak_nits=readings["window-white"].Y if "window-white" in readings else 0.0,
         black_nits=max(0.0, readings["black"].Y),
         white_xy=(reference.x, reference.y),
         channel_gains=gains,
@@ -838,6 +886,97 @@ def _ramp_reversal(points: tuple[GreyPoint, ...]) -> float:
             worst = max(worst, (highest - point.measured_nits) / highest)
         highest = max(highest, point.measured_nits)
     return worst
+
+
+#: Sustained luminance is what the display holds with the whole screen lit, so it is
+#: measured on the whole screen. Nothing smaller answers the question.
+SUSTAINED_WINDOW_FRACTION = 1.0
+
+#: Before the first reading, and between the ones after it.
+SUSTAINED_SETTLE_SECONDS = 3.0
+SUSTAINED_INTERVAL_SECONDS = 4.0
+
+#: Two consecutive readings within this of each other means the limiter has stopped
+#: working and the number has settled. A fixed timer cannot know that: it is either long
+#: enough for the worst panel or too short for some, and a peak read before it settles is
+#: not a peak, it is a number on the way down.
+SUSTAINED_TOLERANCE = 0.02
+
+#: A hard ceiling on how long full-screen white stays up, whatever the readings do. This
+#: is the one patch in the whole app that lights every pixel at once, which is the exact
+#: stress case for an emissive panel, so "keep reading until it settles" needs an end
+#: even when it never does. Eight reads is about fifty seconds.
+SUSTAINED_MAX_READS = 8
+
+
+@dataclass(frozen=True, slots=True)
+class Sustained:
+    """What the display holds with the whole screen lit."""
+
+    nits: float
+    #: Every reading taken, in order, so a panel that never settled can be seen to have
+    #: been falling rather than merely reported as a number.
+    readings: tuple[float, ...]
+    #: Whether two consecutive readings agreed before the cap was reached.
+    settled: bool
+
+    @property
+    def fell_by(self) -> float:
+        """How far it dropped from the first reading to the last, as a fraction."""
+        if not self.readings or self.readings[0] <= 0.0:
+            return 0.0
+        return max(0.0, (self.readings[0] - self.readings[-1]) / self.readings[0])
+
+
+def sustained(
+    display: Display,
+    read: Callable[[], Reading],
+    *,
+    peak_nits: float,
+    sleep: Callable[[float], None] = time.sleep,
+    should_abort: Callable[[], bool] | None = None,
+    on_reading: Callable[[int, float], None] | None = None,
+) -> Sustained:
+    """Hold full-screen white and read until it stops falling.
+
+    Asks for ``peak_nits`` and lets the display's limiter decide, because the answer is
+    what the panel does rather than what it was told. Stops when two consecutive
+    readings agree, which is what "sustained" means, or at ``SUSTAINED_MAX_READS``.
+
+    Separate from ``run`` on purpose. It is slow, it does not change between runs the way
+    the greyscale does, and it is the only thing here that lights the whole panel at
+    once -- none of which belongs in a sweep somebody repeats to check their work.
+    """
+    target = max(80.0, min(10000.0, float(peak_nits)))
+    step = MeasurementStep(
+        "sustained", "Sustained luminance", WHITE, target,
+        settle_seconds=SUSTAINED_SETTLE_SECONDS,
+        window_fraction=SUSTAINED_WINDOW_FRACTION,
+    )
+
+    values: list[float] = []
+    for index in range(SUSTAINED_MAX_READS):
+        if should_abort is not None and should_abort():
+            raise Aborted()
+        display.show(step)
+        sleep(step.settle_seconds if index == 0 else SUSTAINED_INTERVAL_SECONDS)
+        if should_abort is not None and should_abort():
+            raise Aborted()
+        try:
+            reading = read()
+        except MeterError as exc:
+            raise MeasurementError(f"{step.label}: {exc}") from exc
+        values.append(max(0.0, reading.Y))
+        if on_reading is not None:
+            on_reading(index, values[-1])
+        if len(values) >= 2:
+            latest, previous = values[-1], values[-2]
+            if previous > 0.0 and abs(latest - previous) / previous <= SUSTAINED_TOLERANCE:
+                return Sustained(latest, tuple(values), True)
+
+    if not values:
+        raise MeasurementError("The sustained measurement took no readings.")
+    return Sustained(values[-1], tuple(values), False)
 
 
 def panel_response(

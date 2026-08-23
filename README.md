@@ -693,6 +693,22 @@ hues. About four minutes in total. The ramp is dense at the bottom on purpose --
 the bottom two stops are where a 5% step in signal is an enormous step in luminance, and
 where most displays go wrong.
 
+**Peak is measured on a 3% window, everything else on 10%**, because peak is a
+small-highlight figure: the limiter responds to total output, so the largest number a
+panel reaches is one it only has to hold over a few percent of the screen. That is what
+the EDID reports. Asking a PG32UCDM for full drive at every size gives 969, 974 and 978
+nits at 1%, 2% and 3% -- within 1% of each other, because the limiter does not engage
+down there -- then 760 at 5%, 464 at 10%, and 243 full screen. So 3% is the *largest*
+window that still reaches peak, which makes it the one to use: the most light for the
+instrument, and no limiting. 978 against a declared 1015 is 96%, and the rest is about
+what an uncorrected colorimeter gives up on quantum-dot primaries.
+
+The same drive is measured on the 10% window too and reported beside it, because a
+display with a brightness limiter has two peaks and quoting one invites the other to look
+like a fault. The green target is drawn at the *smallest* window in the run rather than
+the common one -- a meter centred well enough for the 10% box can still overhang a box a
+third of its size, and a patch edge under the aperture reads part black.
+
 When it finishes, the measured peak, black and white balance replace what the profile
 had, and the greyscale ramp is turned into the three per-channel curves the profile
 carries. Those do two things a single set of RGB trims cannot: they make a code deliver
@@ -707,6 +723,27 @@ the display's own primary. On a P3 panel whose native green is (0.2698, 0.6859) 
 patch read (0.3141, 0.5892) -- 0.0141 from BT.709 and 0.0967 from the panel. Those readings
 are exactly right for white balance, which acts on the signal this app sends, and useless
 as a description of the gamut. Press **Apply Edits** to write the result out.
+
+## Sustained luminance
+
+**Measure Sustained…**, in the Panel Luminance card. Everything else in the profile is
+measured; this was the one figure still taken on trust, from the EDID's declared
+frame-average. On the panel this was built against that reads 265.05 against the 243 the
+display actually holds.
+
+The whole screen goes white and is read until two consecutive readings agree, which is
+what *sustained* means -- a fixed timer is either long enough for the worst panel or too
+short for some, and a figure read before it settles is not a peak, it is a number on the
+way down. There is a hard ceiling of eight readings, about half a minute, whatever the
+readings do: this is the only patch in the app that lights every pixel at once, which is
+the stress case for an emissive panel, so "keep going until it settles" needs an end even
+when it never comes. A run that hits the ceiling is reported as an upper bound rather
+than as a measurement.
+
+It is kept out of the main run deliberately -- it is slow, it does not change between
+runs the way the greyscale does, and it is not something to repeat every time somebody
+checks their work. There is no placement target for it either: every pixel is lit, so it
+is the one measurement where aim does not matter.
 
 ## Displays whose channels do not add up
 

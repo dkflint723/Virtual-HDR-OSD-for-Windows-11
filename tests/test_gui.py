@@ -2144,6 +2144,65 @@ class RampReversalNoteTests(WindowTestCase):
         self.assertNotIn("NOT corrected", self.window.status_label.text())
 
 
+class SustainedMeasurementTests(WindowTestCase):
+    """The one figure in the profile that was still declared rather than measured.
+
+    Calibrate Display fills it from the EDID's frame-average. On the panel this was
+    built against that is 265.05 against the 243 the display actually holds -- about 9%
+    optimistic, and invisible without measuring it.
+    """
+
+    def result(self, nits=243.0, readings=(300.0, 250.0, 243.0), settled=True):
+        from sdr_hdr_profile_creator.measure import Sustained
+        return Sustained(nits=nits, readings=tuple(readings), settled=settled)
+
+    def test_the_button_is_offered_beside_the_number_it_sets(self):
+        self.assertTrue(hasattr(self.window, 'sustained_button'))
+
+    def test_a_settled_figure_is_adopted(self):
+        self.window.state.hdr.peak_luminance_nits = 456.0
+        self.window._sustained_finished(self.result(), '')
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 243.0, places=2)
+
+    def test_it_cannot_exceed_peak(self):
+        """A display that held more full-screen than it reached on a 3% window has told
+        us one of the two readings is wrong, and the profile is not the place to record
+        the contradiction."""
+        self.window.state.hdr.peak_luminance_nits = 456.0
+        self.window._sustained_finished(self.result(nits=900.0, readings=(900.0, 900.0)), '')
+        self.assertAlmostEqual(self.window.state.hdr.full_frame_luminance_nits, 456.0, places=2)
+        self.assertIn('cannot exceed', self.window.status_label.text())
+
+    def test_a_figure_that_never_settled_is_called_an_upper_bound(self):
+        """Reporting where it had got to as though it were where it stops would be the
+        quietest possible way to overstate a panel."""
+        self.window.state.hdr.peak_luminance_nits = 456.0
+        self.window._sustained_finished(
+            self.result(nits=260.0, readings=(400.0, 330.0, 290.0, 260.0), settled=False), ''
+        )
+        self.assertIn('upper bound', self.window.status_label.text())
+
+    def test_a_cancelled_run_changes_nothing(self):
+        before = self.window.state.hdr.full_frame_luminance_nits
+        self.window._sustained_finished(None, '')
+        self.assertEqual(self.window.state.hdr.full_frame_luminance_nits, before)
+        self.assertIn('cancelled', self.window.status_label.text().lower())
+
+    def test_a_failed_run_says_why_and_changes_nothing(self):
+        before = self.window.state.hdr.full_frame_luminance_nits
+        self.window._sustained_finished(None, 'the diffuser is closed')
+        self.assertEqual(self.window.state.hdr.full_frame_luminance_nits, before)
+        self.assertIn('diffuser', self.window.status_label.text())
+
+    def test_it_says_what_it_replaced(self):
+        self.window.state.hdr.peak_luminance_nits = 456.0
+        self.window.state.hdr.full_frame_luminance_nits = 265.05
+        self.window._sustained_finished(self.result(), '')
+        text = self.window.status_label.text()
+        self.assertIn('265.1', text)
+        self.assertIn('243', text)
+
+
 class AdditivityNoteTests(WindowTestCase):
     """Channels that do not add up are solved through, and said out loud."""
 
@@ -2659,10 +2718,11 @@ class MeterIntegrationTests(WindowTestCase):
         self.assertIn("contrast", text)
 
     def test_the_window_size_is_reported_beside_the_peak(self):
-        """Peak luminance means nothing without it: this panel is rated 1015
-        nits and reads 454 on a tenth of the screen."""
+        """Peak luminance means nothing without it. This panel is rated 1015 nits, reads
+        978 on the 3% window peak is measured at, and 456 on the 10% window the rest of
+        the run uses -- three true numbers that only agree once the size is stated."""
         self.window._measure_finished(self.calibration(), "")
-        self.assertIn("10% window", self.window.status_label.text())
+        self.assertIn("3% window", self.window.status_label.text())
 
     def test_an_unmeasurable_black_is_not_reported_as_infinite_contrast(self):
         """0.0000 is the instrument's floor, not a measurement of zero."""
@@ -2707,7 +2767,9 @@ class MeasurementBriefingTests(WindowTestCase):
                 super().__init__()
                 FakeWindow.instance = self
 
-            def show_placement_target(self):
+            def show_placement_target(self, fraction=None):
+                # On the class: drive() hands back the class, not an instance.
+                type(self).target_fraction = fraction
                 FakeWindow.targeted = True
                 # Stands in for the user putting the meter down and pressing Enter.
                 # Emitted synchronously, which only works because the app connects the
@@ -2760,6 +2822,21 @@ class MeasurementBriefingTests(WindowTestCase):
     def test_confirming_starts_the_run(self):
         _window, started = self.drive(QMessageBox.StandardButton.Ok)
         self.assertTrue(started)
+
+    def test_the_target_is_drawn_at_the_smallest_window_in_the_plan(self):
+        """Not the window most patches use. Peak is measured on a 3% window and the rest
+        on 10%, and a meter centred well enough for the 10% box can still overhang one a
+        third of its size -- a patch edge under the aperture reads part black and returns
+        a luminance nothing downstream can tell is wrong. Drawing the target at the
+        common size would put that failure on exactly the reading the small window
+        exists to get right."""
+        window, _started = self.drive(QMessageBox.StandardButton.Ok)
+        smallest = min(
+            step.window_fraction
+            for step in app_module.measure.plan(self.window.state.hdr.peak_luminance_nits)
+        )
+        self.assertEqual(window.target_fraction, smallest)
+        self.assertLess(window.target_fraction, app_module.measure.WINDOW_AREA_FRACTION)
 
     def test_the_surface_is_focused_so_escape_can_reach_it(self):
         """The abort path exists and is wired, but Escape has to arrive for any of it
@@ -3705,7 +3782,9 @@ class PeakPatchTargetTests(WindowTestCase):
                 # MeasureFocusTests.
                 type(self).focused = True
 
-            def show_placement_target(self):
+            def show_placement_target(self, fraction=None):
+                # On the class: drive() hands back the class, not an instance.
+                type(self).target_fraction = fraction
                 # The target is shown, then the run waits for the user to confirm the
                 # meter is on it. Confirm immediately so the sequence still runs here.
                 self.ready.emit()

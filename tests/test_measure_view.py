@@ -58,7 +58,8 @@ _BLUE = reading(9.0, 0.151222, 0.060916)
 
 GOOD_ORDER = [
     reading(0.0, 0.3130, 0.3290),          # black
-    reading(454.25, 0.3127, 0.3290),       # peak white, dimmed by the limiter
+    reading(454.25, 0.3127, 0.3290),       # peak white on the small window
+    reading(205.0, 0.3127, 0.3290),        # the same drive on the measurement window
     _combine(_RED, _GREEN, _BLUE),         # reference white, below the limiter
     _RED,
     _GREEN,
@@ -232,7 +233,7 @@ class MeasurementWorkerTests(unittest.TestCase):
         self.assertEqual(message, "")
         self.assertEqual(
             display.shown,
-            ["black", "white", "balance-white", "red", "green", "blue"],
+            ["black", "white", "window-white", "balance-white", "red", "green", "blue"],
         )
 
     def test_a_meter_failure_reports_a_message_and_no_calibration(self):
@@ -273,8 +274,8 @@ class MeasurementWorkerTests(unittest.TestCase):
         seen = []
         worker.progress.connect(lambda label, index, total: seen.append((label, index, total)))
         worker.run()
-        self.assertEqual(len(seen), 6)
-        self.assertEqual(seen[0][2], 6)
+        self.assertEqual(len(seen), len(GOOD_ORDER))
+        self.assertEqual(seen[0][2], len(GOOD_ORDER))
         self.assertEqual(seen[0][0], "Black level")
 
 

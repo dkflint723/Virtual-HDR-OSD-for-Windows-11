@@ -24,6 +24,12 @@ from sdr_hdr_profile_creator.measure import (
     Calibration,
     GreyPoint,
     MAX_RAMP_REVERSAL,
+    SUSTAINED_MAX_READS,
+    SUSTAINED_SETTLE_SECONDS,
+    SUSTAINED_INTERVAL_SECONDS,
+    sustained,
+    PEAK_WINDOW_FRACTION,
+    WINDOW_AREA_FRACTION,
     _additivity_error,
     _ramp_reversal,
     balance_problems,
@@ -80,7 +86,12 @@ NEUTRAL = dict(
     NEUTRAL_CHANNELS,
     black=reading(0.0, 0.3130, 0.3290),
     white=DIMMED_PEAK,
-    **{"balance-white": combine(NEUTRAL_CHANNELS)},
+    **{
+        "balance-white": combine(NEUTRAL_CHANNELS),
+        # The same drive on the window the rest of the run uses. Lower than peak,
+        # because a brightness limiter responds to total output.
+        "window-white": reading(PEAK * 0.45, 0.3130, 0.3290),
+    },
 )
 
 # The chromaticities actually measured on the development panel, with red raised
@@ -111,7 +122,7 @@ def without(key: str) -> dict[str, Reading]:
 
 
 class PlanTests(unittest.TestCase):
-    CORE = ["black", "white", "balance-white", "red", "green", "blue"]
+    CORE = ["black", "white", "window-white", "balance-white", "red", "green", "blue"]
 
     def test_measures_black_peak_and_a_balance_set(self):
         """The short plan is exactly the six patches the profile is built from."""
@@ -364,6 +375,112 @@ class BalanceProblemTests(unittest.TestCase):
         self.assertEqual(balance_problems(without("red")), [])
 
 
+class SustainedTests(unittest.TestCase):
+    """Full screen, read until it stops falling, with an end even if it never does."""
+
+    def setUp(self):
+        self.display = FakeDisplay()
+        self.slept = []
+
+    def run_sustained(self, values, **kwargs):
+        order = iter(values)
+        return sustained(
+            self.display, lambda: reading(next(order), 0.3127, 0.3290),
+            peak_nits=1000.0, sleep=self.slept.append, **kwargs
+        )
+
+    def test_it_lights_the_whole_screen(self):
+        """Sustained is what the display holds with everything lit. Nothing smaller
+        answers the question."""
+        self.run_sustained([250.0, 249.0])
+        self.assertEqual(self.display.shown, ["sustained", "sustained"])
+        self.assertEqual(self.display.steps[0].window_fraction, 1.0)
+
+    def test_it_stops_once_two_readings_agree(self):
+        result = self.run_sustained([300.0, 260.0, 250.0, 249.0, 1.0, 1.0])
+        self.assertTrue(result.settled)
+        self.assertAlmostEqual(result.nits, 249.0)
+        self.assertEqual(result.readings, (300.0, 260.0, 250.0, 249.0))
+
+    def test_a_panel_that_never_settles_still_ends(self):
+        """The one patch that lights every pixel needs an end even when the readings do
+        not give it one."""
+        falling = [500.0 * (0.5 ** n) for n in range(SUSTAINED_MAX_READS + 4)]
+        result = self.run_sustained(falling)
+        self.assertFalse(result.settled)
+        self.assertEqual(len(result.readings), SUSTAINED_MAX_READS)
+
+    def test_it_reports_how_far_it_fell(self):
+        result = self.run_sustained([400.0, 300.0, 250.0, 249.0])
+        self.assertAlmostEqual(result.fell_by, (400.0 - 249.0) / 400.0, places=6)
+
+    def test_a_steady_panel_settles_on_the_second_reading(self):
+        result = self.run_sustained([243.0, 243.0])
+        self.assertTrue(result.settled)
+        self.assertEqual(len(result.readings), 2)
+
+    def test_the_first_wait_is_longer_than_the_rest(self):
+        """The limiter engages while the patch is coming up, so the first reading needs
+        longer than the ones checking whether it has stopped."""
+        self.run_sustained([300.0, 260.0, 259.0])
+        self.assertEqual(self.slept[0], SUSTAINED_SETTLE_SECONDS)
+        self.assertTrue(all(s == SUSTAINED_INTERVAL_SECONDS for s in self.slept[1:]))
+
+    def test_abort_stops_it(self):
+        with self.assertRaises(Aborted):
+            self.run_sustained([300.0, 260.0], should_abort=lambda: True)
+
+    def test_a_meter_failure_is_reported_not_swallowed(self):
+        def bad():
+            raise MeterError("diffuser closed")
+        with self.assertRaises(MeasurementError):
+            sustained(self.display, bad, peak_nits=1000.0, sleep=self.slept.append)
+
+
+class PeakWindowTests(unittest.TestCase):
+    """Peak is measured on a smaller window than everything else, on purpose.
+
+    An emissive panel's limiter responds to total output, so the largest number it
+    reaches is one it only has to hold over a few percent of the screen -- which is what
+    the EDID reports and what a manufacturer means by a peak figure. Measuring it on the
+    window the rest of the run uses answers a different question and reads far lower.
+    """
+
+    def steps(self):
+        return {step.key: step for step in plan(1000.0)}
+
+    def test_peak_uses_a_smaller_window_than_the_rest(self):
+        steps = self.steps()
+        self.assertEqual(steps["white"].window_fraction, PEAK_WINDOW_FRACTION)
+        self.assertLess(steps["white"].window_fraction, WINDOW_AREA_FRACTION)
+
+    def test_every_other_patch_uses_the_common_window(self):
+        for key, step in self.steps().items():
+            if key == "white":
+                continue
+            self.assertEqual(step.window_fraction, WINDOW_AREA_FRACTION, key)
+
+    def test_the_same_drive_is_measured_on_both_windows(self):
+        """Otherwise the two numbers differ for two reasons at once and neither is
+        attributable to the limiter."""
+        steps = self.steps()
+        self.assertEqual(steps["window-white"].nits, steps["white"].nits)
+        self.assertEqual(steps["window-white"].rgb, steps["white"].rgb)
+
+    def test_both_peaks_are_carried_through(self):
+        result = derive(NEUTRAL)
+        self.assertAlmostEqual(result.peak_nits, PEAK, places=3)
+        self.assertAlmostEqual(result.window_peak_nits, PEAK * 0.45, places=3)
+        self.assertEqual(result.peak_window_fraction, PEAK_WINDOW_FRACTION)
+
+    def test_a_run_without_the_window_patch_still_derives(self):
+        """Readings from before this existed, and any short run that skips it. Zero says
+        it was not measured rather than that the display produced nothing."""
+        result = derive(without("window-white"))
+        self.assertAlmostEqual(result.peak_nits, PEAK, places=3)
+        self.assertEqual(result.window_peak_nits, 0.0)
+
+
 class RampReversalTests(unittest.TestCase):
     """A display that gets dimmer when asked for more light cannot be corrected.
 
@@ -533,15 +650,19 @@ class RefusedBalanceTests(unittest.TestCase):
 class FakeDisplay:
     def __init__(self):
         self.shown = []
+        # The steps themselves as well as their keys: the window a patch is shown at is
+        # part of what was asked for, and a key cannot carry it.
+        self.steps = []
 
     def show(self, step):
         self.shown.append(step.key)
+        self.steps.append(step)
 
 
 class RunTests(unittest.TestCase):
     """Sequencing, with both the screen and the instrument injected."""
 
-    ORDER = ("black", "white", "balance-white", "red", "green", "blue")
+    ORDER = ("black", "white", "window-white", "balance-white", "red", "green", "blue")
 
     def setUp(self):
         self.display = FakeDisplay()
@@ -588,7 +709,7 @@ class RunTests(unittest.TestCase):
 
         run(self.display, read, peak_nits=1015.24, sleep=sleep, full=False)
 
-        self.assertEqual(len(self.slept), 6)
+        self.assertEqual(len(self.slept), len(self.ORDER))
         self.assertTrue(all(delay > 0 for delay in self.slept))
 
         # Every read must be preceded by a settle for the patch just shown.
@@ -606,7 +727,7 @@ class RunTests(unittest.TestCase):
             on_progress=lambda step, i, total: seen.append((step.key, i, total)),
         )
         self.assertEqual([entry[0] for entry in seen], list(self.ORDER))
-        self.assertEqual(seen[0][2], 6)
+        self.assertEqual(seen[0][2], len(self.ORDER))
 
     def test_a_failed_reading_ends_the_run_rather_than_being_skipped(self):
         def reader():
@@ -636,8 +757,8 @@ class RunTests(unittest.TestCase):
         nothing the run measured describes the display and there is nothing to keep.
         """
         order = iter([NEUTRAL["black"], reading(3.0, 0.3127, 0.3290),
-                      NEUTRAL["balance-white"], NEUTRAL["red"],
-                      NEUTRAL["green"], NEUTRAL["blue"]])
+                      NEUTRAL["window-white"], NEUTRAL["balance-white"],
+                      NEUTRAL["red"], NEUTRAL["green"], NEUTRAL["blue"]])
         with self.assertRaises(MeasurementError):
             self.run_sequence(lambda: next(order))
 
@@ -645,7 +766,7 @@ class RunTests(unittest.TestCase):
         """Peak and black were read directly. They do not stop being measurements
         because the white balance could not be solved from the patches beside them."""
         same = reading(BALANCE / 3.0, 0.3127, 0.3290)
-        order = iter([NEUTRAL["black"], NEUTRAL["white"],
+        order = iter([NEUTRAL["black"], NEUTRAL["white"], NEUTRAL["window-white"],
                       reading(BALANCE, 0.3127, 0.3290), same, same, same])
         result = self.run_sequence(lambda: next(order))
         self.assertAlmostEqual(result.peak_nits, PEAK, places=2)
@@ -845,15 +966,18 @@ class FullSweepPlanTests(unittest.TestCase):
 
     PEAK = 1015.24
 
-    def test_the_core_six_still_come_first_and_unchanged(self):
+    def test_the_core_patches_still_come_first_and_unchanged(self):
         """Everything the profile is built from is derived from these, so a longer run
         must not change what a short one would have produced."""
         full = plan(self.PEAK)
         quick = plan(self.PEAK, full=False)
-        self.assertEqual(len(quick), 6)
-        self.assertEqual([s.key for s in full[:6]], [s.key for s in quick])
-        for long, short in zip(full[:6], quick):
-            self.assertEqual((long.rgb, long.nits), (short.rgb, short.nits))
+        self.assertEqual(len(quick), 7)
+        self.assertEqual([s.key for s in full[:7]], [s.key for s in quick])
+        for long, short in zip(full[:7], quick):
+            self.assertEqual(
+                (long.rgb, long.nits, long.window_fraction),
+                (short.rgb, short.nits, short.window_fraction),
+            )
 
     def test_it_measures_more_than_thirty_of_each(self):
         full = plan(self.PEAK)

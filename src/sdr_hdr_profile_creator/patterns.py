@@ -872,10 +872,14 @@ def placement_frame(
     measuring starts the screen carries a single patch on black, because every other lit
     pixel is light the instrument would integrate along with the patch.
 
-    A tenth of the screen *area*, matching ``measurement_frame`` exactly, so a meter
-    aligned to this target is aligned to every patch that follows. That matters more
-    than it sounds: a patch edge under the instrument's aperture reads part black and
-    returns a luminance that is wrong in a way nothing downstream can detect.
+    ``fraction`` must be the *smallest* window any patch in the run will use, not the
+    one most of them use. Covering this target has to guarantee covering every patch,
+    and the peak patch is deliberately smaller than the rest -- a meter centred well
+    enough for a tenth of the screen can still overhang a patch a thirtieth of it, and
+    a patch edge under the instrument's aperture reads part black and returns a
+    luminance that is wrong in a way nothing downstream can detect. Drawing the target
+    at the size most patches use would put that failure exactly on the one reading the
+    small window exists to get right.
     """
     width, height = max(1, int(width)), max(1, int(height))
     level = context.encode(PLACEMENT_NITS)

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import time
+from types import SimpleNamespace
 from datetime import datetime
 from pathlib import Path
 
@@ -775,6 +776,18 @@ class MainWindow(FluentWidget):
             "profile's lumi tag. It cannot exceed peak; raising it past peak raises "
             "peak with it."
         )))
+        # Beside the number it sets, rather than in the top bar. It is the one figure
+        # here that is still declared rather than measured -- Calibrate Display takes it
+        # from the EDID's frame-average, which on the panel this was built against is
+        # about 9% above what the display actually holds.
+        self.sustained_button = PushButton('Measure Sustained…', luminance_card)
+        self.sustained_button.setToolTip(
+            'Light the whole screen and read until the number stops falling. Takes up to '
+            'half a minute and needs a colorimeter. Kept separate from Measure… '
+            'because it is the only patch that lights every pixel at once.'
+        )
+        self.sustained_button.clicked.connect(self._measure_sustained)
+        luminance_card.add_widget(self.sustained_button)
         luminance_card.add_widget(self._make_control(ControlSpec(
             "minimum_luminance_nits", "Black Level", 0.0, 100.0, 0.0, 0.0001, " nits", 4, "panel",
             "How much light the display emits at black. Near zero on an OLED, so the "
@@ -2234,6 +2247,222 @@ class MainWindow(FluentWidget):
         self._save_state_now()
         return True
 
+    def _meter_preconditions(self, what: str):
+        """Everything both meter actions need, or ``None`` having said what is missing.
+
+        Shared so the two cannot drift: a sustained measurement that accepted an SDR
+        display, or offered to locate Argyll in different words, would be two answers to
+        one question. ``what`` names the action in the messages that mention it.
+        """
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a display first.", "error")
+            return None
+        if display.current_mode != "HDR":
+            self._set_status(
+                f"Turn HDR on for {display.friendly_name} before {what}. The patches are "
+                "shown in absolute luminance, which only means anything in HDR.",
+                "warning",
+            )
+            return None
+        busy = self._fullscreen_surface_busy()
+        if busy:
+            self._set_status(busy, "warning")
+            return None
+
+        spotread = self._spotread()
+        if spotread is None:
+            answer = QMessageBox.question(
+                self,
+                "ArgyllCMS not found",
+                "Measuring needs ArgyllCMS, a separate free download from argyllcms.com. "
+                "Get the executable distribution, unzip it somewhere without spaces in the "
+                "path, and point this at the bin folder inside it.\n\nLocate it now?",
+            )
+            if answer != QMessageBox.StandardButton.Yes or not self._choose_argyll_path():
+                return None
+            spotread = self._spotread()
+            if spotread is None:
+                return None
+
+        try:
+            instruments = list_instruments(spotread)
+        except MeterError as exc:
+            self._set_status(f"Could not ask Argyll what it can see: {exc}", "error")
+            return None
+        if not instruments:
+            self._set_status(
+                "Argyll found no colorimeter. Check that it is plugged in, and that no other "
+                "calibration software is holding it open.",
+                "error",
+            )
+            return None
+
+        try:
+            sdr_white = get_sdr_white_level_nits(display)
+        except Exception:
+            sdr_white = 240.0
+        panel = read_panel_metadata(display.device_path)
+        # Ask for what the panel claims it can do, not for what was measured last
+        # time. Driving the peak patch at the stored figure makes the measurement
+        # self-fulfilling: the first run asked for the EDID's 1015 nits and found
+        # 450, and every run after asked for 450 and found 450, confirming only
+        # that the display can produce what it was told to.
+        peak = self.state.hdr.peak_luminance_nits
+        if panel is not None and panel.credible:
+            peak = max(peak, panel.peak_nits)
+        return SimpleNamespace(
+            display=display, spotread=spotread, instrument=instruments[0],
+            sdr_white=sdr_white, panel=panel,
+            capability=capability_for_device_name(display.gdi_name), peak=peak,
+        )
+
+    def _measure_sustained(self) -> None:
+        """Measure what the display holds with the whole screen lit.
+
+        Kept out of the main run deliberately. It is slow, it does not change between
+        runs the way the greyscale does, and it is the only thing in the app that lights
+        every pixel at once -- which is the stress case for an emissive panel and not
+        something to repeat every time somebody checks their work.
+        """
+        ready = self._meter_preconditions("measuring sustained luminance")
+        if ready is None:
+            return
+
+        longest = int(
+            measure.SUSTAINED_SETTLE_SECONDS
+            + (measure.SUSTAINED_MAX_READS - 1) * measure.SUSTAINED_INTERVAL_SECONDS
+        )
+        proceed = QMessageBox.question(
+            self,
+            "Measure sustained luminance",
+            f"The whole screen goes white at {ready.peak:,.0f} nits and is read until the "
+            f"reading stops falling, which takes at most {longest} seconds.\n\n"
+            "This is the only patch that lights every pixel at once. That is the stress "
+            "case for an emissive panel, so it is kept out of the main run and is worth "
+            "doing once rather than routinely.\n\n"
+            "Put the meter anywhere on the screen. Esc stops it, and nothing is changed "
+            "if you do.",
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Ok,
+        )
+        if proceed != QMessageBox.StandardButton.Ok:
+            self._set_status("Sustained measurement cancelled. Nothing was changed.", "ok")
+            return
+
+        window = measure_view.MeasureWindow(ready.capability, ready.sdr_white, ready.panel)
+        screen = self._screen_for(ready.display)
+        if screen is not None:
+            window.setGeometry(screen.geometry())
+        window.showFullScreen()
+        QApplication.processEvents()
+        if not window.begin():
+            window.close()
+            self._set_status(
+                "Measuring needs an HDR surface, which this display did not provide: "
+                f"{window.failure}",
+                "error",
+            )
+            return
+        # Same reason as the sweep: without focus Escape goes to the covered main window
+        # and the abort path is unreachable while the dialog has just promised it works.
+        window.activateWindow()
+        window.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._measure_window = window
+
+        # No placement target. Every pixel is lit, so there is nowhere on the screen the
+        # instrument could be that would read the wrong thing -- the one measurement here
+        # where aim genuinely does not matter.
+        self._log_meter({
+            "event": "sustained-start",
+            "display": ready.display.friendly_name,
+            "instrument": ready.instrument.label,
+            "requested_nits": ready.peak,
+        })
+        self._set_status(
+            "Measuring sustained luminance. The screen stays white until the reading "
+            "settles. Esc stops it.",
+            "warning",
+        )
+        thread, worker = measure_view.start_sustained(
+            window,
+            lambda: read_emissive(ready.spotread, port=ready.instrument.port),
+            ready.peak,
+            self._sustained_reading,
+            self._sustained_finished,
+        )
+        self._measure_thread = thread
+        self._measure_worker = worker
+
+    def _sustained_reading(self, index: int, nits: float) -> None:
+        """Say what each reading was, so a slow settle reads as progress not a hang."""
+        self._set_status(
+            f"Sustained luminance, reading {index + 1} of at most "
+            f"{measure.SUSTAINED_MAX_READS}: {nits:,.1f} nits. Esc stops it.",
+            "warning",
+        )
+        self._log_meter({"event": "sustained-reading", "index": index, "nits": nits})
+
+    def _sustained_finished(self, result, message: str) -> None:
+        """Adopt a settled figure, or explain why there is not one."""
+        window = getattr(self, "_measure_window", None)
+        if window is not None:
+            window.close()
+        self._measure_window = None
+        self._measure_thread = None
+        self._measure_worker = None
+
+        if result is None:
+            self._log_meter({
+                "event": "sustained-cancelled" if not message else "sustained-refused",
+                "message": message,
+            })
+            if message:
+                self._set_status(f"Sustained measurement stopped: {message}", "error")
+            else:
+                self._set_status("Sustained measurement cancelled. Nothing was changed.", "ok")
+            return
+
+        state = self.state.hdr
+        # Cannot exceed peak. A display that measured higher full-screen than it did on a
+        # 3% window has told us something is wrong with one of the two readings, and the
+        # profile is not the place to record the contradiction.
+        adopted = max(80.0, min(state.peak_luminance_nits, result.nits))
+        previous = state.full_frame_luminance_nits
+        state.full_frame_luminance_nits = adopted
+        self._save_state_now()
+        self._load_mode_into_controls()
+
+        self._log_meter({
+            "event": "sustained",
+            "nits": result.nits,
+            "adopted": adopted,
+            "settled": result.settled,
+            "readings": list(result.readings),
+            "fell_by": result.fell_by,
+            "previous": previous,
+        })
+
+        note = ""
+        if not result.settled:
+            note = (
+                f" It was still falling after {len(result.readings)} readings, so this is "
+                "where it had got to rather than where it stops -- treat it as an upper "
+                "bound."
+            )
+        elif result.fell_by > 0.02:
+            note = f" It fell {result.fell_by:.0%} from the first reading before settling."
+        if adopted < result.nits:
+            note += (
+                f" Held at the measured peak of {adopted:,.1f}, because full screen cannot "
+                "exceed a small window."
+            )
+        self._set_status(
+            f"Sustained luminance measured {result.nits:,.1f} nits with the whole screen "
+            f"lit, replacing {previous:,.1f}.{note} Press Apply Edits to store it.",
+            "ok",
+        )
+
     def _measure_with_meter(self) -> None:
         """Measure this display with a colorimeter and adopt the readings."""
         display = self._selected_display()
@@ -2369,7 +2598,9 @@ class MainWindow(FluentWidget):
             lambda: self._start_measurement(window, display, spotread, instrument, peak)
         )
 
-        if not window.show_placement_target():
+        # The smallest window in the plan, not the common one: a meter placed on the
+        # target has to cover every patch, and peak is measured on a smaller one.
+        if not window.show_placement_target(min(step.window_fraction for step in patches)):
             window.close()
             self._measure_window = None
             self._set_status(
@@ -2623,6 +2854,17 @@ class MainWindow(FluentWidget):
         self._save_state_now()
         self._load_mode_into_controls()
 
+        # Both numbers, because a display with a brightness limiter has two peaks and
+        # quoting one invites the other to look like a fault. The EDID reports the
+        # small-window figure; this used to report the 10% one, and the gap between them
+        # read as the meter disagreeing with the panel.
+        window_peak_note = ""
+        if result.window_peak_nits > 0.0:
+            window_peak_note = (
+                f" ({result.window_peak_nits:.1f} on the {result.window_fraction:.0%} "
+                "window the rest of the run uses)"
+            )
+
         contrast = result.contrast
         contrast_text = (
             "contrast too high to measure" if contrast == float("inf")
@@ -2698,7 +2940,8 @@ class MainWindow(FluentWidget):
             level = "warning"
             self._set_status(
                 f"Measured {result.peak_nits:.1f} nits peak on a "
-                f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
+                f"{result.peak_window_fraction:.0%} window{window_peak_note} and "
+                f"{result.black_nits:.4f} black "
                 f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
                 "Press Apply Edits to store what was measured.",
                 level,
@@ -2714,7 +2957,8 @@ class MainWindow(FluentWidget):
             )
         self._set_status(
             f"Measured {result.peak_nits:.1f} nits peak on a "
-            f"{result.window_fraction:.0%} window and {result.black_nits:.4f} black "
+            f"{result.peak_window_fraction:.0%} window{window_peak_note} and "
+            f"{result.black_nits:.4f} black "
             f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
             "Press Apply Edits to store it.",
             level,
