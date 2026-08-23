@@ -820,6 +820,15 @@ what stops two passes doubling a correction that only needed applying once. Meas
 against a simulated display, one pass takes a 17% luminance error to 0.1%, and three
 further passes leave it there.
 
+**Do not clear the calibration before measuring again.** It is the right habit with
+software that writes into the display, and the wrong one here. Each run is folded into
+what is already applied, so a second run refines rather than repeats -- and Reset Sliders
+clears the measured greyscale correction along with the trims, because the two are
+paired. The correction records what each channel delivered for the code the trims sent
+it; keeping one without the other describes a display that no longer exists. Measured on
+a PG32UCDM as a 15% shortfall through the midrange after a reset that zeroed
+(-16.59, 0, -5.01) and kept the correction solved under it.
+
 It also means the correction in force has to still be valid. **If you change anything on
 the monitor -- picture mode, colour temperature, brightness, HDR mode -- press Reset
 Sliders before measuring again.** Reset Sliders asks separately about the measured

@@ -2335,34 +2335,43 @@ class MeasuredResponseTests(WindowTestCase):
         self.window._measure_finished(self.calibration(), "")
         self.assertEqual(self.window.state.hdr.panel_source_key, "PANEL-A")
 
-    def test_resetting_the_sliders_keeps_the_measurement_unless_asked(self):
-        """A reset that silently threw away a four minute meter run would be an
-        expensive misunderstanding of what "reset the sliders" means."""
+    def test_resetting_the_sliders_clears_the_measurement_with_them(self):
+        """They are one thing. The correction records what each channel delivered for
+        the code the trims sent it, so keeping it while zeroing the trims pairs a
+        measurement with a matrix that no longer exists -- measured on a PG32UCDM as a
+        15% shortfall through the midrange after exactly that."""
         self.window._measure_finished(self.calibration(), "")
-        stored = self.window.state.hdr.panel_response
-        answers = [
-            app_module.QMessageBox.StandardButton.Yes,   # yes, reset the sliders
-            app_module.QMessageBox.StandardButton.No,    # no, keep the measurement
-        ]
+        self.assertTrue(self.window.state.hdr.panel_response)
         with mock.patch.object(
-            app_module.QMessageBox, "question", side_effect=answers
-        ) as ask:
-            self.window._reset_all_controls()
-        self.assertEqual(ask.call_count, 2, "the measurement should be asked about")
-        self.assertEqual(self.window.state.hdr.panel_response, stored)
-        self.assertIn("kept", self.window.status_label.text())
-
-    def test_the_measurement_can_be_discarded_with_the_sliders(self):
-        self.window._measure_finished(self.calibration(), "")
-        answers = [
-            app_module.QMessageBox.StandardButton.Yes,
-            app_module.QMessageBox.StandardButton.Yes,
-        ]
-        with mock.patch.object(app_module.QMessageBox, "question", side_effect=answers):
+            app_module.QMessageBox, "question",
+            return_value=app_module.QMessageBox.StandardButton.Yes,
+        ):
             self.window._reset_all_controls()
         self.assertEqual(self.window.state.hdr.panel_response, ())
         self.assertEqual(self.window.state.hdr.panel_response_weights, ())
         self.assertIn("discarded", self.window.status_label.text())
+
+    def test_the_dialog_says_the_measurement_goes_too(self):
+        """Losing a four minute meter run is worth a sentence before it happens."""
+        self.window._measure_finished(self.calibration(), "")
+        with mock.patch.object(
+            app_module.QMessageBox, "question",
+            return_value=app_module.QMessageBox.StandardButton.Cancel,
+        ) as ask:
+            self.window._reset_all_controls()
+        body = " ".join(str(arg) for arg in ask.call_args.args)
+        self.assertIn("greyscale", body.lower())
+        self.assertTrue(self.window.state.hdr.panel_response, "cancel must change nothing")
+
+    def test_it_is_one_question_not_two(self):
+        """Asking separately made keeping the mismatched pair the default."""
+        self.window._measure_finished(self.calibration(), "")
+        with mock.patch.object(
+            app_module.QMessageBox, "question",
+            return_value=app_module.QMessageBox.StandardButton.Yes,
+        ) as ask:
+            self.window._reset_all_controls()
+        self.assertEqual(ask.call_count, 1)
 
     def test_nothing_is_asked_when_there_is_no_measurement(self):
         """A dialog about a correction that does not exist is just noise."""

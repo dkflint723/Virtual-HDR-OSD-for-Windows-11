@@ -1098,7 +1098,12 @@ class MainWindow(FluentWidget):
             self,
             "Reset All Sliders",
             "Return every slider to its neutral default?\n\n"
-            "The loaded base profile is kept. Your current adjustments cannot be recovered afterwards.",
+            "The loaded base profile is kept. Your current adjustments cannot be recovered "
+            "afterwards.\n\n"
+            "Any measured greyscale correction goes with them. The two are paired — the "
+            "correction records what each channel delivered for the code the trims sent "
+            "it, so keeping one without the other describes a display that no longer "
+            "exists. Measuring again is the way back.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )
@@ -1117,24 +1122,18 @@ class MainWindow(FluentWidget):
         # what "reset the sliders" means. Keeping it silently would be its own trap,
         # because the profile would go on being shaped by something the dialog just
         # implied had been cleared.
+        # Cleared with the trims, not asked about separately. They are one thing: the
+        # response records what each channel delivered for the code it was sent, and the
+        # code it was sent came through the matrix the trims build. Keeping the response
+        # while zeroing the trims pairs a measurement with a matrix that no longer
+        # exists -- measured on a PG32UCDM as a 15% shortfall through the midrange after
+        # a reset that discarded (-16.59, 0, -5.01) and kept the response solved under
+        # it. Asking about it separately, which this used to do, made that the default.
         discarded = False
         if self.state.hdr.panel_response:
-            answer = QMessageBox.question(
-                self,
-                "Measured Greyscale Correction",
-                "The sliders are back to neutral.\n\n"
-                "A measured greyscale correction is also stored for this display, from "
-                "the last colorimeter run. It is a measurement rather than a slider, so "
-                "it has been kept and the profile is still shaped by it.\n\n"
-                "Discard it as well? Getting it back means measuring again.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer == QMessageBox.StandardButton.Yes:
-                self.state.hdr.panel_response = ()
-                self.state.hdr.panel_response_weights = ()
-                discarded = True
-
+            self.state.hdr.panel_response = ()
+            self.state.hdr.panel_response_weights = ()
+            discarded = True
         self._save_state_now()
         kept = (
             " The measured greyscale correction was kept."
