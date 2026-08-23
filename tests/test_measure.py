@@ -506,6 +506,27 @@ class RampReversalTests(unittest.TestCase):
         points = self.ramp([(38.44, 85.36), (47.53, 106.28), (58.52, 61.55), (71.80, 75.06)])
         self.assertAlmostEqual(_ramp_reversal(points), (106.28 - 61.55) / 106.28, places=6)
 
+    def test_a_dip_that_recovers_is_not_a_cliff(self):
+        """The real numbers from a good preset: one reading of 257 between neighbours of
+        307 and 359. Sixteen percent down and back above the previous high immediately.
+        Blocking a four-minute run over one noisy patch is the failure this avoids."""
+        points = self.ramp([(279.49, 306.879), (336.93, 257.392), (405.71, 359.057),
+                            (488.04, 462.720)])
+        self.assertEqual(_ramp_reversal(points), 0.0)
+
+    def test_a_sustained_fall_is_still_a_cliff(self):
+        """The real numbers from a preset that could not be corrected: down from 106 to
+        60, and still under 106 five points later. That has no inverse."""
+        points = self.ramp([(38.44, 85.360), (47.53, 106.284), (58.52, 61.545),
+                            (71.80, 75.055), (87.81, 91.792), (107.09, 112.849)])
+        self.assertAlmostEqual(_ramp_reversal(points), (106.284 - 61.545) / 106.284, places=6)
+
+    def test_recovery_must_be_above_where_it_fell_from(self):
+        """Climbing again is not recovering. A ramp that dips and then rises without
+        passing its earlier high still has two codes for the same luminance."""
+        points = self.ramp([(10.0, 100.0), (20.0, 60.0), (30.0, 70.0), (40.0, 80.0)])
+        self.assertGreater(_ramp_reversal(points), 0.3)
+
     def test_noise_in_the_deep_shadows_does_not_count(self):
         """The ramp floor is half a nit, where the instrument's own noise is a large
         fraction of the reading. A step backwards there says nothing about the display."""

@@ -237,6 +237,12 @@ PEAK_WINDOW_FRACTION = 0.03
 #: changing it.
 MAX_RAMP_REVERSAL = 0.05
 
+#: How far past a dip to look for a recovery before calling it a cliff. Two, because a
+#: settling artefact or a momentary limiter engagement shows up in one reading and is
+#: bracketed by its neighbours, while a display with no inverse stays down -- the one
+#: measured here took five points to climb back past where it fell from.
+REVERSAL_RECOVERY_POINTS = 2
+
 #: Reversals below this level are ignored. The ramp floor is half a nit, where the
 #: instrument's own noise is a large fraction of the reading, and a step backwards there
 #: says nothing about the display.
@@ -880,17 +886,38 @@ def _channel_weights(readings: dict[str, Reading]) -> tuple[float, ...]:
 
 
 def _ramp_reversal(points: tuple[GreyPoint, ...]) -> float:
-    """The largest step backwards in a measured ramp, as a fraction of the peak so far.
+    """The largest step backwards the ramp does not recover from.
 
     Zero for a ramp that only ever climbs, which is every display that can be corrected.
+
+    A dip that recovers is not counted, and the distinction is the whole point. What
+    makes a display uncorrectable is a transfer function with no inverse -- a *sustained*
+    fall, where a whole stretch of the ramp sits below a level reached earlier, so a
+    range of luminances has no single code that produces it. One reading below its
+    neighbours is not that. It is a patch caught while the panel was still settling, or
+    the limiter engaging for a moment near the top of the range, and the points either
+    side bracket it.
+
+    Both shapes were measured on a PG32UCDM. A preset with a real cliff dropped from
+    106.4 nits to 60.3 and stayed under 106 for five more points before climbing past it.
+    A good preset produced a single reading of 257 between neighbours of 307 and 359 --
+    16% down, recovered immediately, and blocking the correction over it wasted a
+    four-minute run for one noisy patch.
     """
+    usable = [
+        point for point in sorted(points, key=lambda p: p.target_nits)
+        if point.target_nits > 0.0 and point.measured_nits >= REVERSAL_FLOOR_NITS
+    ]
     worst = 0.0
     highest = 0.0
-    for point in sorted(points, key=lambda p: p.target_nits):
-        if point.target_nits <= 0.0 or point.measured_nits < REVERSAL_FLOOR_NITS:
-            continue
+    for index, point in enumerate(usable):
         if highest > 0.0 and point.measured_nits < highest:
-            worst = max(worst, (highest - point.measured_nits) / highest)
+            recovered = any(
+                later.measured_nits > highest
+                for later in usable[index + 1 : index + 1 + REVERSAL_RECOVERY_POINTS]
+            )
+            if not recovered:
+                worst = max(worst, (highest - point.measured_nits) / highest)
         highest = max(highest, point.measured_nits)
     return worst
 
