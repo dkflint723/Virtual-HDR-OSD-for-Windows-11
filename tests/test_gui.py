@@ -2101,6 +2101,35 @@ class MeasurementIntentTests(WindowTestCase):
         grey = {s.key for s in app_module.measure.plan(1000.0) if s.key.startswith("grey-")}
         self.assertEqual(set(intent), grey)
 
+    def test_a_stored_correction_does_not_move_the_target(self):
+        """The intent is what the controls ask for. Including the measured correction
+        makes it chase itself -- each pass lowers the code, which lowers the recorded
+        intent, which makes the next pass lower it again -- and a report comparing
+        against it measures a moving stick. Seen doing exactly that: 0.084 nits at the
+        bottom of one run and 0.030 on the next, which read as a correction landing
+        twice when the display was converging."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        before = self.window._measurement_intent(1000.0)
+
+        from sdr_hdr_profile_creator import greyscale
+        from sdr_hdr_profile_creator.gamma_correction import pq_eotf
+        points = 24
+        weights = (0.2126, 0.7152, 0.0722)
+        samples = {name: [] for name in ("r", "g", "b")}
+        for index in range(points):
+            code = 0.05 + 0.9 * index / (points - 1)
+            for key, weight in zip(("r", "g", "b"), weights):
+                # Half the light it should give, so any correction built from it is large.
+                samples[key].append((code, pq_eotf(code) * weight * 0.5))
+        response = greyscale.PanelResponse(
+            tuple(samples["r"]), tuple(samples["g"]), tuple(samples["b"]), weights
+        )
+        self.window.state.hdr.panel_response = greyscale.to_values(response)
+        self.window.state.hdr.panel_response_weights = weights
+
+        after = self.window._measurement_intent(1000.0)
+        self.assertEqual(before, after, "the correction moved the target it is judged against")
+
     def test_it_is_empty_rather_than_wrong_when_the_curve_cannot_be_built(self):
         """A missing intent makes a reader fall back to PQ, which is merely
         uninformative. A wrong one is worse than none."""

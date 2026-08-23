@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -2720,8 +2721,18 @@ class MainWindow(FluentWidget):
         and merely uninformative when something is.
         """
         try:
+            # Built with the measured response cleared, so this is what the *controls*
+            # ask for and nothing else. Including the correction would make the target
+            # chase itself: each pass lowers the code, which lowers the recorded intent,
+            # which makes the next pass lower it again -- and a report comparing against
+            # it measures a moving stick. Observed doing exactly that, 0.084 nits at
+            # grey-00 on one run and 0.030 on the next, which read as a correction
+            # landing twice when the display was in fact converging.
+            intended = dataclasses.replace(
+                self.state.hdr, panel_response=(), panel_response_weights=()
+            )
             transform = build_transform(
-                self.state.hdr, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
+                intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
             )
         except Exception:
             return {}
