@@ -2067,6 +2067,80 @@ class RefusedBalanceTests(WindowTestCase):
         self.assertNotIn("NOT updated", self.window.status_label.text())
 
 
+class ShapingProvenanceTests(WindowTestCase):
+    """A stored correction knows which tone settings it was measured through.
+
+    The response records the code that was sent, and the shaping decides that code, so
+    changing a tone control leaves it describing a pipeline that no longer exists. Not a
+    fault -- the next run replaces it -- but a pass of reduced accuracy that is much
+    better announced than discovered. Measured once at 0.84-0.92 of target through the
+    midrange after switching SDR-in-HDR from Auto to Off, and 0.99-1.01 after one
+    re-measure.
+    """
+
+    def measure(self):
+        from sdr_hdr_profile_creator import measure as measure_mod
+        weights = (0.2126, 0.7152, 0.0722)
+        points = []
+        levels = measure_mod.greyscale_levels(1000.0)
+        for index, target in enumerate(levels):
+            points.append(measure_mod.GreyPoint(
+                index=index, target_nits=target, measured_nits=target * 0.9,
+                x=0.3127, y=0.3290,
+            ))
+        columns = []
+        for (x, y), weight in zip(((0.64, 0.33), (0.30, 0.60), (0.15, 0.06)), weights):
+            luminance = weight * 100.0
+            columns.append((x / y * luminance, luminance, (1.0 - x - y) / y * luminance))
+        result = measure_mod.Calibration(
+            peak_nits=1000.0, black_nits=0.0005, white_xy=(0.3127, 0.3290),
+            channel_gains=(1.0, 1.0, 1.0), greyscale=tuple(points),
+            channel_xyz=tuple(columns), white_weights=weights,
+        )
+        self.window._measure_finished(result, "")
+
+    def test_a_measurement_records_the_shaping_it_was_taken_through(self):
+        self.measure()
+        self.assertTrue(self.window.state.hdr.panel_response)
+        self.assertTrue(self.window.state.hdr.panel_response_shaping)
+
+    def test_nothing_is_said_while_the_shaping_is_unchanged(self):
+        self.measure()
+        self.assertFalse(self.window._shaping_moved_since_measuring())
+
+    def test_changing_a_tone_control_is_noticed(self):
+        self.measure()
+        self.window.state.hdr.gamma = 2.6
+        self.assertTrue(self.window._shaping_moved_since_measuring())
+
+    def test_the_sdr_correction_counts_as_shaping(self):
+        """The one that actually caught someone out."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        self.measure()
+        self.window.state.hdr.sdr_gamma_correction = "Off"
+        self.assertTrue(self.window._shaping_moved_since_measuring())
+
+    def test_a_state_with_no_correction_never_complains(self):
+        self.assertFalse(self.window._shaping_moved_since_measuring())
+
+    def test_a_correction_predating_the_field_never_complains(self):
+        """A state written before this existed says nothing either way, and guessing
+        would put a warning on every profile that predates it."""
+        self.measure()
+        self.window.state.hdr.panel_response_shaping = ()
+        self.window.state.hdr.gamma = 2.6
+        self.assertFalse(self.window._shaping_moved_since_measuring())
+
+    def test_resetting_clears_the_provenance_with_the_correction(self):
+        self.measure()
+        with mock.patch.object(
+            app_module.QMessageBox, "question",
+            return_value=app_module.QMessageBox.StandardButton.Yes,
+        ):
+            self.window._reset_all_controls()
+        self.assertEqual(self.window.state.hdr.panel_response_shaping, ())
+
+
 class MeasurementIntentTests(WindowTestCase):
     """The log records what the profile asks for, not only what PQ says.
 

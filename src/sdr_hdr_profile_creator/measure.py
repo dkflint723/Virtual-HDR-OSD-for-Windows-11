@@ -204,15 +204,22 @@ GREYSCALE_STEPS = 33
 #: panel's own limiter. The second is how HDR peak is normally specified.
 #:
 #: 3% because it was measured, not because it is conventional. Asking a PG32UCDM for full
-#: drive at every size gives 969, 974 and 978 nits at 1%, 2% and 3% -- within 1% of each
-#: other, because the limiter does not engage at all down there -- then 760 at 5%, 464 at
-#: 10%, and 243 full screen. So 3% is the *largest* window that still reaches peak, which
-#: makes it the one to use: the most light for the instrument to read, and no limiting.
-#: Going smaller costs signal and buys nothing.
+#: drive at every size, with the meter proved to be on the smallest patch first, gives
+#: 1014, 1014 and 1019 nits at 1%, 2% and 3% -- within 0.6% of each other, because the
+#: limiter does not engage at all down there -- then 773 at 5%, 464 at 10%, and 243 full
+#: screen. So 3% is the largest window that still reaches peak *and* the highest reading
+#: of the three, which makes it the one to use: the most light for the instrument, and no
+#: limiting. Going smaller costs signal and buys nothing.
 #:
-#: It also settles the declared figure. 978 against a declared 1015 is 96%, and the rest
-#: is about what an uncorrected colorimeter gives up on quantum-dot primaries, so the
-#: EDID's number is a 3%-or-smaller rating rather than something the panel never does.
+#: It also settles the declared figure: 1019 against a declared 1015 is 100.4%, so the
+#: EDID number is a 3%-or-smaller rating and the panel really does reach it.
+#:
+#: An earlier pass of the same sweep read 969/974/978 and was written up as the meter
+#: giving up 4% on quantum-dot primaries. It was placement: a 1% patch is a third the
+#: width of a 3% one, and an instrument centred well enough for the larger reads part
+#: black on the smaller. Prove the meter is on the smallest patch before comparing sizes,
+#: or the small windows read low and the limiter gets the blame.
+#:
 #: ``window_peak_nits`` records the 10% figure alongside so the gap is visible rather
 #: than inferred.
 PEAK_WINDOW_FRACTION = 0.03

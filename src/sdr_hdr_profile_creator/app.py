@@ -1072,6 +1072,20 @@ class MainWindow(FluentWidget):
         self._save_state_soon()
         self._queue_live_apply()
 
+
+        # Said when it happens, not when the next run reports a worse number. The
+        # response records the code that was sent, and the shaping decides that code, so
+        # moving one of these leaves the stored correction describing a pipeline that no
+        # longer exists. Measured once at 0.84-0.92 of target through the midrange, back
+        # to 0.99-1.01 after a single re-measure -- so this is a heads-up about one pass,
+        # not a fault.
+        if self._shaping_moved_since_measuring():
+            self._set_status(
+                self.status_label.text().rstrip('.') + ". The measured greyscale "
+                "correction was taken with different tone settings, so it no longer "
+                "matches this curve — measure again to bring it back into step.",
+                "warning",
+            )
     def _save_state_soon(self) -> None:
         """Persist slider edits shortly after the user stops adjusting.
 
@@ -1133,6 +1147,7 @@ class MainWindow(FluentWidget):
         if self.state.hdr.panel_response:
             self.state.hdr.panel_response = ()
             self.state.hdr.panel_response_weights = ()
+            self.state.hdr.panel_response_shaping = ()
             discarded = True
         self._save_state_now()
         kept = (
@@ -2712,6 +2727,49 @@ class MainWindow(FluentWidget):
         # next display the user selects.
         self._measure_display_key = display.stable_key
 
+    #: Codes the intent curve is sampled at to fingerprint the shaping. Spread across
+    #: the range rather than clustered, because a control can move one end and leave the
+    #: other alone -- the SDR-in-HDR correction does exactly that, reshaping below
+    #: diffuse white and leaving the highlights at identity.
+    SHAPING_CODES = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9)
+
+    def _shaping_fingerprint(self) -> tuple[float, ...]:
+        """The intent curve as it stands, with any measured response taken out of it.
+
+        What the controls ask for and nothing else, so it identifies the shaping a
+        response was captured under without being perturbed by the response itself.
+        """
+        try:
+            intended = dataclasses.replace(
+                self.state.hdr, panel_response=(), panel_response_weights=()
+            )
+            transform = build_transform(
+                intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
+            )
+        except Exception:
+            return ()
+        return tuple(
+            round(greyscale.sample(transform.green, code), 6) for code in self.SHAPING_CODES
+        )
+
+    def _shaping_moved_since_measuring(self) -> bool:
+        """Whether the stored correction was captured under different shaping.
+
+        False when there is no correction, and when there is no record of what it was
+        captured under -- a state written before this existed says nothing either way,
+        and guessing would put a warning on every profile that predates the field.
+        """
+        state = self.state.hdr
+        if not state.panel_response or not state.panel_response_shaping:
+            return False
+        current = self._shaping_fingerprint()
+        if not current or len(current) != len(state.panel_response_shaping):
+            return False
+        return any(
+            abs(now - was) > 1e-4
+            for now, was in zip(current, state.panel_response_shaping)
+        )
+
     def _measurement_intent(self, peak: float) -> dict:
         """The luminance the profile asks for at each greyscale level, keyed like the plan.
 
@@ -3018,6 +3076,9 @@ class MainWindow(FluentWidget):
 
         state.panel_response = greyscale.to_values(response)
         state.panel_response_weights = tuple(response.weights)
+        # Which shaping this was measured through. Stored with it, because the response
+        # records the code that was sent and the shaping is what decided that code.
+        state.panel_response_shaping = self._shaping_fingerprint()
         state.panel_source_key = getattr(self, "_measure_display_key", "") or state.panel_source_key
         self._log_meter({
             "event": "response",
@@ -3687,6 +3748,7 @@ class MainWindow(FluentWidget):
         )
         state.panel_response = ()
         state.panel_response_weights = ()
+        state.panel_response_shaping = ()
         state.panel_source_key = display.stable_key
         self._save_state_soon()
         return True

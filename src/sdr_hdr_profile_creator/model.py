@@ -100,6 +100,18 @@ class ModeState:
     # Stored beside the response and validated with it; neither is usable alone.
     panel_response_weights: tuple[float, ...] = ()
 
+    # The intent curve the response was captured under, sampled at a few codes. The
+    # response pairs a delivered luminance with the code that was sent for it, and which
+    # code gets sent is decided by the shaping -- so changing a control that shapes the
+    # curve leaves the response describing a pipeline that no longer exists.
+    #
+    # Not a reason to refuse: the next run replaces it, and one pass of reduced accuracy
+    # is the whole cost. Measured that cost once, switching SDR-in-HDR from Auto to Off
+    # with a correction captured under Auto still in place: the midrange came back at
+    # 0.84-0.92 of target, and a single re-measure took it to 0.99-1.01. Worth saying out
+    # loud so the dip is expected rather than alarming.
+    panel_response_shaping: tuple[float, ...] = ()
+
     @classmethod
     def neutral(cls, mode: DisplayMode) -> "ModeState":
         if mode == "SDR":
@@ -170,9 +182,16 @@ class ModeState:
         if response is None:
             merged["panel_response"] = ()
             merged["panel_response_weights"] = ()
+            merged["panel_response_shaping"] = ()
         else:
             merged["panel_response"] = greyscale.to_values(response)
             merged["panel_response_weights"] = tuple(response.weights)
+            try:
+                merged["panel_response_shaping"] = tuple(
+                    float(v) for v in (merged.get("panel_response_shaping") or ())
+                )
+            except (TypeError, ValueError):
+                merged["panel_response_shaping"] = ()
 
         # Removed controls are neutralized when legacy profiles are imported.
         merged["exposure"] = 0.0
