@@ -1,1 +1,1 @@
-ec0f37c571ae906c6758c0ba96f0464e02ae57685530a22f7678405ccfcd791e  Virtual HDR OSD for Windows.exe
+c91d1dd55df96030632e45c4372b2abd1bbed5a8b1fe48ee9891a66d3f135b13  Virtual HDR OSD for Windows.exe

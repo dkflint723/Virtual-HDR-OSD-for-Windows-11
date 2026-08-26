@@ -26,11 +26,11 @@ if errorlevel 1 (
     echo.
     echo Uninstall encountered an error.
     pause
-    exit /b 1
+    exit 1
 )
 
 echo Watchdog removed successfully.
 echo No color profiles were deleted or modified by the uninstaller.
 echo.
 pause
-exit /b 0
+exit 0

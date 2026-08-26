@@ -83,7 +83,7 @@ class GuiStructureTests(unittest.TestCase):
         self.assertNotIn("pythonw.exe", installer.lower())
 
 
-    def test_watchdog_scheduler_uses_sid_com_registration_with_fallback(self):
+    def test_watchdog_scheduler_uses_sid_com_registration_without_legacy_fallback(self):
         installer = (self.root / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
         embedded = (self.root / "src/sdr_hdr_profile_creator/resources/2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8")
         standalone = (self.root / "watchdogs standalone/Install-Watchdog.bat").read_text(encoding="utf-8")
@@ -94,7 +94,9 @@ class GuiStructureTests(unittest.TestCase):
             self.assertIn("Principal.UserId = $currentSid", payload)
             self.assertIn("logonTrigger.UserId = $currentSid", payload)
             self.assertIn("LogonType = 3", payload)
-            self.assertIn("HKCU Run fallback", payload)
+            self.assertNotIn("HKCU Run fallback", payload)
+            self.assertNotIn("Falling back to the current-user Run key", payload)
+            self.assertIn("Task Scheduler registration failed; the watchdog was not installed", payload)
             self.assertNotIn("Register-ScheduledTask", payload)
             self.assertNotIn("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME", payload)
 

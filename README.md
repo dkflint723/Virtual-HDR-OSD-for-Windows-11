@@ -615,7 +615,7 @@ The standalone installer contains the required watchdog logic itself and install
 > [!NOTE]
 > The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app.
 >
-> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog`. Its preferred autostart method is the Windows Task Scheduler COM API using the current account's SID and `InteractiveToken`, which avoids storing credentials and works consistently with local, Microsoft, Entra ID, and domain-backed interactive accounts. The task is named `Virtual HDR OSD - Color Profile Mode Watchdog` and starts hidden 10 seconds after sign-in. If Task Scheduler registration is unavailable on a particular system, the installer automatically falls back to a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry instead of failing the installation. The GUI-integrated and standalone installers use the same task/fallback name and installation directory; use only the installer matching the workflow you want to configure.
+> The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog`. Its autostart method is the Windows Task Scheduler COM API using the current account's SID and `InteractiveToken`, which avoids storing credentials and works consistently with local, Microsoft, Entra ID, and domain-backed interactive accounts. The task is named `Virtual HDR OSD - Color Profile Mode Watchdog` and starts hidden 10 seconds after sign-in. Task Scheduler registration is mandatory; the installer does not fall back to the legacy `HKCU\...\Run` startup path.
 
 ---
 
@@ -636,7 +636,9 @@ The watchdog runs silently in the background.
 
 In addition to SDR/HDR association recovery, it watches **Alt+1** and **Alt+2**. Virtual HDR OSD prepares exactly two stable working profiles per display: Alt+1 selects the current edited profile with SDR-in-HDR gamma correction disabled, while Alt+2 selects the same edited state with the chosen correction enabled. The watchdog never creates timestamped profiles or a bank of per-luminance companions. Auto is recalculated from the exact Windows SDR white level whenever the GUI regenerates the working pair.
 
-When Windows changes display mode, it gives the operating system a short period to complete the transition and then reasserts the previously captured profile associations.
+The watchdog is event-driven. It does not continuously poll the display state. It wakes when Windows reports a display-settings change or when the user presses `Win + Alt + B`, then queries the active displays and reasserts the captured associations.
+
+Windows can signal the change before the transition is complete. In that case, the watchdog retries the display query every 500 ms until a valid display topology is available. After a successful restore it releases temporary objects, performs garbage collection, and waits for the next event.
 
 Conceptually:
 
@@ -685,7 +687,7 @@ The standalone watchdog is designed to operate discreetly.
 
 It does not need an open CMD window.
 
-Its preferred startup method is a per-user Task Scheduler task registered through the Windows Task Scheduler COM API using the current account SID. The task launches Windows Script Host in background mode after a 10-second sign-in delay. If Task Scheduler registration fails, the installer transparently uses a per-user `HKCU\...\Run` fallback. There is no normal foreground application window to keep open.
+Its startup method is a per-user Task Scheduler task registered through the Windows Task Scheduler COM API using the current account SID. The task launches Windows Script Host in background mode after a 10-second sign-in delay. There is no normal foreground application window to keep open.
 
 The installed utility is stored under:
 
@@ -693,7 +695,7 @@ The installed utility is stored under:
 %LOCALAPPDATA%\ColorProfileModeWatchdog\
 ```
 
-Its persistent startup registration is normally the per-user Windows Task Scheduler task `Virtual HDR OSD - Color Profile Mode Watchdog`; on systems where Task Scheduler registration is rejected, the installer falls back to a current-user Run-key entry with the same watchdog installation.
+Its persistent startup registration is the per-user Windows Task Scheduler task `Virtual HDR OSD - Color Profile Mode Watchdog`.
 
 No Windows service is required.
 
@@ -900,7 +902,7 @@ Virtual HDR OSD uses PySide6 and PySide6-Fluent-Widgets for its graphical interf
 
 ### Standalone hotkey persistence
 
-When installed after Virtual HDR OSD has prepared the stable `Correction Off` and `Correction On` working profiles, the standalone watchdog copies both exact installed profile names into its own `%LOCALAPPDATA%\ColorProfileModeWatchdog\State.json`. **Alt+1 / Alt+2 therefore do not depend on the GUI remaining open or on its runtime JSON remaining available.** A dedicated Win32 background thread owns `RegisterHotKey` and a blocking `GetMessage` loop, while the PowerShell watchdog continues handling display-mode/profile recovery separately.
+When installed after Virtual HDR OSD has prepared the stable `Correction Off` and `Correction On` working profiles, the standalone watchdog copies both exact installed profile names into its own `%LOCALAPPDATA%\ColorProfileModeWatchdog\State.json`. **Alt+1 / Alt+2 therefore do not depend on the GUI remaining open or on its runtime JSON remaining available.** A dedicated Win32 background thread owns the gamma hotkeys, the `Win + Alt + B` event, and the Windows display-settings event. The PowerShell watchdog remains blocked between events and only performs display/profile recovery after receiving one of those signals.
 
 
 ### Watchdog stable-pair capture

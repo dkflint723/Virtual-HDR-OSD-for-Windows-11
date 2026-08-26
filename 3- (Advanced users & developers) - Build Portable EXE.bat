@@ -33,7 +33,7 @@ if not exist "release" mkdir "release"
 
 echo Validating the embedded watchdog resources...
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$installer=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\2- OPTIONAL - Install-Watchdog.bat'; $uninstaller=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\Uninstall-Watchdog.bat'; $i=Get-Content -Raw -LiteralPath $installer; $u=Get-Content -Raw -LiteralPath $uninstaller; if($i -notmatch 'Schedule.Service' -or $i -notmatch 'RegisterTaskDefinition' -or $i -notmatch 'currentSid' -or $i -match 'Register-ScheduledTask' -or $u -notmatch 'Schedule.Service'){ throw 'Embedded watchdog resources are stale. Expected SID-based Task Scheduler COM registration with compatible fallback.' }"
+  "$installer=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\2- OPTIONAL - Install-Watchdog.bat'; $uninstaller=Join-Path '%~dp0' 'src\sdr_hdr_profile_creator\resources\Uninstall-Watchdog.bat'; $i=Get-Content -Raw -LiteralPath $installer; $u=Get-Content -Raw -LiteralPath $uninstaller; if($i -notmatch 'Schedule.Service' -or $i -notmatch 'RegisterTaskDefinition' -or $i -notmatch 'currentSid' -or $i -match 'Register-ScheduledTask' -or $i -match 'Falling back to the current-user Run key' -or $u -notmatch 'Schedule.Service'){ throw 'Embedded watchdog resources are stale. Expected mandatory SID-based Task Scheduler COM registration with no legacy Run-key fallback.' }"
 if errorlevel 1 goto :fail
 
 set "UV_NO_CACHE=1"

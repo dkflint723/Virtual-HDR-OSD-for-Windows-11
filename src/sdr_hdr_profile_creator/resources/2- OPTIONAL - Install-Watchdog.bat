@@ -17,7 +17,7 @@ if errorlevel 1 (
     echo ERROR: Could not create:
     echo   %APPDIR%
     pause
-    exit /b 1
+    exit 1
 )
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -26,7 +26,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
 if errorlevel 1 (
     echo ERROR: Could not extract the standalone watchdog.
     pause
-    exit /b 1
+    exit 1
 )
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -36,7 +36,7 @@ if errorlevel 1 (
     echo ERROR: The extracted watchdog failed integrity validation.
     del /q "%WATCHDOG%" >nul 2>&1
     pause
-    exit /b 1
+    exit 1
 )
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%WATCHDOG%" -Install
@@ -44,7 +44,7 @@ if errorlevel 1 (
     echo.
     echo Installation failed. Review the message above.
     pause
-    exit /b 1
+    exit 1
 )
 
 echo.
@@ -56,7 +56,7 @@ echo If you intentionally change your SDR or HDR default profiles later,
 echo run this installer again to capture the new associations.
 echo.
 pause
-exit /b 0
+exit 0
 
 :__WATCHDOG_POWERSHELL_PAYLOAD__
 param(
@@ -127,10 +127,13 @@ namespace ColorProfileWatchdog
 
         public const int HOTKEY_OFF = 0x564801;
         public const int HOTKEY_ON = 0x564802;
+        public const int HOTKEY_DISPLAY_CHANGE = 0x564803;
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_NOREPEAT = 0x4000;
         public const uint VK_1 = 0x31;
         public const uint VK_2 = 0x32;
+        public const uint VK_B = 0x42;
+        public const uint MOD_WIN = 0x0008;
         public const uint WM_HOTKEY = 0x0312;
         public const uint PM_REMOVE = 0x0001;
 
@@ -306,11 +309,18 @@ namespace ColorProfileWatchdog
         private const uint WM_QUIT = 0x0012;
         private static readonly System.Collections.Concurrent.ConcurrentQueue<int> gammaHotkeyQueue =
             new System.Collections.Concurrent.ConcurrentQueue<int>();
+        private static readonly System.Threading.AutoResetEvent displayChangeSignal =
+            new System.Threading.AutoResetEvent(false);
         private static System.Threading.Thread gammaHotkeyThread;
         private static System.Threading.ManualResetEvent gammaHotkeyReady =
             new System.Threading.ManualResetEvent(false);
         private static volatile bool gammaHotkeysRegistered = false;
         private static uint gammaHotkeyThreadId = 0;
+
+        private static void OnDisplaySettingsChanged(object sender, EventArgs e)
+        {
+            displayChangeSignal.Set();
+        }
 
         private static void GammaHotkeyMessageLoop()
         {
@@ -318,12 +328,16 @@ namespace ColorProfileWatchdog
             uint modifiers = MOD_ALT | MOD_NOREPEAT;
             bool off = RegisterHotKey(IntPtr.Zero, HOTKEY_OFF, modifiers, VK_1);
             bool on = RegisterHotKey(IntPtr.Zero, HOTKEY_ON, modifiers, VK_2);
+            bool winAltB = RegisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE, MOD_WIN | MOD_ALT | MOD_NOREPEAT, VK_B);
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
 
             gammaHotkeysRegistered = off && on;
             if (!gammaHotkeysRegistered)
             {
                 if (off) UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
                 if (on) UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
+                if (winAltB) UnregisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE);
+                Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
                 gammaHotkeyReady.Set();
                 return;
             }
@@ -339,6 +353,8 @@ namespace ColorProfileWatchdog
                         int id = msg.wParam.ToInt32();
                         if (id == HOTKEY_OFF || id == HOTKEY_ON)
                             gammaHotkeyQueue.Enqueue(id);
+                        else if (id == HOTKEY_DISPLAY_CHANGE)
+                            displayChangeSignal.Set();
                     }
                 }
             }
@@ -346,6 +362,8 @@ namespace ColorProfileWatchdog
             {
                 UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
                 UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
+                UnregisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE);
+                Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
                 gammaHotkeysRegistered = false;
                 gammaHotkeyThreadId = 0;
             }
@@ -371,6 +389,11 @@ namespace ColorProfileWatchdog
         {
             int id;
             return gammaHotkeyQueue.TryDequeue(out id) ? id : 0;
+        }
+
+        public static bool WaitForDisplayChange(int timeoutMilliseconds)
+        {
+            return displayChangeSignal.WaitOne(timeoutMilliseconds);
         }
 
         public static void UnregisterGammaHotkeys()
@@ -942,14 +965,19 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
     # Register persistence through the Task Scheduler COM API instead of the
     # ScheduledTasks CIM cmdlets.  A SID is unambiguous for local, Microsoft,
     # Entra ID, and domain-backed interactive accounts, and InteractiveToken
-    # requires no stored password.  Keep HKCU Run only as a compatibility
-    # fallback if Task Scheduler registration is unavailable on this machine.
+    # requires no stored password. Task Scheduler is mandatory so the watchdog
+    # never silently falls back to the leaky/early HKCU Run startup path.
     $startupMethod = 'Task Scheduler (COM / current-user SID)'
     $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $currentSid = $currentIdentity.User.Value
     $wscriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
     $taskArguments = '//B //Nologo "{0}"' -f $LauncherPath
 
+    $taskService = $null
+    $taskRoot = $null
+    $taskDefinition = $null
+    $logonTrigger = $null
+    $execAction = $null
     try {
         $taskService = New-Object -ComObject 'Schedule.Service'
         $taskService.Connect()
@@ -998,11 +1026,16 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
         Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
     }
     catch {
-        $startupMethod = 'HKCU Run fallback'
-        Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $_.Exception.Message)
-        $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
-        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
-        New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+        throw ('Task Scheduler registration failed; the watchdog was not installed: ' + $_.Exception.Message)
+    }
+    finally {
+        if ($taskRoot) { [Runtime.InteropServices.Marshal]::ReleaseComObject($taskRoot) | Out-Null }
+        if ($taskService) { [Runtime.InteropServices.Marshal]::ReleaseComObject($taskService) | Out-Null }
+        $taskDefinition = $null
+        $logonTrigger = $null
+        $execAction = $null
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
     }
 
     Write-Host ''
@@ -1053,7 +1086,6 @@ try {
     $lastHotkeyRetry = Get-Date
     Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
 
-    $pollCounter = 0
     while ($true) {
         if (-not $hotkeysRegistered -and ((Get-Date) - $lastHotkeyRetry).TotalSeconds -ge 2.0) {
             $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
@@ -1068,14 +1100,31 @@ try {
                 elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
             }
         }
-        $pollCounter++
-        if (($pollCounter % 8) -ne 0) {
-            Start-Sleep -Milliseconds 100
+        if (-not [ColorProfileWatchdog.Native]::WaitForDisplayChange(1000)) {
             continue
         }
 
+        # Windows can signal the transition before the new topology is ready.
+        # Retry the query until it succeeds, then return to the event wait.
+        $currentDisplays = $null
+        while ($null -eq $currentDisplays) {
+            try {
+                $candidateDisplays = @(Get-ActiveDisplays)
+                if ($candidateDisplays.Count -gt 0) {
+                    $currentDisplays = $candidateDisplays
+                }
+            } catch {
+                Write-Log ('Display query retry: ' + $_.Exception.Message)
+            }
+            if ($null -eq $currentDisplays) {
+                Start-Sleep -Milliseconds 500
+            }
+        }
+
         try {
-            $currentDisplays = @(Get-ActiveDisplays)
+
+            # Keep this map bounded when displays are unplugged/replaced.
+            $activeModeKeys = @{}
 
             foreach ($current in $currentDisplays) {
                 $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
@@ -1084,6 +1133,7 @@ try {
                 }
 
                 $modeKey = [string]$current.GdiName
+                $activeModeKeys[$modeKey] = $true
                 $modeNow = [bool]$current.AdvancedColorEnabled
                 $modeChanged = $lastModes.ContainsKey($modeKey) -and ($lastModes[$modeKey] -ne $modeNow)
                 $lastModes[$modeKey] = $modeNow
@@ -1100,23 +1150,17 @@ try {
                     Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
                 }
             }
-
-            # Fallback reassertion. This also covers systems where SDR/WCG and HDR
-            # can both report Advanced Color enabled through the legacy query.
-            if (((Get-Date) - $lastForced).TotalSeconds -ge 5.0) {
-                foreach ($current in $currentDisplays) {
-                    $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
-                    if ($saved) {
-                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved -Force
-                    }
-                }
-                $lastForced = Get-Date
+            foreach ($staleKey in @($lastModes.Keys | Where-Object { -not $activeModeKeys.ContainsKey($_) })) {
+                $lastModes.Remove($staleKey)
             }
+
         } catch {
             Write-Log ('Loop error: ' + $_.Exception.Message)
         }
 
-        Start-Sleep -Milliseconds 100
+        # Release temporary interop objects before waiting for the next event.
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
     }
 }
 finally {
