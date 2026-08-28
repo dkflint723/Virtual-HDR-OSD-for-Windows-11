@@ -128,12 +128,14 @@ namespace ColorProfileWatchdog
         public const int HOTKEY_OFF = 0x564801;
         public const int HOTKEY_ON = 0x564802;
         public const int HOTKEY_DISPLAY_CHANGE = 0x564803;
+        public const int HOTKEY_FORCE_RESTORE = 0x564804;
         public const uint MOD_ALT = 0x0001;
         public const uint MOD_NOREPEAT = 0x4000;
         public const uint VK_1 = 0x31;
         public const uint VK_2 = 0x32;
         public const uint VK_B = 0x42;
         public const uint MOD_WIN = 0x0008;
+        public const uint VK_3 = 0x33;
         public const uint WM_HOTKEY = 0x0312;
         public const uint PM_REMOVE = 0x0001;
 
@@ -322,26 +324,41 @@ namespace ColorProfileWatchdog
             displayChangeSignal.Set();
         }
 
+        private static void OnUserPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+        {
+            displayChangeSignal.Set();
+        }
+
         private static void GammaHotkeyMessageLoop()
         {
             gammaHotkeyThreadId = GetCurrentThreadId();
+            // Keep the original gamma hotkey registration used by the last
+            // known-good release. The no-repeat flag prevents key auto-repeat
+            // from enqueueing duplicate profile changes.
             uint modifiers = MOD_ALT | MOD_NOREPEAT;
             bool off = RegisterHotKey(IntPtr.Zero, HOTKEY_OFF, modifiers, VK_1);
             bool on = RegisterHotKey(IntPtr.Zero, HOTKEY_ON, modifiers, VK_2);
             bool winAltB = RegisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE, MOD_WIN | MOD_ALT | MOD_NOREPEAT, VK_B);
+            bool forceRestore = RegisterHotKey(IntPtr.Zero, HOTKEY_FORCE_RESTORE, MOD_ALT | MOD_NOREPEAT, VK_3);
             Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
 
             gammaHotkeysRegistered = off && on;
             if (!gammaHotkeysRegistered)
             {
+                // Do not leave a partially registered message-loop thread alive.
+                // TryRegisterGammaHotkeys() must be able to create a fresh thread
+                // after another process releases Alt+1/Alt+2.
                 if (off) UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
                 if (on) UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
                 if (winAltB) UnregisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE);
+                if (forceRestore) UnregisterHotKey(IntPtr.Zero, HOTKEY_FORCE_RESTORE);
                 Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+                gammaHotkeyThreadId = 0;
                 gammaHotkeyReady.Set();
                 return;
             }
-
             gammaHotkeyReady.Set();
             MSG msg;
             try
@@ -355,6 +372,11 @@ namespace ColorProfileWatchdog
                             gammaHotkeyQueue.Enqueue(id);
                         else if (id == HOTKEY_DISPLAY_CHANGE)
                             displayChangeSignal.Set();
+                        else if (id == HOTKEY_FORCE_RESTORE)
+                        {
+                            gammaHotkeyQueue.Enqueue(id);
+                            displayChangeSignal.Set();
+                        }
                     }
                 }
             }
@@ -363,7 +385,9 @@ namespace ColorProfileWatchdog
                 UnregisterHotKey(IntPtr.Zero, HOTKEY_OFF);
                 UnregisterHotKey(IntPtr.Zero, HOTKEY_ON);
                 UnregisterHotKey(IntPtr.Zero, HOTKEY_DISPLAY_CHANGE);
+                UnregisterHotKey(IntPtr.Zero, HOTKEY_FORCE_RESTORE);
                 Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+                Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
                 gammaHotkeysRegistered = false;
                 gammaHotkeyThreadId = 0;
             }
@@ -909,6 +933,21 @@ function Invoke-GammaHotkey {
     }
 }
 
+function Invoke-ManualRestore {
+    # Alt+3 is an explicit recovery action for a failed HDR/SDR transition.
+    # Retry until Windows exposes a valid display topology again.
+    do {
+        try { $displays = @(Get-ActiveDisplays) } catch { $displays = @() }
+        if ($displays.Count -eq 0) { Start-Sleep -Milliseconds 500 }
+    } while ($displays.Count -eq 0)
+    foreach ($current in $displays) {
+        $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+        if ($saved) { Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved -Force }
+    }
+    [GC]::Collect()
+    [GC]::WaitForPendingFinalizers()
+}
+
 if ($Install) {
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
     Stop-ExistingWatchdog
@@ -1084,7 +1123,7 @@ try {
     $lastForced = [DateTime]::MinValue
     $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
     $lastHotkeyRetry = Get-Date
-    Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
+    Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON, Alt+3 restore.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
 
     while ($true) {
         if (-not $hotkeysRegistered -and ((Get-Date) - $lastHotkeyRetry).TotalSeconds -ge 2.0) {
@@ -1092,16 +1131,25 @@ try {
             $lastHotkeyRetry = Get-Date
             if ($hotkeysRegistered) { Write-Log 'Global hotkey thread started after retry: Alt+1 OFF, Alt+2 ON.' }
         }
-        if ($hotkeysRegistered) {
-            while ($true) {
-                $hotkey = [ColorProfileWatchdog.Native]::PollGammaHotkey()
-                if ($hotkey -eq 0) { break }
-                if ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_OFF) { Invoke-GammaHotkey -Enable $false }
-                elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
-            }
+        while ($true) {
+            $hotkey = [ColorProfileWatchdog.Native]::PollGammaHotkey()
+            if ($hotkey -eq 0) { break }
+            if ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_OFF) { Invoke-GammaHotkey -Enable $false }
+            elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
+            elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_FORCE_RESTORE) { Invoke-ManualRestore }
         }
-        if (-not [ColorProfileWatchdog.Native]::WaitForDisplayChange(1000)) {
+        if (-not [ColorProfileWatchdog.Native]::WaitForDisplayChange(100)) {
             continue
+        }
+
+        # A hotkey can arrive while the PowerShell process is blocked in the
+        # event wait. Drain it immediately after waking so Alt+3 is reliable.
+        while ($true) {
+            $hotkey = [ColorProfileWatchdog.Native]::PollGammaHotkey()
+            if ($hotkey -eq 0) { break }
+            if ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_OFF) { Invoke-GammaHotkey -Enable $false }
+            elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
+            elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_FORCE_RESTORE) { Invoke-ManualRestore }
         }
 
         # Windows can signal the transition before the new topology is ready.
@@ -1121,42 +1169,10 @@ try {
             }
         }
 
-        try {
-
-            # Keep this map bounded when displays are unplugged/replaced.
-            $activeModeKeys = @{}
-
-            foreach ($current in $currentDisplays) {
-                $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
-                if (-not $saved) {
-                    continue
-                }
-
-                $modeKey = [string]$current.GdiName
-                $activeModeKeys[$modeKey] = $true
-                $modeNow = [bool]$current.AdvancedColorEnabled
-                $modeChanged = $lastModes.ContainsKey($modeKey) -and ($lastModes[$modeKey] -ne $modeNow)
-                $lastModes[$modeKey] = $modeNow
-
-                if ($modeChanged) {
-                    # Give Windows a moment to finish the Win+Alt+B transition,
-                    # then explicitly reassert both independent associations.
-                    Start-Sleep -Milliseconds 700
-                    $refreshed = @(Get-ActiveDisplays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1)
-                    if ($refreshed.Count -gt 0) {
-                        Restore-SavedProfiles -CurrentDisplay $refreshed[0] -SavedDisplay $saved -Force
-                    }
-                } else {
-                    Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
-                }
-            }
-            foreach ($staleKey in @($lastModes.Keys | Where-Object { -not $activeModeKeys.ContainsKey($_) })) {
-                $lastModes.Remove($staleKey)
-            }
-
-        } catch {
-            Write-Log ('Loop error: ' + $_.Exception.Message)
-        }
+        # Treat every display-settings event exactly like the manual Alt+3
+        # recovery. This handles both directions of Win+Alt+B and the Settings
+        # HDR toggle without relying on a stale mode snapshot.
+        try { Invoke-ManualRestore } catch { Write-Log ('Event restore error: ' + $_.Exception.Message) }
 
         # Release temporary interop objects before waiting for the next event.
         [GC]::Collect()

@@ -56,6 +56,8 @@ class GuiStructureTests(unittest.TestCase):
         self.assertIn("def _show_watchdog_settings", self.app)
         self.assertIn("Install Watchdog", self.app)
         self.assertIn("Uninstall Watchdog", self.app)
+        self.assertIn("Alt+3", self.app)
+        self.assertIn("sleeps between Windows display events", self.app)
 
     def test_watchdog_is_packaged_for_source_and_onefile(self):
         resources = self.root / "src/sdr_hdr_profile_creator/resources"
@@ -99,6 +101,11 @@ class GuiStructureTests(unittest.TestCase):
             self.assertIn("Task Scheduler registration failed; the watchdog was not installed", payload)
             self.assertNotIn("Register-ScheduledTask", payload)
             self.assertNotIn("New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME", payload)
+            self.assertIn("DisplaySettingsChanged += OnDisplaySettingsChanged", payload)
+            self.assertIn("UserPreferenceChanged += OnUserPreferenceChanged", payload)
+            self.assertNotIn("if (!gammaHotkeysRegistered && !winAltB && !forceRestore)", payload)
+            self.assertIn("UserPreferenceChanged", payload)
+        self.assertIn("HOTKEY_FORCE_RESTORE", payload)
 
     def test_gamma_off_is_immediate_and_authoritative(self):
         self.assertIn('self._apply_mode_profile("HDR", "Gamma correction changed")', self.app)

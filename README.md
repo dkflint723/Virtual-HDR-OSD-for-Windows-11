@@ -636,9 +636,19 @@ The watchdog runs silently in the background.
 
 In addition to SDR/HDR association recovery, it watches **Alt+1** and **Alt+2**. Virtual HDR OSD prepares exactly two stable working profiles per display: Alt+1 selects the current edited profile with SDR-in-HDR gamma correction disabled, while Alt+2 selects the same edited state with the chosen correction enabled. The watchdog never creates timestamped profiles or a bank of per-luminance companions. Auto is recalculated from the exact Windows SDR white level whenever the GUI regenerates the working pair.
 
-The watchdog is event-driven. It does not continuously poll the display state. It wakes when Windows reports a display-settings change or when the user presses `Win + Alt + B`, then queries the active displays and reasserts the captured associations.
+The watchdog is event-driven. It does not continuously poll the display state. It sleeps while nothing changes and wakes when Windows reports a display-settings change or when the user presses `Win + Alt + B`, then queries the active displays and reasserts the captured associations.
 
 Windows can signal the change before the transition is complete. In that case, the watchdog retries the display query every 500 ms until a valid display topology is available. After a successful restore it releases temporary objects, performs garbage collection, and waits for the next event.
+
+The watchdog also owns three global hotkeys when they are available:
+
+```text
+Alt + 1    Disable SDR-in-HDR gamma correction
+Alt + 2    Re-enable the selected SDR-in-HDR gamma correction
+Alt + 3    Manually reapply the correct saved SDR/HDR association
+```
+
+`Alt + 3` is useful when Windows finishes an HDR/SDR transition without applying the expected association on its first notification. If another process temporarily owns a hotkey, the watchdog releases any partial registration and retries cleanly instead of leaving a dead hotkey thread running. It does not return to continuous display polling between events.
 
 Conceptually:
 

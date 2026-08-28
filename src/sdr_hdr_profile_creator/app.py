@@ -664,8 +664,9 @@ class MainWindow(FluentWidget):
             "3. Use Live Apply and make small Temperature, Tint, RGB, Saturation, traditional Gamma, Midtone Brightness and Contrast corrections.\n"
             "4. Optional SDR-in-HDR Gamma Correction converts Windows' piecewise-sRGB SDR response toward pure gamma 2.2 using dylanraga's documented PQ-domain mapping. Auto reads Windows' SDR reference white internally; no SDR-brightness slider is duplicated here.\n"
             "5. This gamma correction is display-wide and can also affect native HDR10 / RTX HDR content. Use Alt+1 to disable it before native HDR content and Alt+2 to restore the selected correction for the SDR desktop.\n"
-            "6. Install the independent watchdog from Watchdog Settings if you want profile-association recovery and Alt+1 / Alt+2 to remain available after closing this GUI.\n"
-            "7. Export the resulting HDR ICM when satisfied.\n\n"
+            "6. Install the independent watchdog from Watchdog Settings if you want profile-association recovery and the gamma hotkeys to remain available after closing this GUI. The watchdog starts hidden at sign-in through Task Scheduler, sleeps between Windows display events, and retries automatically if a hotkey registration is temporarily unavailable.\n"
+            "7. Use Alt+3 to manually reapply the correct saved SDR/HDR association after a mode transition if Windows does not restore it on the first event.\n"
+            "8. Export the resulting HDR ICM when satisfied.\n\n"
             "IMPORTANT\n"
             "This app does not replace a colorimeter, spectrophotometer or professional calibration workflow. It intentionally relies on visual judgement for small personal corrections."
         )
@@ -680,13 +681,13 @@ class MainWindow(FluentWidget):
         title = StrongBodyLabel("Standalone Color Profile Mode Watchdog", dialog)
         layout.addWidget(title)
         description = BodyLabel(
-            "The watchdog is independent of Virtual HDR OSD. It keeps the Windows STANDARD (SDR) and EXTENDED (HDR) profile associations stable across Win + Alt + B transitions. "
-            "When this app has prepared gamma-correction profiles, the watchdog also keeps Alt+1 (correction OFF) and Alt+2 (correction ON) available after the GUI closes. It never creates a generic SDR fallback.",
+            "The watchdog is independent of Virtual HDR OSD. It starts hidden at sign-in through a per-user Task Scheduler task and keeps the Windows STANDARD (SDR) and EXTENDED (HDR) profile associations stable across Win + Alt + B and Display Settings HDR transitions. "
+            "It is event-driven: it sleeps while nothing changes, retries the display query until Windows exposes the new topology, and then returns to sleep. When this app has prepared gamma-correction profiles, Alt+1 disables correction and Alt+2 restores it after the GUI closes. Alt+3 manually reapplies the correct saved SDR/HDR association if a transition needs an explicit recovery. If hotkey registration is temporarily unavailable, the watchdog releases the partial registration and retries cleanly. It never creates a generic SDR fallback.",
             dialog,
         )
         description.setWordWrap(True)
         layout.addWidget(description)
-        hint = CaptionLabel("Install captures the current SDR/HDR associations. Re-run Install after intentionally changing either default profile.", dialog)
+        hint = CaptionLabel("Install captures the current SDR/HDR associations and the stable Gamma OFF/ON pair. The watchdog then runs hidden at sign-in, sleeps between Windows display events, and keeps Alt+1 (OFF), Alt+2 (ON), and Alt+3 (manual restore) available. Re-run Install after intentionally changing either default profile or the gamma working pair.", dialog)
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QHBoxLayout()
@@ -1122,9 +1123,9 @@ class MainWindow(FluentWidget):
     def _update_gamma_runtime_state(self, display: DisplayInfo, profile_name: str, profile_path: Path) -> None:
         """Publish the exact profile currently active so the persistent watchdog never overrides the GUI.
 
-        The standalone watchdog may be running while this application is open. Its periodic
-        association recovery must follow the profile most recently applied by the GUI rather
-        than restoring an older profile captured when the watchdog was installed.
+        The standalone watchdog may be running while this application is open. Its
+        event-triggered association recovery must follow the profile most recently applied
+        by the GUI rather than restoring an older profile captured when the watchdog was installed.
         """
         try:
             payload: dict[str, object] = {}
