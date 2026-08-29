@@ -144,9 +144,92 @@ class WatchdogPackagingTests(unittest.TestCase):
         # The guard is useless if it is armed after the step that blocks.
         self.assertLess(
             script.index("ArmStartupGuard($LogPath"),
-            script.index("$state = Get-Content -Raw -LiteralPath $StatePath"),
+            # The state load, however it reads the file. Get-Content -Raw used to do
+            # it and now does not, which is a cheaper read but was not the leak; see
+            # test_the_reconcile_path_does_not_terminate_a_pipeline_early for that.
+            script.index("$state = [System.IO.File]::ReadAllText($StatePath)"),
             "the startup guard must be armed before the work it protects",
         )
+
+    def payload(self) -> str:
+        """The watchdog script the installer writes, without the .bat wrapper."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        marker = ":__WATCHDOG_POWERSHELL_PAYLOAD__"
+        return script[script.rindex(marker) + len(marker):]
+
+    def test_the_reconcile_path_does_not_use_get_content(self):
+        """Not the leak fix -- the pipeline one below is. This is allocation churn.
+
+        Get-Content -Raw builds a pipeline and a wrapped string to hand back one
+        file's text, on a path that runs about 75 times a minute; ReadAllText is the
+        same result without either. A build carrying this change and not the pipeline
+        one still leaked at the full rate, which is how it is known not to be it.
+
+        The two remaining uses are in the installer's own one-shot extraction and
+        validation, which run once per install and are left alone.
+        """
+        offenders = [
+            line.strip() for line in self.payload().splitlines()
+            if "Get-Content" in line and not line.strip().startswith("#")
+        ]
+        self.assertEqual(offenders, [], "the watchdog itself must not use Get-Content")
+
+    def test_the_reconcile_path_does_not_terminate_a_pipeline_early(self):
+        """This is the leak fix.
+
+        Where-Object piped into Select-Object -First 1 retains memory in Windows
+        PowerShell 5.1 that no forced GC reclaims: Select-Object -First stops the
+        upstream command by throwing, and that path holds on to what it was carrying.
+        Two runs of the whole watchdog under an identical probe, differing only in
+        these loops -- with them, committed bytes rose monotonically, 108.2 MB to
+        113.0 MB over 2,168 passes; without them, 3,806 passes ended at 108.1 MB,
+        below where they started.
+
+        Where-Object on its own is clean, so the assertion is narrow: nothing the
+        watchdog runs may cut a pipeline short.
+        """
+        offenders = [
+            line.strip() for line in self.payload().splitlines()
+            if "Select-Object" in line and "-First" in line
+            and not line.strip().startswith("#")
+        ]
+        self.assertEqual(offenders, [], "early pipeline termination leaks in 5.1")
+
+    def test_the_periodic_pass_does_not_rewrite_a_correct_association(self):
+        """The five-second pass used to pass -Force, which rewrites both associations
+        whether or not anything drifted. Measured with the writes redirected to a trace
+        file: two every 5.3 seconds, forever. Each one makes Windows re-apply the
+        profile and reload the display LUT -- imperceptible while that LUT is near
+        identity, and a constant visible flash once it carries a measured greyscale
+        correction. Nothing appeared in the log either, because a re-assert is not a
+        correction and is deliberately silent, so the symptom was a flashing screen
+        with no evidence anywhere.
+
+        -Force is still correct on the mode-change path, where the association can be
+        right while the applied state is not, so the assertion counts rather than bans.
+        """
+        forced = [
+            line.strip() for line in self.payload().splitlines()
+            if "Restore-SavedProfiles" in line and "-Force" in line
+        ]
+        self.assertEqual(
+            1, len(forced),
+            "only the mode-change reassertion may write unconditionally; "
+            f"found {len(forced)}: {forced}",
+        )
+        self.assertIn("$refreshed[0]", forced[0])
+
+    def test_the_gamma_state_is_read_only_when_it_changes(self):
+        """Also not the leak fix, and also worth keeping: the file changes when the
+        user switches the correction, not 75 times a minute, so parsing it on every
+        pass is work with nothing to show for it."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn("GammaCacheStamp", script)
+        self.assertIn("GetLastWriteTimeUtc($GammaStatePath)", script)
 
     def test_watchdog_registers_its_task_for_the_current_sid(self):
         """Registering by username breaks on renamed or non-ASCII accounts."""
@@ -275,12 +358,16 @@ class WatchdogIdentityTests(unittest.TestCase):
 
     def test_state_written_before_the_field_existed_still_matches(self):
         """Every existing install has no DevicePath in State.json; refusing those would
-        make the watchdog forget every display it was already protecting."""
+        make the watchdog forget every display it was already protecting.
+
+        An entry with no path is skipped rather than counted as one, so it never trips
+        the "both sides name a monitor" test above and the GdiName fallback still runs.
+        """
         script = self.install()
-        self.assertIn("$_.PSObject.Properties.Name -contains 'DevicePath'", script)
+        self.assertIn("$entryPath = [string]$entry.DevicePath", script)
+        self.assertIn("if (-not $entryPath) { continue }", script)
         self.assertIn(
-            "return $State.Displays | Where-Object { $_.GdiName -eq $CurrentDisplay.GdiName }",
-            script,
+            "if ($entry.GdiName -eq $CurrentDisplay.GdiName) { return $entry }", script
         )
 
     def test_the_installer_notices_when_it_cannot_replace_the_running_watchdog(self):

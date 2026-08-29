@@ -88,6 +88,12 @@ $ResultPath = Join-Path $AppDir 'install_result.json'
 $script:InstallWarnings = @()
 $TaskName = 'Virtual HDR OSD - Color Profile Mode Watchdog'
 
+# The parsed gamma state and the file timestamp it came from. Get-GammaEntryForDisplay
+# runs on every reconcile pass and this file changes only when the user switches the
+# correction, so re-reading it 75 times a minute bought nothing and leaked steadily.
+$script:GammaCacheStamp = $null
+$script:GammaCacheValue = $null
+
 function Write-Log {
     param([string]$Message)
 
@@ -826,22 +832,39 @@ function Find-SavedDisplay {
     #
     # Falls back to GdiName when either side lacks a path: state written by an earlier
     # version has no DevicePath, and Windows does not always supply one.
+    # foreach rather than Where-Object piped into Select-Object -First 1. The two are
+    # equivalent here and the pipeline form leaks: Select-Object -First stops the
+    # upstream command by throwing, and in Windows PowerShell 5.1 that path retains
+    # memory no forced GC reclaims. Where-Object on its own is clean, and so is the
+    # property test inside it -- it is specifically the early termination.
+    #
+    # Measured by running the whole watchdog twice under an identical probe, differing
+    # only in these loops. With the pipelines, committed bytes rose monotonically, about
+    # 2.3 KB a poll pass, 108.2 MB to 113.0 MB over 2,168 passes. Without them, 3,806
+    # passes ended at 108.1 MB, below where they started. Reading state with ReadAllText
+    # and caching the gamma file were both already in place for the leaking run, so
+    # neither of those was the cause. The cost lands on the reconcile path, so the rate
+    # follows how often profiles are being applied rather than the clock -- which is why
+    # it reads as 1 MB a minute sitting idle and 16 MB a minute during repeated applies.
     if (-not $State -or -not $State.Displays) { return $null }
     $path = [string]$CurrentDisplay.DevicePath
     if ($path) {
-        $byPath = $State.Displays | Where-Object {
-            ($_.PSObject.Properties.Name -contains 'DevicePath') -and ([string]$_.DevicePath -eq $path)
-        } | Select-Object -First 1
-        if ($byPath) { return $byPath }
+        $anyPaths = $false
+        foreach ($entry in $State.Displays) {
+            $entryPath = [string]$entry.DevicePath
+            if (-not $entryPath) { continue }
+            $anyPaths = $true
+            if ($entryPath -eq $path) { return $entry }
+        }
 
         # A path on both sides that does not match is a different monitor, not a miss.
         # Falling through to GdiName there is exactly the confusion this exists to stop.
-        $anyPaths = $State.Displays | Where-Object {
-            ($_.PSObject.Properties.Name -contains 'DevicePath') -and [string]$_.DevicePath
-        }
         if ($anyPaths) { return $null }
     }
-    return $State.Displays | Where-Object { $_.GdiName -eq $CurrentDisplay.GdiName } | Select-Object -First 1
+    foreach ($entry in $State.Displays) {
+        if ($entry.GdiName -eq $CurrentDisplay.GdiName) { return $entry }
+    }
+    return $null
 }
 
 function Format-HResult {
@@ -1009,16 +1032,39 @@ function Get-GammaEntryForDisplay {
         # makes the caller fall back to the state captured at install time, which can
         # assert the OPPOSITE correction variant -- the user's choice appears to
         # revert seconds after they make it, with nothing logged. Retry briefly.
+        # Read only when the file has actually changed. This runs on every reconcile
+        # pass -- about 75 times a minute -- against a file the GUI rewrites rarely,
+        # and both halves of doing it every time leak in Windows PowerShell 5.1:
+        # Get-Content -Raw keeps about 144 KB per call and ConvertFrom-Json about
+        # 14 KB, neither of which a forced GC reclaims. Measured on this machine at
+        # 5.4 MB per 30 seconds, which is 650 MB an hour, and the reason a watchdog
+        # left running all day reached 95 GB of commit charge and took the system's
+        # allocation limit with it.
+        $stampNow = $null
+        try { $stampNow = [System.IO.File]::GetLastWriteTimeUtc($GammaStatePath).Ticks } catch {}
+
         $gamma = $null
-        foreach ($attempt in 1..4) {
+        if ($null -ne $stampNow -and $stampNow -eq $script:GammaCacheStamp) {
+            # Unchanged since the last read. Fall through to the selection below with
+            # the parse already in hand, so the cache changes only how $gamma is
+            # obtained and never which record is chosen.
+            $gamma = $script:GammaCacheValue
+        }
+        for ($attempt = 1; $attempt -le 4 -and -not $gamma; $attempt++) {
             try {
-                $raw = Get-Content -Raw -LiteralPath $GammaStatePath -ErrorAction Stop
+                # [IO.File]::ReadAllText rather than Get-Content -Raw: same bytes, same
+                # BOM handling, 96 bytes per call retained against 144,821. Measured.
+                $raw = [System.IO.File]::ReadAllText($GammaStatePath)
                 if (-not [string]::IsNullOrWhiteSpace($raw)) {
                     $gamma = $raw | ConvertFrom-Json
                     break
                 }
             } catch {}
             Start-Sleep -Milliseconds (40 * $attempt)
+        }
+        if ($gamma -and $null -ne $stampNow) {
+            $script:GammaCacheStamp = $stampNow
+            $script:GammaCacheValue = $gamma
         }
         if (-not $gamma) { return $null }
         if (-not $gamma.displays) { return $null }
@@ -1151,11 +1197,10 @@ function Restore-SavedProfiles {
         [switch]$Force
     )
 
-    # The forced reassertion below runs every five seconds whether or not anything
-    # drifted, so leaving SDR alone has to be decided here. Virtual HDR OSD offers
-    # "third-party calibration owns SDR" for exactly this -- Calman and friends
-    # reload the STANDARD association themselves, and a redundant write on a timer
-    # is what fights them. The GUI publishes the choice; honour it.
+    # This runs on every pass, so leaving SDR alone has to be decided here. Virtual
+    # HDR OSD offers "third-party calibration owns SDR" for exactly this -- Calman and
+    # friends reload the STANDARD association themselves, and pulling it back from
+    # under them is what fights them. The GUI publishes the choice; honour it.
     $sdrUnmanaged = $false
     # What to reassert, in order of authority: a profile the user pinned in the GUI,
     # otherwise whatever was associated when this watchdog was installed.
@@ -1276,7 +1321,7 @@ function Invoke-GammaHotkey {
             # Keep the GUI runtime file synchronized when it exists, but do not depend on it.
             try {
                 if (Test-Path -LiteralPath $GammaStatePath) {
-                    $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+                    $gamma = [System.IO.File]::ReadAllText($GammaStatePath) | ConvertFrom-Json
                     foreach ($property in $gamma.displays.PSObject.Properties) {
                         if ($property.Value.gdi_name -eq $current.GdiName) {
                             $property.Value.enabled = [bool]$Enable
@@ -1494,7 +1539,7 @@ Loop
         # association is this app's own working profile, which Resolve-BaseExtendedProfile
         # deliberately refuses to adopt as a fallback -- otherwise the watchdog would
         # restore already-edited output as its own source. The pair below is what it
-        # actually reasserts, with -Force, every five seconds. Reporting that case as
+        # actually keeps in place, re-checked every five seconds. Reporting that as
         # "left untouched" said the opposite of what happens, and contradicted the app's
         # own status bar at the same moment.
         Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<managed by the Gamma OFF/ON pair below>' }))
@@ -1554,7 +1599,7 @@ try {
         exit 2
     }
 
-    $state = Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
+    $state = [System.IO.File]::ReadAllText($StatePath) | ConvertFrom-Json
     if (-not $state.Displays) {
         Write-Log 'No saved display associations; watchdog stopped.'
         exit 3
@@ -1624,7 +1669,10 @@ try {
                     # Give Windows a moment to finish the Win+Alt+B transition,
                     # then explicitly reassert both independent associations.
                     Start-Sleep -Milliseconds 700
-                    $refreshed = @(Get-ActiveDisplays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1)
+                    $refreshed = @()
+                    foreach ($candidate in (Get-ActiveDisplays)) {
+                        if ($candidate.GdiName -eq $current.GdiName) { $refreshed = @($candidate); break }
+                    }
                     if ($refreshed.Count -gt 0) {
                         Restore-SavedProfiles -CurrentDisplay $refreshed[0] -SavedDisplay $saved -Force
                     }
@@ -1635,11 +1683,25 @@ try {
 
             # Fallback reassertion. This also covers systems where SDR/WCG and HDR
             # can both report Advanced Color enabled through the legacy query.
+            # Re-check every five seconds, but write only when the association has
+            # actually drifted. This used to pass -Force, which rewrites both
+            # associations whether or not anything changed -- measured at two writes
+            # every 5.3 seconds, forever. Each one makes Windows re-apply the profile
+            # and reload the display LUT, which is imperceptible while that LUT is
+            # near-identity and a constant visible flash once it carries a measured
+            # greyscale correction. Nothing appeared in the log either, because a
+            # re-assert is not a correction and is deliberately silent, so the symptom
+            # was a flashing screen with no evidence anywhere.
+            #
+            # The read is the same API family as the write, so trusting it costs
+            # nothing: genuine drift is still restored within 800 ms by the pass above.
+            # -Force stays on the mode-change path, where the association can be right
+            # while the applied state is not.
             if (((Get-Date) - $lastForced).TotalSeconds -ge 5.0) {
                 foreach ($current in $currentDisplays) {
                     $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
                     if ($saved) {
-                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved -Force
+                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
                     }
                 }
                 $lastForced = Get-Date
