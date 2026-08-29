@@ -1686,12 +1686,14 @@ try {
             # Re-check every five seconds, but write only when the association has
             # actually drifted. This used to pass -Force, which rewrites both
             # associations whether or not anything changed -- measured at two writes
-            # every 5.3 seconds, forever. Each one makes Windows re-apply the profile
-            # and reload the display LUT, which is imperceptible while that LUT is
-            # near-identity and a constant visible flash once it carries a measured
-            # greyscale correction. Nothing appeared in the log either, because a
-            # re-assert is not a correction and is deliberately silent, so the symptom
-            # was a flashing screen with no evidence anywhere.
+            # every 5.3 seconds, forever, about seventeen thousand a day, each one
+            # asking Windows to re-apply a profile that was already in place.
+            #
+            # No visible symptom is claimed for this. It was chased as the cause of a
+            # flickering screen and is not: with the watchdog running and stopped, the
+            # association value and the GPU gamma ramp were both unchanged across 221
+            # samples at 10 Hz, and the flicker tracked a GPU-composited terminal under
+            # HDR instead. What is left is a real waste on a hot path.
             #
             # The read is the same API family as the write, so trusting it costs
             # nothing: genuine drift is still restored within 800 ms by the pass above.

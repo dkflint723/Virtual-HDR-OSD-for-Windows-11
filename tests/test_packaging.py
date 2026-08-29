@@ -200,12 +200,14 @@ class WatchdogPackagingTests(unittest.TestCase):
     def test_the_periodic_pass_does_not_rewrite_a_correct_association(self):
         """The five-second pass used to pass -Force, which rewrites both associations
         whether or not anything drifted. Measured with the writes redirected to a trace
-        file: two every 5.3 seconds, forever. Each one makes Windows re-apply the
-        profile and reload the display LUT -- imperceptible while that LUT is near
-        identity, and a constant visible flash once it carries a measured greyscale
-        correction. Nothing appeared in the log either, because a re-assert is not a
-        correction and is deliberately silent, so the symptom was a flashing screen
-        with no evidence anywhere.
+        file: two every 5.3 seconds, forever, about seventeen thousand a day, each one
+        asking Windows to re-apply a profile that was already in place.
+
+        No visible symptom is claimed. This was chased as the cause of a flickering
+        screen and is not: with the watchdog running and stopped, the association value
+        and the GPU gamma ramp were both unchanged across 221 samples at 10 Hz, and the
+        flicker turned out to track a GPU-composited terminal under HDR. What is left
+        is a real waste on a hot path, which is reason enough.
 
         -Force is still correct on the mode-change path, where the association can be
         right while the applied state is not, so the assertion counts rather than bans.
