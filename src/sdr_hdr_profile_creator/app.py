@@ -981,8 +981,13 @@ class MainWindow(FluentWidget):
             self._publish_gamma_runtime_intent(display)
             if display.current_mode == "HDR":
                 self._apply_mode_profile(reason)
+                # After the apply, not before: the apply writes the status line this
+                # appends to, so warning first would say it into a message that is
+                # about to be replaced.
+                self._warn_if_shaping_moved()
                 return
         self._update_activity_bar()
+        self._warn_if_shaping_moved()
 
     def _effective_sdr_white_nits(self, option: str | None = None) -> float | None:
         option = option if option is not None else self.state.hdr.sdr_gamma_correction
@@ -1100,13 +1105,7 @@ class MainWindow(FluentWidget):
         # longer exists. Measured once at 0.84-0.92 of target through the midrange, back
         # to 0.99-1.01 after a single re-measure -- so this is a heads-up about one pass,
         # not a fault.
-        if self._shaping_moved_since_measuring():
-            self._set_status(
-                self.status_label.text().rstrip('.') + ". The measured greyscale "
-                "correction was taken with different tone settings, so it no longer "
-                "matches this curve — measure again to bring it back into step.",
-                "warning",
-            )
+        self._warn_if_shaping_moved()
     def _save_state_soon(self) -> None:
         """Persist slider edits shortly after the user stops adjusting.
 
@@ -2761,6 +2760,34 @@ class MainWindow(FluentWidget):
             return ()
         return tuple(
             round(greyscale.sample(transform.green, code), 6) for code in self.SHAPING_CODES
+        )
+
+    def _warn_if_shaping_moved(self) -> None:
+        """Say, when it happens, that the stored correction no longer matches the curve.
+
+        Appended to whatever was just said rather than replacing it: that message
+        explains what the user's action did, and this is a consequence of it.
+
+        Called from every action that moves the shaping. Slider moves had it; changing
+        the SDR-in-HDR correction did not, and that is the one that actually bit -- a
+        response captured under Auto and then used under Off measured 0.84-0.92 of
+        target through the midrange, and read as a fault in the correction rather than
+        as a stale pairing. It is a heads-up about one pass, not damage: a single
+        re-measure puts it back to 0.99-1.01.
+
+        Deliberately not called from _build_from_panel. Replacing the luminance figures
+        there looks like a shaping change and is not one -- checked: peak 1000 against
+        peak 450 produces an identical fingerprint, because peak reaches the profile's
+        metadata and matrix rather than the green intent curve this samples. A call
+        there could never fire.
+        """
+        if not self._shaping_moved_since_measuring():
+            return
+        self._set_status(
+            self.status_label.text().rstrip('.') + ". The measured greyscale "
+            "correction was taken with different tone settings, so it no longer "
+            "matches this curve — measure again to bring it back into step.",
+            "warning",
         )
 
     def _shaping_moved_since_measuring(self) -> bool:

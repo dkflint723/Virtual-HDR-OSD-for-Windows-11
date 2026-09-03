@@ -2304,6 +2304,34 @@ class ShapingProvenanceTests(WindowTestCase):
         self.window.state.hdr.gamma = 2.6
         self.assertFalse(self.window._shaping_moved_since_measuring())
 
+    def test_changing_the_sdr_in_hdr_correction_says_the_ramp_is_now_stale(self):
+        """The change that actually bit, and the one path that did not warn.
+
+        Slider moves went through _control_changed, which checked. Switching SDR-in-HDR
+        went through _select_gamma_correction, which did not -- so the setting that
+        measured 0.84-0.92 of target through the midrange changed the shaping and said
+        nothing about it.
+        """
+        self.measure()
+        self.window._select_gamma_correction("Auto (Recommended)", "test")
+        text = self.window.status_label.text()
+        self.assertIn("different tone settings", text)
+        self.assertIn("measure again", text)
+
+    def test_the_warning_stays_quiet_when_the_shaping_has_not_moved(self):
+        self.measure()
+        self.window._set_status("nothing to add", "ok")
+        self.window._warn_if_shaping_moved()
+        self.assertEqual("nothing to add", self.window.status_label.text().split("·")[-1].strip())
+
+    def test_adopting_panel_luminance_is_not_treated_as_a_shaping_change(self):
+        """Peak reaches the profile's metadata and matrix, not the green intent curve
+        the fingerprint samples: peak 1000 and peak 450 fingerprint identically. A
+        warning here could only ever be a false one."""
+        self.measure()
+        self.window.state.hdr.peak_luminance_nits = 450.0
+        self.assertFalse(self.window._shaping_moved_since_measuring())
+
     def test_resetting_clears_the_provenance_with_the_correction(self):
         self.measure()
         with mock.patch.object(
