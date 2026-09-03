@@ -403,10 +403,6 @@ class WindowDisplayTests(unittest.TestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
 class CancellationTests(unittest.TestCase):
     """Esc is promised by the status line and the README; it has to work.
@@ -865,3 +861,7 @@ class PlacementWatcherTests(unittest.TestCase):
         watcher.cancel()   # keep the test short; the point is what it did not emit
         watcher.run()
         self.assertEqual(0, seen["detected"])
+
+
+if __name__ == "__main__":
+    unittest.main()

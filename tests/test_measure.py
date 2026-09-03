@@ -857,10 +857,6 @@ class ComposeGainsTests(unittest.TestCase):
         self.assertEqual(compose_gains((0.0, 0.0, 0.0), (1.0, 1.0, 1.0)), (1.0, 1.0, 1.0))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class PlacementDetectionTests(unittest.TestCase):
     """Whether the instrument is looking at the green placement target.
 
@@ -1057,3 +1053,7 @@ class FullSweepPlanTests(unittest.TestCase):
         self.assertGreater(estimated_seconds(full), estimated_seconds(quick) * 5)
         self.assertGreater(estimated_seconds(full), 180.0)
         self.assertLess(estimated_seconds(full), 600.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -499,10 +499,6 @@ class SurfaceFailureTests(PatternViewTestCase):
         self.assertFalse(win._keepalive.isActive())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class GuidedSequenceTests(PatternViewTestCase):
     """Nine patterns and a page of theory is not a procedure. A user who has to work out
     what to do first will do nothing, so the view opens on step 1 of 3 and says so."""
@@ -1751,3 +1747,7 @@ class LeavingTheGuidedRunTests(PatternViewTestCase):
         self.addCleanup(win.deleteLater)
         win.select_pattern(0)
         self.assertFalse(win.show_summary())
+
+
+if __name__ == "__main__":
+    unittest.main()

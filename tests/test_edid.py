@@ -149,10 +149,6 @@ class FrameAverageTests(unittest.TestCase):
         self.assertAlmostEqual(panel.peak_nits / panel.max_frame_average_nits, 3.83, places=1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 def encode_chromaticity(values):
     """Build EDID base-block bytes 0x19-0x22 for eight xy coordinates.
 
@@ -346,3 +342,7 @@ class ChromaticityInTheBaseBlockTests(unittest.TestCase):
         impossible[3] = 0.0          # green y
         panel = parse_hdr_static_metadata(self.edid_with(impossible))
         self.assertEqual((), panel.primaries)
+
+
+if __name__ == "__main__":
+    unittest.main()

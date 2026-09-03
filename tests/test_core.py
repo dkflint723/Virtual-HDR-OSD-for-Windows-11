@@ -607,10 +607,6 @@ class DisplayConfigLayoutTests(unittest.TestCase):
         self.assertEqual(wa.DISPLAYCONFIG_PATH_TARGET_INFO.outputTechnology.offset, 16)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ChadlessBaseTests(unittest.TestCase):
     """A base profile that never says what white its colorants were adapted to.
 
@@ -1147,3 +1143,7 @@ class InPlaceProfileRetryTests(unittest.TestCase):
             message.index("Try applying again"), message.index("Run as Admin"),
             "the transient cause should be offered before the drastic one",
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

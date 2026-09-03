@@ -353,10 +353,6 @@ class PqHelperSanityTests(unittest.TestCase):
                 self.assertAlmostEqual(pq_eotf(pq_inverse_eotf(nits)), nits, places=2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ShapeSensitivityTests(unittest.TestCase):
     """How much brighter the shape is than its surround IS the sensitivity of the
     measurement: the two merge only once the display can no longer keep them apart, so a
@@ -756,3 +752,7 @@ class PlacementTargetTests(unittest.TestCase):
         seen = Reading(X=0.34 * PLACEMENT_NITS, Y=PLACEMENT_NITS, Z=0.05 * PLACEMENT_NITS,
                        x=0.24, y=0.71)
         self.assertTrue(sees_placement_target(seen))
+
+
+if __name__ == "__main__":
+    unittest.main()
