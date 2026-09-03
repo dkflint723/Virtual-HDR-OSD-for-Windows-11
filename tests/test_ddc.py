@@ -26,10 +26,12 @@ class FakeLink:
     """A monitor whose gains can be read and written, with the failure modes real ones
     have: reads that fail the first few times, and writes that are accepted and ignored."""
 
-    def __init__(self, gains=(100, 100, 100), maximum=100, *, cold_reads=0, locked=False):
+    def __init__(self, gains=(100, 100, 100), maximum=100, *, cold_reads=0,
+                 cold_writes=0, locked=False):
         self.values = dict(zip(ddc.GAINS, gains))
         self.maximum = maximum
         self.cold_reads = cold_reads
+        self.cold_writes = cold_writes
         self.locked = locked
         self.writes: list[tuple[int, int]] = []
 
@@ -41,10 +43,19 @@ class FakeLink:
             return None
         return ddc.Control(code=code, current=self.values[code], maximum=self.maximum)
 
-    def write(self, code, value):
+    def set(self, code, value):
+        """One raw attempt, with the two real failure modes selectable.
+
+        cold_writes fails the call outright, which is a busy link; locked lets the call
+        succeed and does not move the value, which is a control the display is ignoring.
+        They are opposite diagnoses and the code has to tell them apart.
+        """
         self.writes.append((code, value))
-        if self.locked:
+        if self.cold_writes > 0:
+            self.cold_writes -= 1
             return False
+        if self.locked:
+            return True          # accepted, and quietly ignored
         self.values[code] = value
         return True
 
@@ -136,13 +147,47 @@ class TuneTests(unittest.TestCase):
 
     def test_a_locked_control_is_restored_and_reported(self):
         """The common HDR case on many monitors: the write is accepted and ignored.
-        MonitorLink.write reads back, so this surfaces as a failed write rather than as
-        a loop adjusting a control that never moved."""
+        write_control reads back, so this surfaces as a refusal rather than as a loop
+        adjusting a control that never moved."""
         link = FakeLink(gains=(90, 90, 90), locked=True)
         measure, solve, delta = self.panel(link)
         outcome = ddc_tune.tune(link, measure, solve, delta)
         self.assertIn("did not apply it", outcome.refused)
         self.assertEqual(outcome.started_at, outcome.ended_at)
+
+    def test_a_busy_link_is_retried_rather_than_called_locked(self):
+        """29% of single DDC/CI operations fail on the hardware this was written for, so
+        a refused write says nothing on its own. Reporting it as a locked control would
+        send someone into their monitor's menu looking for a setting that is not the
+        problem."""
+        link = FakeLink(gains=(90, 90, 90), cold_writes=2)
+        measure, solve, delta = self.panel(link)
+        outcome = ddc_tune.tune(link, measure, solve, delta)
+        self.assertEqual("", outcome.refused, "a transient failure must not stop tuning")
+        self.assertTrue(outcome.changed)
+
+    def test_the_two_write_failures_are_told_apart(self):
+        """They wear the same face at the API and mean opposite things."""
+        self.assertEqual(
+            "", ddc.write_control(FakeLink(gains=(90, 90, 90), cold_writes=3),
+                                  ddc.RED_GAIN, 80)
+        )
+        self.assertIn(
+            "did not apply it",
+            ddc.write_control(FakeLink(gains=(90, 90, 90), locked=True), ddc.RED_GAIN, 80),
+        )
+        self.assertIn(
+            "did not accept",
+            ddc.write_control(FakeLink(gains=(90, 90, 90), cold_writes=99),
+                              ddc.RED_GAIN, 80, attempts=3, pause=0.0),
+        )
+
+    def test_a_restore_tries_every_channel_even_when_one_refuses(self):
+        """Stopping at the first failure is how a display ends up half restored, which
+        is the one state worse than either leaving it tuned or leaving it alone."""
+        link = FakeLink(gains=(90, 90, 90))
+        ddc_tune._restore(link, ddc.GAINS, (80, 81, 82))
+        self.assertEqual([80, 81, 82], [link.values[code] for code in ddc.GAINS])
 
     def test_a_round_that_makes_white_worse_stops_and_steps_back(self):
         """A knocked meter or an unsettled patch would otherwise walk the display away

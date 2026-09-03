@@ -67,15 +67,17 @@ class Control:
 
 
 class Link(Protocol):
-    """The two operations a monitor link has to provide.
+    """The two RAW operations a monitor link provides, each a single attempt.
 
-    Narrow on purpose: the tuning loop is written against this, so it can be driven by a
-    fake that models a panel rather than by a real display.
+    Single attempt on purpose. Retrying belongs in :func:`read_control` and
+    :func:`write_control`, where a fake can exercise it -- 29% of single reads fail on
+    the hardware this was written against, so the retry policy is the part most worth
+    testing and the part a real-monitor-only implementation would leave uncovered.
     """
 
     def read(self, code: int) -> Control | None: ...
 
-    def write(self, code: int, value: int) -> bool: ...
+    def set(self, code: int, value: int) -> bool: ...
 
 
 class UnavailableLink:
@@ -89,7 +91,7 @@ class UnavailableLink:
     def read(self, code: int) -> Control | None:  # noqa: ARG002
         return None
 
-    def write(self, code: int, value: int) -> bool:  # noqa: ARG002
+    def set(self, code: int, value: int) -> bool:  # noqa: ARG002
         return False
 
 
@@ -129,22 +131,11 @@ class MonitorLink:
             return None
         return Control(code=code, current=int(current.value), maximum=int(maximum.value))
 
-    def write(self, code: int, value: int) -> bool:
-        """Set a control, and confirm by reading it back.
-
-        A monitor is free to accept a write and ignore it -- which is what many do to
-        brightness while HDR is on -- and SetVCPFeature returns success either way. A
-        tuning loop that believed the return value would keep adjusting a control that
-        never moved, so success here means the display actually reports the new value.
-        """
-        ok = _dxva2.SetVCPFeature(
+    def set(self, code: int, value: int) -> bool:
+        """One attempt. See :func:`write_control` for the retry and the read-back."""
+        return bool(_dxva2.SetVCPFeature(
             wintypes.HANDLE(self._handle), ctypes.c_ubyte(code), wintypes.DWORD(value)
-        )
-        if not ok:
-            return False
-        time.sleep(RETRY_PAUSE_SECONDS)
-        seen = read_control(self, code)
-        return seen is not None and seen.current == value
+        ))
 
 
 def monitors() -> Iterator[MonitorLink]:
@@ -224,6 +215,43 @@ def read_control(
         if attempt + 1 < attempts:
             time.sleep(pause)
     return None
+
+
+def write_control(
+    link: Link,
+    code: int,
+    value: int,
+    *,
+    attempts: int = READ_ATTEMPTS,
+    pause: float = RETRY_PAUSE_SECONDS,
+) -> str:
+    """Set a control and confirm it took. Empty string on success, else the reason.
+
+    Two failures wear the same face at the API and mean opposite things, so they are
+    told apart here rather than reported as one:
+
+    * The call itself fails. On the hardware this was written against 29% of single
+      DDC/CI operations fail, so one refusal says nothing at all -- it is a cold link,
+      and the answer is to ask again.
+    * The call succeeds and the value does not move. That is the display accepting a
+      write and ignoring it, which is what many do to their controls while HDR is on.
+      No number of retries fixes that, and it is the one worth telling the user about.
+
+    Reporting the first as the second would tell someone their monitor's controls are
+    locked when they are simply busy.
+    """
+    for attempt in range(max(1, attempts)):
+        if link.set(code, value):
+            time.sleep(pause)
+            seen = read_control(link, code, attempts=attempts, pause=pause)
+            if seen is None:
+                return "the monitor stopped answering after the change was sent"
+            if seen.current == value:
+                return ""
+            return "the monitor accepted the change and did not apply it"
+        if attempt + 1 < attempts:
+            time.sleep(pause)
+    return "the monitor did not accept the change"
 
 
 def read_gains(link: Link) -> dict[int, Control] | None:

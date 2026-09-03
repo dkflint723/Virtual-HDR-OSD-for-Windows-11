@@ -172,10 +172,14 @@ def tune(
             outcome.ended_at = outcome.rounds[-2].gains
             break
 
-        if not _apply(link, proposed):
+        problem = _apply(link, proposed)
+        if problem:
+            # The reason comes from write_control, which separates a busy link from a
+            # locked control. Saying "your controls are locked" for what was actually a
+            # cold DDC/CI link would send someone into their monitor's menu for nothing.
             outcome.refused = (
-                "The monitor accepted a gain change and did not apply it. Its controls "
-                "are probably locked in this picture mode."
+                f"The monitor's red, green and blue gains could not be set: {problem}. "
+                "The previous setting has been put back."
             )
             _restore(link, ddc.GAINS, start)  # type: ignore[arg-type]
             outcome.ended_at = start  # type: ignore[assignment]
@@ -188,13 +192,20 @@ def tune(
     return outcome
 
 
-def _apply(link: ddc.Link, gains: tuple[int, int, int]) -> bool:
+def _apply(link: ddc.Link, gains: tuple[int, int, int]) -> str:
+    """Set all three gains. Empty string on success, else the first reason."""
     for code, value in zip(ddc.GAINS, gains):
-        if not link.write(code, value):
-            return False
-    return True
+        problem = ddc.write_control(link, code, value)
+        if problem:
+            return problem
+    return ""
 
 
 def _restore(link: ddc.Link, codes, gains) -> None:
+    """Put the gains back, trying every channel even if one refuses.
+
+    Stopping at the first failure is how a display ends up half restored, which is the
+    one state worse than either leaving it tuned or leaving it alone.
+    """
     for code, value in zip(codes, gains):
-        link.write(code, value)
+        ddc.write_control(link, code, value)
