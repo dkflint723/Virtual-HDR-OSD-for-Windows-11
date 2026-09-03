@@ -24,6 +24,44 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+class TestFileShapeTests(unittest.TestCase):
+    """The suite has to be honest about how much of itself it is running."""
+
+    def test_no_test_file_strands_classes_after_its_main_guard(self):
+        """`if __name__ == "__main__": unittest.main()` in the middle of a file collects
+        only what is defined above it. Under `unittest discover` the module is merely
+        imported, so everything runs and this never shows -- but running one file while
+        working on it is the normal thing to do, and that reported a confident pass over
+        part of the file.
+
+        It was 405 tests across six files when this was found: 203 of them in
+        test_gui.py, 111 in test_pattern_view.py.
+        """
+        import ast
+
+        offenders = []
+        for path in sorted((ROOT / "tests").glob("test_*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            guard = next(
+                (node.lineno for node in tree.body
+                 if isinstance(node, ast.If) and "__main__" in ast.dump(node.test)),
+                None,
+            )
+            if guard is None:
+                continue
+            stranded = sum(
+                1
+                for node in tree.body
+                if isinstance(node, ast.ClassDef) and node.lineno > guard
+                for item in node.body
+                if isinstance(item, ast.FunctionDef) and item.name.startswith("test")
+            )
+            if stranded:
+                offenders.append(f"{path.name}: {stranded} tests after line {guard}")
+
+        self.assertEqual(offenders, [], "move the __main__ guard to the end of the file")
+
+
 class WatchdogPackagingTests(unittest.TestCase):
     def test_resources_the_app_launches_are_packaged(self):
         """app._run_watchdog_script resolves these names inside the package."""
@@ -196,6 +234,85 @@ class WatchdogPackagingTests(unittest.TestCase):
             and not line.strip().startswith("#")
         ]
         self.assertEqual(offenders, [], "early pipeline termination leaks in 5.1")
+
+    def test_the_runtime_lookup_identifies_the_monitor_not_the_slot(self):
+        """State.json was moved onto the EDID device path because \\\\.\\DISPLAY1 is a slot
+        Windows reassigns. gamma_hotkeys.json was left matching on the slot, so the two
+        lookups disagreed after a hotplug and one monitor could be handed the other's
+        Off/On pair -- which is exactly what the watchdog then asserts into Windows.
+
+        app.runtime_record_matches applies the same rule on the Python side; if these
+        two ever diverge the bug comes straight back.
+        """
+        payload = self.payload()
+        self.assertIn("$wantPath = [string]$CurrentDisplay.DevicePath", payload)
+        self.assertIn("$entryPath = [string]$property.Value.device_path", payload)
+        # The slot is still the fallback: records written before the GUI published a
+        # path have none, and refusing those would forget every existing display.
+        self.assertIn("} elseif ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {", payload)
+
+    def test_state_files_are_replaced_rather_than_truncated(self):
+        """Set-Content truncates in place. A kill inside that window leaves a partial
+        State.json, and the watchdog then cannot start at all -- far worse than losing
+        the switch that was being written. The GUI reads gamma_hotkeys.json with no
+        retry and answers a torn read by starting from an empty payload, which then
+        drops every other display's record on its next publish."""
+        payload = self.payload()
+        truncating = [
+            line.strip() for line in payload.splitlines()
+            if "Set-Content -LiteralPath $StatePath " in line
+            or "Set-Content -LiteralPath $GammaStatePath " in line
+        ]
+        self.assertEqual(truncating, [], "a state file is still written in place")
+        self.assertIn("Move-Item -LiteralPath $stateTmp -Destination $StatePath -Force", payload)
+        self.assertIn(
+            "Move-Item -LiteralPath $gammaTmp -Destination $GammaStatePath -Force", payload
+        )
+
+    def test_an_unreadable_state_file_stops_the_watchdog_instead_of_respawning_it(self):
+        """Under $ErrorActionPreference = 'Stop' a truncated State.json was a terminating
+        error, so PowerShell exited 1 -- which Launcher.vbs reads as "restart me". One
+        torn write became a silent respawn every five seconds for the rest of the
+        session. 2 is the launcher's stop code, and retrying cannot fix a corrupt file.
+        """
+        payload = self.payload()
+        guard = payload.find("State.json could not be parsed")
+        self.assertNotEqual(-1, guard, "the startup parse is still unguarded")
+        self.assertIn("exit 2", payload[guard:guard + 400])
+
+    def test_a_failed_install_still_records_that_it_failed(self):
+        """Every throw in -Install used to leave nothing behind: no watchdog, because the
+        old one is stopped on the way in, and no result file, because the only writer is
+        at the very end. The GUI then fell back to Watchdog.ps1's mtime -- stamped by the
+        .bat before any of this runs -- and printed a green "Watchdog installed".
+
+        The owner hit exactly this on 2026-08-28: Task Scheduler registration was refused
+        with Access is denied, and the install reported success.
+        """
+        payload = self.payload()
+        trap = payload.find("    trap {")
+        self.assertNotEqual(-1, trap, "no trap around the install body")
+        body = payload[trap:trap + 1200]
+        self.assertIn("ok       = $false", body)
+        self.assertIn("$ResultPath", body)
+        self.assertIn("exit 1", body)
+
+    def test_the_install_validates_before_it_stops_the_running_watchdog(self):
+        """Stopping first meant a validation failure took a working watchdog down with
+        it, leaving the machine with nothing until the next sign-in. Neither check needs
+        the old watchdog stopped. The capture that follows genuinely does, because a
+        running watchdog re-asserts the associations the capture is trying to read."""
+        payload = self.payload()
+        stop = payload.find("$clearedTheWay = Stop-ExistingWatchdog")
+        self.assertNotEqual(-1, stop)
+        for check in ("requires Windows build 20348 or newer",
+                      "No active displays were found."):
+            with self.subTest(check=check):
+                at = payload.find(check)
+                self.assertNotEqual(-1, at, check)
+                self.assertLess(at, stop, f"{check!r} must be checked before stopping the watchdog")
+        # And the capture must still come after it.
+        self.assertLess(stop, payload.find("$item = Get-SavedProfileState -Display $display"))
 
     def test_the_periodic_pass_does_not_rewrite_a_correct_association(self):
         """The five-second pass used to pass -Force, which rewrites both associations
@@ -558,10 +675,6 @@ class EntryPointTests(unittest.TestCase):
         self.assertNotIn("--standalone", builder)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReadmeAccuracyTests(unittest.TestCase):
     """Documentation drifts silently. These check only claims that would become false if
     the code moved -- not prose, which is the author's business."""
@@ -662,3 +775,7 @@ class InstallerWriteVerificationTests(unittest.TestCase):
 
     def test_a_failed_write_leaves_the_previous_version_alone(self):
         self.assertIn("previous version, if any, has been left untouched", self.script())
+
+
+if __name__ == "__main__":
+    unittest.main()

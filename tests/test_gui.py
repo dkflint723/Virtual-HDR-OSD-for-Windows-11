@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -1366,7 +1367,11 @@ class WatchdogLaunchTests(WindowTestCase):
         self.window._report_watchdog_outcome(True, before, launched_at)
         text = self.window.status_label.text()
         self.assertNotIn("ancient history", text)
-        self.assertIn("Watchdog installed", text)
+        # Having correctly refused the stale record, this run has no record of its own,
+        # which is an unknown rather than a success. This assertion used to read
+        # "Watchdog installed" -- it was riding on the mtime fallback that has since been
+        # removed, not on anything this test is about.
+        self.assertIn("did not report an outcome", text)
 
     def test_a_stale_result_cannot_pass_when_nothing_is_installed_yet(self):
         """The case that made the first version of this wrong: with no Watchdog.ps1 the
@@ -1398,12 +1403,49 @@ class WatchdogLaunchTests(WindowTestCase):
         self.assertIn("Error", text)
         self.assertIn("elevated install", text)
 
-    def test_install_that_updates_the_script_is_reported_as_success(self):
+    def test_install_that_records_nothing_is_not_reported_as_success(self):
+        """This test used to assert the opposite, and the opposite was the bug.
+
+        A moved mtime proves extraction and nothing else. Now that the installer traps
+        its own throws and records them, reaching this branch means it did not get far
+        enough to write anything at all -- which is an unknown, not a success. Reporting
+        an unknown in green is what let a dead watchdog look installed for an evening,
+        and it is what the owner hit on 2026-08-28 when Task Scheduler registration was
+        refused.
+        """
         before = self.window._watchdog_script_stamp()
         self.script.write_text("installed", encoding="utf-8")
         self.window._report_watchdog_outcome(True, before)
-        self.assertIn("Watchdog installed", self.window.status_label.text())
-        self.assertNotIn("Error", self.window.status_label.text())
+        text = self.window.status_label.text()
+        self.assertIn("did not report an outcome", text)
+        self.assertIn("Attention", text, "an unknown outcome must not read as success")
+        self.assertNotIn("Ready", text)
+
+    def test_the_outcome_is_waited_for_rather_than_sampled_once(self):
+        """A first install enumerates displays, resolves the working pair and registers a
+        scheduled task over COM, which routinely outruns the old nine-second shot. The
+        poll reports as soon as the record appears and stops at its deadline."""
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("installed", encoding="utf-8")
+        launched_at = time.time() - 1.0
+        self.window._watchdog_poll_deadline = time.time() + 90.0
+
+        # Nothing recorded yet: it must keep waiting rather than reporting.
+        self.window._set_status("waiting", "warning")
+        self.window._poll_watchdog_outcome(True, before, launched_at)
+        self.assertIn("waiting", self.window.status_label.text())
+
+        # The record lands; the next poll reports it.
+        self.write_result(action="install", ok=True, startup="Task Scheduler", warnings=[])
+        self.window._poll_watchdog_outcome(True, before, launched_at)
+        self.assertIn("Ready", self.window.status_label.text())
+
+    def test_the_poll_gives_up_at_its_deadline(self):
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("installed", encoding="utf-8")
+        self.window._watchdog_poll_deadline = time.time() - 1.0
+        self.window._poll_watchdog_outcome(True, before, time.time() - 5.0)
+        self.assertIn("did not report an outcome", self.window.status_label.text())
 
     def test_install_that_silently_does_nothing_is_reported_as_failure(self):
         """The original `start`-based launch made this case invisible."""
@@ -1550,7 +1592,62 @@ class RebootStabilityTests(WindowTestCase):
         self.assertIn(other.key, entries, "another monitor's record was pruned")
 
 
+class RuntimeRecordIdentityTests(unittest.TestCase):
+    """Which monitor a gamma_hotkeys.json record belongs to.
+
+    State.json was moved onto the monitor's EDID device path because \\\\.\\DISPLAY1 is a
+    slot Windows reassigns between sessions. The runtime file was left matching on the
+    slot, so after a hotplug the two lookups disagreed and one monitor could be handed
+    the other's profile pair -- the pair being what the watchdog then asserts into
+    Windows.
+    """
+
+    def make(self, key, gdi, path):
+        display = hdr_display(key=key)
+        display.gdi_name = gdi
+        display.device_path = path
+        return display
+
+    def test_the_device_path_decides_when_both_sides_have_one(self):
+        display = self.make("A", r"\\.\DISPLAY1", r"\\?\DISPLAY#AUS32F2#UID4357")
+        # Same monitor, but Windows has moved it to a different slot since the record
+        # was written. It is still this monitor.
+        record = {"gdi_name": r"\\.\DISPLAY2", "device_path": r"\\?\DISPLAY#AUS32F2#UID4357"}
+        self.assertTrue(app_module.runtime_record_matches(record, display))
+
+    def test_a_different_monitor_in_the_same_slot_is_not_a_match(self):
+        """The failure this exists to prevent: two monitors swap slots, and the record
+        for one is applied to the other."""
+        display = self.make("A", r"\\.\DISPLAY1", r"\\?\DISPLAY#AUS32F2#UID4357")
+        record = {"gdi_name": r"\\.\DISPLAY1", "device_path": r"\\?\DISPLAY#DEL1234#UID9"}
+        self.assertFalse(app_module.runtime_record_matches(record, display))
+
+    def test_a_record_written_before_paths_were_published_still_matches_by_slot(self):
+        display = self.make("A", r"\\.\DISPLAY1", r"\\?\DISPLAY#AUS32F2#UID4357")
+        self.assertTrue(app_module.runtime_record_matches({"gdi_name": r"\\.\DISPLAY1"}, display))
+        self.assertFalse(app_module.runtime_record_matches({"gdi_name": r"\\.\DISPLAY2"}, display))
+
+    def test_a_display_windows_gives_no_path_for_falls_back_to_the_slot(self):
+        display = self.make("A", r"\\.\DISPLAY1", "")
+        self.assertTrue(app_module.runtime_record_matches(
+            {"gdi_name": r"\\.\DISPLAY1", "device_path": r"\\?\DISPLAY#WHATEVER"}, display))
+
+    def test_rubbish_is_not_a_match(self):
+        display = self.make("A", r"\\.\DISPLAY1", r"\\?\DISPLAY#AUS32F2#UID4357")
+        for value in (None, "", 7, [], {"device_path": 42}):
+            with self.subTest(value=value):
+                self.assertFalse(app_module.runtime_record_matches(value, display))
+
+
 class RuntimeStateTests(WindowTestCase):
+    def test_the_published_record_carries_the_monitors_device_path(self):
+        """Without this the watchdog has nothing to match on, and its device-path lookup
+        silently degrades to the slot match it was meant to replace."""
+        self.apply()
+        entry = self.read_runtime()["displays"][self.display.key]
+        self.assertIn("device_path", entry)
+        self.assertEqual(entry["device_path"], self.display.device_path)
+
     def test_runtime_state_publishes_the_keys_the_watchdog_reads(self):
         self.apply()
         payload = self.read_runtime()
@@ -1707,9 +1804,60 @@ class SliderControlTests(unittest.TestCase):
         control.set_value(-4.35, emit=False)
         self.assertAlmostEqual(control.slider.value() / control._scale, control.value(), places=6)
 
+    def test_uncommitted_out_of_range_text_is_not_the_control_value(self):
+        """The validator refuses to let editingFinished fire for text outside the range,
+        so this text never gets clamped or quantised on its way anywhere. While value()
+        read the field, it was handed straight to the profile build and the pattern
+        view: a 0-100 control could report 9999, matching neither its own slider nor
+        the state it was supposed to describe."""
+        control = self.make()
+        control.set_value(2.0, emit=False)
+        control.value_edit.setText("9999")
+        self.assertAlmostEqual(control.value(), 2.0)
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_unparseable_text_does_not_silently_become_the_default(self):
+        """Falling back to spec.default meant a stray keystroke reported neutral for a
+        control that was nowhere near neutral -- the one wrong answer with no signal
+        that anything had gone wrong."""
+        control = self.make()
+        control.set_value(-6.5, emit=False)
+        control.value_edit.setText("not a number")
+        self.assertAlmostEqual(control.value(), -6.5)
+
+    def test_losing_focus_puts_rejected_text_back_to_the_real_value(self):
+        """Rejected text used to just sit there contradicting the slider beside it, with
+        nothing to say which one the profile would be built from."""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QFocusEvent
+
+        control = self.make()
+        control.set_value(3.25, emit=False)
+        control.value_edit.setText("9999")
+        # sendEvent, not value_edit.event(): only the notify path runs installed event
+        # filters, and the resync lives in one. Calling event() directly would test
+        # nothing and pass whatever the filter did.
+        self.qt_app.sendEvent(control.value_edit, QFocusEvent(QEvent.Type.FocusOut))
+        self.assertEqual(control.value_edit.text(), "3.25")
+        self.assertAlmostEqual(control.value(), 3.25)
+
+    def test_a_committed_edit_still_reaches_the_value(self):
+        """The guard above must not eat legitimate typing: acceptable text has to keep
+        flowing through editingFinished."""
+        control = self.make()
+        control.set_value(0.0, emit=False)
+        control.value_edit.setText("4.5")
+        control.value_edit.editingFinished.emit()
+        self.assertAlmostEqual(control.value(), 4.5)
+        self.assertAlmostEqual(control.slider.value() / control._scale, 4.5, places=6)
+
+    def test_dragging_the_slider_updates_the_value(self):
+        """_slider_changed writes the field and emits; with the value held separately it
+        has to write that too, or dragging would move the picture and report the old
+        number."""
+        control = self.make()
+        control.set_value(0.0, emit=False)
+        control.slider.setValue(round(7.5 * control._scale))
+        self.assertAlmostEqual(control.value(), 7.5, places=6)
 
 
 class PatternViewLiveApplyTests(WindowTestCase):
@@ -3183,6 +3331,43 @@ class PanelProvenanceTests(WindowTestCase):
         self.assertAlmostEqual(350.0, state.full_frame_luminance_nits, places=3)
         self.assertEqual(other.stable_key, state.panel_source_key)
 
+    def test_a_measured_response_does_not_follow_you_to_a_display_with_no_readable_edid(self):
+        """The one branch that skipped the provenance check.
+
+        _prefill_luminance_from_panel clears the measured response, but only after it
+        has read a credible EDID -- a display whose EDID cannot be read returns before
+        that. _capture_panel_primaries then stamped panel_source_key with the new
+        display anyway, via its DXGI fallback, so the previous display's measured
+        greyscale curve stayed in state and was relabelled as this one's. From then on
+        nothing could tell it was foreign, and it went into the profile.
+        """
+        state = self.window.state.hdr
+        state.panel_source_key = "PANEL-A"
+        state.panel_response = (0.1, 0.5, 0.1, 0.5, 0.1, 0.5) * 8
+        state.panel_response_weights = (0.2126, 0.7152, 0.0722)
+        state.panel_response_shaping = (0.1, 0.2, 0.3)
+
+        other = self.other_display()
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: None):
+            self.window._adopt_panel_for(other)
+
+        self.assertEqual((), state.panel_response, "another display's ramp was kept")
+        self.assertEqual((), state.panel_response_weights)
+        self.assertEqual((), state.panel_response_shaping)
+
+    def test_reselecting_the_same_display_keeps_its_own_measured_response(self):
+        """The other half: clearing must key on the display, not on the switch. A
+        response taken on this display has to survive re-selecting it."""
+        state = self.window.state.hdr
+        state.panel_source_key = self.display.stable_key
+        state.panel_response = (0.1, 0.5, 0.1, 0.5, 0.1, 0.5) * 8
+        state.panel_response_weights = (0.2126, 0.7152, 0.0722)
+
+        with mock.patch.object(app_module, "read_panel_metadata", lambda _p: None):
+            self.window._adopt_panel_for(self.display)
+
+        self.assertNotEqual((), state.panel_response, "this display's own ramp was discarded")
+
     def test_reselecting_the_same_display_leaves_its_measurements_alone(self):
         """A reading taken on this display outranks its own EDID; only figures whose
         recorded source is a different display are replaced."""
@@ -4329,3 +4514,7 @@ class HotkeyOwnershipTests(WindowTestCase):
     def test_holding_them_is_reported_plainly(self):
         self.window._hotkey_registration_changed(True, "registered")
         self.assertIn("active", self.window.hotkey_status_label.text().lower())
+
+
+if __name__ == "__main__":
+    unittest.main()

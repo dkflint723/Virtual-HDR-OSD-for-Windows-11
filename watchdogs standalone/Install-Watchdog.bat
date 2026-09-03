@@ -1074,9 +1074,19 @@ function Get-GammaEntryForDisplay {
         # records carrying the same gdi_name. Returning the first match handed the
         # caller a stale record naming profiles that no longer exist, defeating the
         # intent comparison in Get-DesiredExtendedProfile. Take the newest record.
+        # Match on the monitor's EDID device path whenever both sides carry one, the
+        # way Find-SavedDisplay already does for State.json. gdi_name is \\.\DISPLAY1 --
+        # a slot Windows reassigns between sessions -- so after a hotplug this handed one
+        # monitor the profile pair belonging to another, while the State.json lookup
+        # beside it, already fixed, disagreed. Records written before the GUI published a
+        # path have none, and still match by slot.
+        $wantPath = [string]$CurrentDisplay.DevicePath
         $candidates = @()
         foreach ($property in $gamma.displays.PSObject.Properties) {
-            if ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
+            $entryPath = [string]$property.Value.device_path
+            if ($wantPath -and $entryPath) {
+                if ($entryPath -eq $wantPath) { $candidates += $property.Value }
+            } elseif ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
                 $candidates += $property.Value
             }
         }
@@ -1316,20 +1326,38 @@ function Invoke-GammaHotkey {
             # Add-Member -Force also creates the property on State.json files written
             # before this field existed; a plain assignment throws on those.
             $saved | Add-Member -NotePropertyName GammaUpdatedAt -NotePropertyValue $switchedAt -Force
-            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+            # Through a temporary file. Set-Content truncates in place, so a kill in
+            # that window leaves a half-written State.json -- and the watchdog then
+            # cannot start at all, which is a far worse failure than losing one switch.
+            $stateTmp = $StatePath + '.tmp'
+            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+            Move-Item -LiteralPath $stateTmp -Destination $StatePath -Force
 
             # Keep the GUI runtime file synchronized when it exists, but do not depend on it.
             try {
                 if (Test-Path -LiteralPath $GammaStatePath) {
                     $gamma = [System.IO.File]::ReadAllText($GammaStatePath) | ConvertFrom-Json
+                    $wantPath = [string]$current.DevicePath
                     foreach ($property in $gamma.displays.PSObject.Properties) {
-                        if ($property.Value.gdi_name -eq $current.GdiName) {
+                        $entryPath = [string]$property.Value.device_path
+                        $isThisMonitor = if ($wantPath -and $entryPath) {
+                            $entryPath -eq $wantPath
+                        } else {
+                            $property.Value.gdi_name -eq $current.GdiName
+                        }
+                        if ($isThisMonitor) {
                             $property.Value.enabled = [bool]$Enable
                             $property.Value.active_profile = [string]$profile
                             $property.Value.updated_at = $switchedAt
                         }
                     }
-                    $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $GammaStatePath -Encoding UTF8
+                    # The GUI reads this file with no retry, and answers a torn read
+                    # by starting from an empty payload -- which then loses every other
+                    # display's record on its next publish. Rename instead of truncate,
+                    # matching _write_json_atomic on the Python side.
+                    $gammaTmp = $GammaStatePath + '.wd.tmp'
+                    $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $gammaTmp -Encoding UTF8
+                    Move-Item -LiteralPath $gammaTmp -Destination $GammaStatePath -Force
                 }
             } catch {}
 
@@ -1348,7 +1376,49 @@ if ($Install) {
     # A result file left by a previous run must never be mistaken for this one's.
     Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
 
+    # Every throw below used to leave nothing behind: no watchdog, because the old one is
+    # stopped on the way in, and no result file, because the only writer is at the very
+    # end. The GUI then fell back to Watchdog.ps1's mtime -- which the .bat stamps before
+    # any of this runs -- and reported a green "Watchdog installed" for an install that
+    # had thrown. Record the failure instead.
+    #
+    # trap rather than try/catch so the body below keeps its indentation and its diff.
+    # Checked on this machine: a trap declared inside this block does not fire when
+    # -Install was not passed, so the watchdog's own loop is unaffected by it.
+    trap {
+        $failure = $_.Exception.Message
+        try {
+            [PSCustomObject]@{
+                action   = 'install'
+                ok       = $false
+                startup  = 'not installed'
+                fallback = $false
+                warnings = @(@($script:InstallWarnings) + $failure)
+                at       = (Get-Date).ToString('o')
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+        } catch {}
+        Write-Host ''
+        Write-Host ('  Installation failed: ' + $failure) -ForegroundColor Red
+        exit 1
+    }
+
     New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+
+    # Both checks run before the running watchdog is stopped. Neither needs it stopped,
+    # and failing either used to take a working watchdog down on the way out -- the
+    # machine ended up with no watchdog, no task, and a green success message. The
+    # capture further down genuinely does need it stopped, because a running watchdog
+    # re-asserts the very associations that capture is trying to read, so it stays put.
+    $build = [Environment]::OSVersion.Version.Build
+    if ($build -lt 20348) {
+        throw 'This standalone watchdog requires Windows build 20348 or newer.'
+    }
+
+    $displays = @(Get-ActiveDisplays)
+    if ($displays.Count -eq 0) {
+        throw 'No active displays were found.'
+    }
+
     $clearedTheWay = Stop-ExistingWatchdog
     if (-not $clearedTheWay) {
         # An install that cannot stop the old watchdog cannot replace it. Every file
@@ -1360,16 +1430,6 @@ if ($Install) {
         Write-Warning 'A watchdog started with administrator rights is already running and cannot be stopped from here.'
         Write-Warning 'The files below are updated, but that process keeps running the previous version until it is stopped.'
         Write-Warning 'Re-run this installer as administrator, or sign out and back in.'
-    }
-
-    $build = [Environment]::OSVersion.Version.Build
-    if ($build -lt 20348) {
-        throw 'This standalone watchdog requires Windows build 20348 or newer.'
-    }
-
-    $displays = @(Get-ActiveDisplays)
-    if ($displays.Count -eq 0) {
-        throw 'No active displays were found.'
     }
 
     $saved = @()
@@ -1393,7 +1453,9 @@ if ($Install) {
         Displays    = $saved
     }
 
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    $stateTmp = $StatePath + '.tmp'
+    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+    Move-Item -LiteralPath $stateTmp -Destination $StatePath -Force
 
     $escapedPs1 = $PSCommandPath.Replace('"', '""')
     # The launcher supervises rather than fire-and-forget. The watchdog exits itself
@@ -1599,7 +1661,17 @@ try {
         exit 2
     }
 
-    $state = [System.IO.File]::ReadAllText($StatePath) | ConvertFrom-Json
+    # A truncated State.json is a terminating error under $ErrorActionPreference =
+    # 'Stop', so PowerShell exited 1 -- which Launcher.vbs reads as "restart me". One
+    # torn write therefore became a silent respawn loop for the rest of the session,
+    # every five seconds, logging nothing. 2 is the launcher's stop code, and it is the
+    # honest answer: retrying cannot fix a corrupt file.
+    try {
+        $state = [System.IO.File]::ReadAllText($StatePath) | ConvertFrom-Json
+    } catch {
+        Write-Log ('State.json could not be parsed (' + $_.Exception.Message + '); watchdog stopped. Re-run the installer to rebuild it.')
+        exit 2
+    }
     if (-not $state.Displays) {
         Write-Log 'No saved display associations; watchdog stopped.'
         exit 3

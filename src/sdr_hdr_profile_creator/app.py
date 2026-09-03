@@ -46,6 +46,7 @@ from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
+from . import delta_itp
 from . import greyscale
 from .hotkeys import GammaHotkeyListener
 from . import elevation, measure, measure_view
@@ -140,6 +141,25 @@ EDIT_FIELDS = (
 # "Internal C++ object (ComboBox) already deleted" from inside a timer, where Qt
 # prints the traceback and carries on -- so the test suite stayed green while an
 # unhandled exception went through it on every run.
+
+def runtime_record_matches(record: object, display: DisplayInfo) -> bool:
+    """Whether a gamma_hotkeys.json record describes this monitor.
+
+    The monitor's EDID device path when both sides carry one, the GDI slot otherwise.
+    This is the same rule the watchdog's Find-SavedDisplay and Get-GammaEntryForDisplay
+    apply, and it has to stay the same rule in all three: \\\\.\\DISPLAY1 is a slot
+    Windows reassigns between sessions, so where two of them disagree, a hotplug hands
+    one monitor the profile pair belonging to another. Records written before the GUI
+    published a path have none and still match by slot.
+    """
+    if not isinstance(record, dict):
+        return False
+    wanted = display.device_path
+    found = record.get("device_path")
+    if wanted and isinstance(found, str) and found:
+        return found == wanted
+    return record.get("gdi_name") == display.gdi_name
+
 
 class MainWindow(FluentWidget):
     def __init__(self) -> None:
@@ -1009,7 +1029,7 @@ class MainWindow(FluentWidget):
             entry = displays.get(display.key)
             if not isinstance(entry, dict):
                 entry = next(
-                    (item for item in displays.values() if isinstance(item, dict) and item.get("gdi_name") == display.gdi_name),
+                    (item for item in displays.values() if runtime_record_matches(item, display)),
                     None,
                 )
             if not isinstance(entry, dict):
@@ -1467,9 +1487,29 @@ class MainWindow(FluentWidget):
             "reported here when it finishes.",
             "warning",
         )
+        # Wait for the installer to say what it did, rather than guessing once at nine
+        # seconds. A first install enumerates displays, resolves the working pair and
+        # registers a scheduled task over COM, and routinely takes longer than that --
+        # after which the old single shot found no record and fell through to the mtime,
+        # which the .bat stamps before any of that work begins.
+        self._watchdog_poll_deadline = time.time() + 90.0
         QTimer.singleShot(
-            9000, self,
-            lambda: self._report_watchdog_outcome(installing, before, launched_at),
+            1200, self,
+            lambda: self._poll_watchdog_outcome(installing, before, launched_at),
+        )
+
+    def _poll_watchdog_outcome(
+        self, installing: bool, before: float, launched_at: float
+    ) -> None:
+        if (
+            self._watchdog_result(launched_at) is not None
+            or time.time() >= self._watchdog_poll_deadline
+        ):
+            self._report_watchdog_outcome(installing, before, launched_at)
+            return
+        QTimer.singleShot(
+            1000, self,
+            lambda: self._poll_watchdog_outcome(installing, before, launched_at),
         )
 
     @staticmethod
@@ -1531,10 +1571,18 @@ class MainWindow(FluentWidget):
                     )
                 return
             if after > before:
+                # Not success. The .bat writes Watchdog.ps1 before the integrity check,
+                # before -Install, before the display capture and before Task Scheduler
+                # registration, so a fresh mtime proves extraction and nothing else. The
+                # installer now records every failure it can reach, which leaves this
+                # branch meaning "it did not get far enough to record anything" -- an
+                # unknown, and reporting an unknown in green is what let a dead watchdog
+                # look installed for a whole evening.
                 self._set_status(
-                    "Watchdog installed. It now keeps your SDR/HDR associations stable and "
-                    "owns Alt+1 / Alt+2.",
-                    "ok",
+                    "Watchdog setup did not report an outcome. The script was updated, but "
+                    "nothing recorded whether the install finished. Check the installer "
+                    "window, which is still open.",
+                    "warning",
                 )
             else:
                 self._set_status(
@@ -2684,6 +2732,10 @@ class MainWindow(FluentWidget):
         if getattr(self, "_measure_thread", None) is not None:
             return   # Detected and Enter pressed; one run is enough.
         self._stop_placement_watch()
+        # Kept because the plan was built with it, and the peak the run then *measures*
+        # is a different number. Scoring the ramp afterwards needs the requests, and
+        # those can only be rebuilt from the peak they were made with.
+        self._measure_requested_peak = peak
         self._log_meter({
             "event": "start",
             "display": display.friendly_name,
@@ -2768,6 +2820,52 @@ class MainWindow(FluentWidget):
         return any(
             abs(now - was) > 1e-4
             for now, was in zip(current, state.panel_response_shaping)
+        )
+
+    def _grey_accuracy_note(self, result) -> str:
+        """What the ramp actually scored, as dITP, or nothing if it cannot be said.
+
+        The sentence this is appended to describes what the correction is *for*. On its
+        own that is a promise: it says grey is held to the reference white without ever
+        checking whether it was. dITP (BT.2124) is the check -- one perceptual scale
+        covering the tone error and the white error together, where 1.0 is a
+        just-noticeable difference wherever on the ramp it falls, so the same number
+        means the same thing at 0.5 nits and at 500.
+
+        Scored against what the profile asks for, never against PQ. The two agree only
+        while every control sits neutral, and the SDR-in-HDR correction deliberately
+        darkens the low end -- scoring that against PQ would report a preference as a
+        large error, which is the trap the meter log's own reader documents.
+
+        Returns "" rather than a guess whenever the intent cannot be rebuilt: a number
+        computed against the wrong reference is worse than no number.
+        """
+        points = getattr(result, "greyscale", ())
+        peak = getattr(self, "_measure_requested_peak", 0.0)
+        if not points or peak <= 0.0:
+            return ""
+        intent = self._measurement_intent(peak)
+        if not intent:
+            return ""
+
+        scored = []
+        for point in points:
+            wanted = intent.get(f"grey-{point.index:02d}")
+            if wanted is None or wanted <= 0.0:
+                continue
+            scored.append(delta_itp.grey_delta_itp(point.xyz, wanted))
+        if not scored:
+            return ""
+
+        scored.sort()
+        middle = len(scored) // 2
+        median = (
+            scored[middle] if len(scored) % 2
+            else (scored[middle - 1] + scored[middle]) / 2.0
+        )
+        return (
+            f" Measured accuracy over {len(scored)} points: dITP median "
+            f"{median:.1f}, worst {scored[-1]:.1f} (1.0 is the visible threshold)."
         )
 
     def _measurement_intent(self, peak: float) -> dict:
@@ -3022,7 +3120,7 @@ class MainWindow(FluentWidget):
                 f" Greyscale corrected from {len(response.red)} points: the curve now "
                 "targets PQ up to the measured peak, and holds grey to the reference "
                 "white at every level."
-            )
+            ) + self._grey_accuracy_note(result)
         self._set_status(
             f"Measured {result.peak_nits:.1f} nits peak on a "
             f"{result.peak_window_fraction:.0%} window{window_peak_note} and "
@@ -3615,6 +3713,13 @@ class MainWindow(FluentWidget):
             {
                 "display_name": display.friendly_name,
                 "gdi_name": display.gdi_name,
+                # The monitor's EDID device path, so the watchdog can tell which panel
+                # this record belongs to. gdi_name is \\.\DISPLAY1 -- a slot Windows
+                # reassigns between sessions -- and State.json was moved onto the device
+                # path for exactly that reason, while this file was left matching on the
+                # slot. After a hotplug the two lookups disagreed and one monitor could
+                # be handed the other's profile pair.
+                "device_path": display.device_path,
                 "selected": on_option,
                 "enabled": enabled,
                 "active_profile": active_name,
@@ -3658,6 +3763,10 @@ class MainWindow(FluentWidget):
         payload, displays_state, record = entry
         record.setdefault("display_name", display.friendly_name)
         record.setdefault("gdi_name", display.gdi_name)
+        # setdefault, not assignment: a record written by an older build has no path, and
+        # filling it in here is how it acquires one. Assignment would also be correct, but
+        # setdefault keeps this consistent with the two lines above it.
+        record.setdefault("device_path", display.device_path)
         record.setdefault("profiles", {})
         record.setdefault("paths", {})
         record["selected"] = self._last_enabled_gamma_correction
@@ -3697,9 +3806,7 @@ class MainWindow(FluentWidget):
         # on whichever came first.
         for stale_key in [
             key for key, value in displays_state.items()
-            if key != display.key
-            and isinstance(value, dict)
-            and value.get("gdi_name") == display.gdi_name
+            if key != display.key and runtime_record_matches(value, display)
         ]:
             displays_state.pop(stale_key, None)
 
@@ -3836,7 +3943,25 @@ class MainWindow(FluentWidget):
         primaries first overwrote that provenance, so the luminance check then saw its
         own new stamp, concluded the figures were native and kept the previous
         display's peak.
+
+        The provenance decision itself is made here, once, before either call can stamp
+        over the evidence it rests on. Both of them set ``panel_source_key`` --
+        ``_capture_panel_primaries`` does so even on the path where it changes nothing --
+        while only ``_prefill_luminance_from_panel`` clears the measured response, and
+        only on its success path. A display whose EDID cannot be read never reaches that
+        path, so switching to one used to leave the previous display's measured curve in
+        place and then relabel it as this display's. That is the exact failure
+        ``panel_source_key`` exists to prevent, reached through the one branch that
+        skipped it.
         """
+        state = self.state.hdr
+        if state.panel_source_key and state.panel_source_key != display.stable_key:
+            if state.panel_response or state.panel_response_weights:
+                state.panel_response = ()
+                state.panel_response_weights = ()
+                state.panel_response_shaping = ()
+                self._save_state_soon()
+
         self._prefill_luminance_from_panel(display)
         self._capture_panel_primaries(display)
 

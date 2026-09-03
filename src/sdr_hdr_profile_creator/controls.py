@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from PySide6.QtCore import QEvent, Qt, Signal
-from PySide6.QtGui import QDoubleValidator
+from PySide6.QtGui import QDoubleValidator, QValidator
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QVBoxLayout, QWidget
 from qfluentwidgets import (
     CaptionLabel,
@@ -39,6 +39,13 @@ class SliderControl(QWidget):
         self.setToolTip(spec.tooltip or f"Adjust {spec.title}.")
         self._updating = False
         self._scale = max(1, round(1.0 / spec.step))
+        # The control's value lives here, and the numeric field is a view of it. Reading
+        # the field instead made the field authoritative, which it cannot be: the
+        # validator refuses to let editingFinished fire for out-of-range text, so a typed
+        # 5000 in a 0-100 control stayed on screen and value() handed 5000 back --
+        # unclamped, unquantized, and describing neither the slider nor the state. What
+        # then read it was the profile build and the pattern view.
+        self._value = float(spec.default)
 
         title = StrongBodyLabel(spec.title, self)
         title.setToolTip(spec.tooltip)
@@ -115,6 +122,15 @@ class SliderControl(QWidget):
         self.set_value(spec.default, emit=False)
 
     def eventFilter(self, watched, event) -> bool:
+        if watched is self.value_edit and event.type() == QEvent.Type.FocusOut:
+            # Text the validator will not accept never reaches editingFinished, so
+            # without this it just stays there, contradicting the slider beside it with
+            # no indication which one is real. Only unacceptable text is rewritten:
+            # this filter runs before QLineEdit's own focus-out handler, and rewriting
+            # acceptable text here would discard the edit before editingFinished sees it.
+            state, _, _ = self.value_edit.validator().validate(self.value_edit.text(), 0)
+            if state != QValidator.State.Acceptable:
+                self._set_edit_text(self._value)
         if watched in (self.slider, self.value_edit) and event.type() == QEvent.Type.Wheel:
             delta = event.angleDelta().y()
             if delta == 0:
@@ -131,6 +147,7 @@ class SliderControl(QWidget):
             return
         self._updating = True
         value = raw / self._scale
+        self._value = value
         self._set_edit_text(value)
         self._updating = False
         self.valueChanged.emit(value)
@@ -153,11 +170,7 @@ class SliderControl(QWidget):
         self.set_value(value, emit=True)
 
     def value(self) -> float:
-        text = self.value_edit.text().strip().replace(",", ".")
-        try:
-            return float(text)
-        except ValueError:
-            return float(self.spec.default)
+        return self._value
 
     def set_value(self, value: float, emit: bool = False) -> None:
         bounded = min(self.spec.maximum, max(self.spec.minimum, float(value)))
@@ -166,6 +179,7 @@ class SliderControl(QWidget):
         bounded = self.spec.minimum + steps * self.spec.step
         bounded = min(self.spec.maximum, max(self.spec.minimum, bounded))
         self._updating = True
+        self._value = bounded
         self._set_edit_text(bounded)
         self.slider.setValue(round(bounded * self._scale))
         self._updating = False
