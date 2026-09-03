@@ -1592,6 +1592,31 @@ class RebootStabilityTests(WindowTestCase):
         self.assertIn(other.key, entries, "another monitor's record was pruned")
 
 
+class RuntimePublishFailureTests(WindowTestCase):
+    """A publish that does not land must not pass for one that did.
+
+    The watchdog decides which gamma variant wins by comparing this file's updated_at
+    against its own captured GammaUpdatedAt. A silently failed write leaves the old
+    stamp, so the captured state wins and the correction the user just chose is put back
+    within five seconds -- while the GUI says it applied.
+    """
+
+    def test_a_failed_publish_is_reported_rather_than_swallowed(self):
+        with mock.patch.object(app_module.MainWindow, "_write_json_atomic",
+                               staticmethod(lambda *_a, **_k: False)):
+            self.window._publish_runtime_payload({"displays": {}})
+        text = self.window.status_label.text()
+        self.assertIn("Attention", text)
+        self.assertIn("watchdog cannot see", text)
+
+    def test_a_publish_that_lands_says_nothing(self):
+        self.window._set_status("unchanged", "ok")
+        with mock.patch.object(app_module.MainWindow, "_write_json_atomic",
+                               staticmethod(lambda *_a, **_k: True)):
+            self.window._publish_runtime_payload({"displays": {}})
+        self.assertIn("unchanged", self.window.status_label.text())
+
+
 class RuntimeRecordIdentityTests(unittest.TestCase):
     """Which monitor a gamma_hotkeys.json record belongs to.
 

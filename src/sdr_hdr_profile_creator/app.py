@@ -353,11 +353,12 @@ class MainWindow(FluentWidget):
     def _save_state_now(self) -> None:
         """Persist the editor state, and say so when it does not land.
 
-        _write_json_atomic reports whether the rename succeeded and every caller
-        threw that away. For the two runtime files the consequence is small -- the
-        watchdog re-reads on a timer and the filenames are stable -- but this one is
-        the user's own work, and it is called from closeEvent, so a failure here is
-        every unsaved edit disappearing with no indication that anything went wrong.
+        _write_json_atomic reports whether the rename succeeded and every caller threw
+        that away. This one is the user's own work and it is called from closeEvent, so
+        a failure here is every unsaved edit disappearing with no indication that
+        anything went wrong. (This used to add that the consequence for the two runtime
+        writes was small, because the watchdog re-reads on a timer. It is not: see
+        _publish_runtime_payload, which now reports its own failures.)
         The usual cause is a security product holding the file open; the same one the
         watchdog installer already warns about.
         """
@@ -1501,10 +1502,13 @@ class MainWindow(FluentWidget):
     def _poll_watchdog_outcome(
         self, installing: bool, before: float, launched_at: float
     ) -> None:
-        if (
-            self._watchdog_result(launched_at) is not None
-            or time.time() >= self._watchdog_poll_deadline
-        ):
+        # getattr, because reaching here without the launch path having run would raise
+        # inside a QTimer callback -- where Qt prints the traceback, carries on, and the
+        # suite stays green through it. Defaulting to 0.0 reports once and stops, which
+        # is the safe direction: a poll that never ends would sit on the status bar
+        # forever.
+        deadline = getattr(self, "_watchdog_poll_deadline", 0.0)
+        if self._watchdog_result(launched_at) is not None or time.time() >= deadline:
             self._report_watchdog_outcome(installing, before, launched_at)
             return
         QTimer.singleShot(
@@ -2528,65 +2532,20 @@ class MainWindow(FluentWidget):
 
     def _measure_with_meter(self) -> None:
         """Measure this display with a colorimeter and adopt the readings."""
-        display = self._selected_display()
-        if display is None:
-            self._set_status("Select a display first.", "error")
+        # Through the shared helper, which exists so the two meter actions cannot give
+        # two answers to one question -- and which this path, the one people actually
+        # use, had a word-for-word copy of instead. The copy was already drifting: it
+        # said "before measuring" where the helper says "before {what}".
+        ready = self._meter_preconditions("measuring")
+        if ready is None:
             return
-        if display.current_mode != "HDR":
-            self._set_status(
-                f"Turn HDR on for {display.friendly_name} before measuring. The patches are "
-                "shown in absolute luminance, which only means anything in HDR.",
-                "warning",
-            )
-            return
-        busy = self._fullscreen_surface_busy()
-        if busy:
-            self._set_status(busy, "warning")
-            return
-
-        spotread = self._spotread()
-        if spotread is None:
-            answer = QMessageBox.question(
-                self,
-                "ArgyllCMS not found",
-                "Measuring needs ArgyllCMS, a separate free download from argyllcms.com. "
-                "Get the executable distribution, unzip it somewhere without spaces in the "
-                "path, and point this at the bin folder inside it.\n\nLocate it now?",
-            )
-            if answer != QMessageBox.StandardButton.Yes or not self._choose_argyll_path():
-                return
-            spotread = self._spotread()
-            if spotread is None:
-                return
-
-        try:
-            instruments = list_instruments(spotread)
-        except MeterError as exc:
-            self._set_status(f"Could not ask Argyll what it can see: {exc}", "error")
-            return
-        if not instruments:
-            self._set_status(
-                "Argyll found no colorimeter. Check that it is plugged in, and that no other "
-                "calibration software is holding it open.",
-                "error",
-            )
-            return
-        instrument = instruments[0]
-
-        try:
-            sdr_white = get_sdr_white_level_nits(display)
-        except Exception:
-            sdr_white = 240.0
-        panel = read_panel_metadata(display.device_path)
-        capability = capability_for_device_name(display.gdi_name)
-        # Ask for what the panel claims it can do, not for what was measured last
-        # time. Driving the peak patch at the stored figure makes the measurement
-        # self-fulfilling: the first run asked for the EDID's 1015 nits and found
-        # 450, and every run after asked for 450 and found 450, confirming only
-        # that the display can produce what it was told to.
-        peak = self.state.hdr.peak_luminance_nits
-        if panel is not None and panel.credible:
-            peak = max(peak, panel.peak_nits)
+        display = ready.display
+        spotread = ready.spotread
+        instrument = ready.instrument
+        sdr_white = ready.sdr_white
+        panel = ready.panel
+        capability = ready.capability
+        peak = ready.peak
 
         # Said before the surface opens, because it cannot be said afterwards. The
         # screen goes black with one patch on it and nothing else -- deliberately, since
@@ -3753,7 +3712,7 @@ class MainWindow(FluentWidget):
         )
         displays_state[display.key] = record
         payload["schema"] = GAMMA_RUNTIME_SCHEMA
-        self._write_json_atomic(GAMMA_HOTKEY_STATE_PATH, payload)
+        self._publish_runtime_payload(payload)
 
     def _publish_gamma_runtime_intent(self, display: DisplayInfo) -> None:
         """Publish ON/OFF intent before profile generation to prevent watchdog races."""
@@ -3774,7 +3733,32 @@ class MainWindow(FluentWidget):
         record["updated_at"] = datetime.now().astimezone().isoformat()
         displays_state[display.key] = record
         payload["schema"] = GAMMA_RUNTIME_SCHEMA
-        self._write_json_atomic(GAMMA_HOTKEY_STATE_PATH, payload)
+        self._publish_runtime_payload(payload)
+
+    def _publish_runtime_payload(self, payload: object) -> None:
+        """Write gamma_hotkeys.json, and say so when it does not land.
+
+        _save_state_now used to note that discarding this result was survivable for the
+        runtime files because "the watchdog re-reads on a timer and the filenames are
+        stable". The first half is true and the second does not rescue it. What the
+        watchdog re-reads on that timer is *this file*, and what decides which gamma
+        variant wins is the updated_at inside it: Get-DesiredExtendedProfile prefers the
+        GUI's record only while its stamp is newer than the watchdog's own captured
+        GammaUpdatedAt. A publish that silently does not land leaves the old stamp in
+        place, the captured state wins, and the correction the user just chose is
+        re-asserted back to the opposite variant within five seconds -- with the GUI
+        reporting that it applied. That is the failure commit 006342f exists to fix,
+        reached by a different route.
+        """
+        if self._write_json_atomic(GAMMA_HOTKEY_STATE_PATH, payload):
+            return
+        self._set_status(
+            f"Could not publish {GAMMA_HOTKEY_STATE_PATH.name}. The correction is applied "
+            "to the profile, but the watchdog cannot see that you changed it and may put "
+            "the previous one back. Something else is holding the file open -- check "
+            "Controlled Folder Access under Windows Security, Ransomware protection.",
+            "warning",
+        )
 
     def _runtime_entry(
         self, display: DisplayInfo
