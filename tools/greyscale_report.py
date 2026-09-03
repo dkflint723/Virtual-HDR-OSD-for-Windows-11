@@ -4,6 +4,7 @@ Usage:
 
     python tools/greyscale_report.py            # every run in the default log
     python tools/greyscale_report.py <path>     # a log kept somewhere else
+    python tools/greyscale_report.py --curve    # dITP for every ramp point, not banded
 
 Against the profile's intent, not against PQ. The two are the same only while every
 control is neutral. The SDR-in-HDR correction deliberately darkens the low end -- at 0.5
@@ -29,6 +30,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from sdr_hdr_profile_creator import delta_itp as itp  # noqa: E402
 from sdr_hdr_profile_creator.measure import D65_XY  # noqa: E402
 
 DEFAULT_LOG = (
@@ -36,6 +38,9 @@ DEFAULT_LOG = (
     / "Virtual_HDR_OSD_for_Windows"
     / "meter_log.jsonl"
 )
+
+# --curve prints dITP for every ramp point rather than the banded summary.
+SHOW_CURVE = False
 
 
 def runs(records):
@@ -98,12 +103,51 @@ def describe(index, run):
           f"  (asked {paired[worst][0]:.4g} nits, read {paired[worst][1]['Y']:.4g})")
     print(f"  drift from D65    median {_median(drifts):.4f}   worst {max(drifts):.4f}")
 
+    # The two lines above are the tone error and the white error, in different units,
+    # and neither says whether anyone would see it. dITP does, on one scale where 1.0 is
+    # a just-noticeable difference wherever on the ramp it falls: a 5% miss at 1 nit
+    # scores 1.8 and the same 5% at 1000 nits scores 3.8, which is the part a median
+    # percentage cannot express. It also catches a tinted grey whose luminance is
+    # exactly right -- an error the percentage above reports as 0.00%.
+    scored = itp.curve(
+        [(target, (reading["X"], reading["Y"], reading["Z"])) for target, reading in paired]
+    )
+    if scored:
+        values = [value for _nits, value in scored]
+        over = sum(1 for value in values if value > itp.GOOD)
+        peak = max(scored, key=lambda item: item[1])
+        print(f"  dITP (BT.2124)    median {_median(values):5.2f}   worst {max(values):5.2f}"
+              f"   at {peak[0]:.4g} nits"
+              f"   ({over} of {len(values)} over {itp.GOOD:g})")
+
     # The bottom of the range is where a display is usually worst and where the ramp is
     # deliberately densest, so it is reported on its own rather than hidden in a median.
     low = [error for (target, _r), error in zip(paired, errors) if target <= 10.0]
     if low:
         print(f"  below 10 nits     {len(low)} points, median {_pct(_median(low))}"
               f"   worst {_pct(max(low))}")
+
+    # The curve, banded. A single median hides the shape that matters -- a display that
+    # is excellent through the midrange and falls apart in the shadows reports the same
+    # median as one that is mediocre everywhere, and only the first is worth another
+    # pass with the meter.
+    if scored:
+        bands = (
+            ("below 10 nits ", lambda n: n <= 10.0),
+            ("10 to 100     ", lambda n: 10.0 < n <= 100.0),
+            ("100 to 400    ", lambda n: 100.0 < n <= 400.0),
+            ("above 400     ", lambda n: n > 400.0),
+        )
+        print("  dITP by band")
+        for label, inside in bands:
+            band = [value for nits, value in scored if inside(nits)]
+            if band:
+                print(f"    {label}  {len(band):>2} points   median {_median(band):5.2f}"
+                      f"   worst {max(band):5.2f}   {_bar(_median(band))}")
+        if SHOW_CURVE:
+            print("  dITP per point")
+            for nits, value in scored:
+                print(f"    {nits:>9.4g} nits   {value:5.2f}   {_bar(value)}")
 
     for record in run.get("events", []):
         if record["event"] == "response":
@@ -127,8 +171,19 @@ def _pct(value):
     return f"{value * 100:6.2f}%"
 
 
+def _bar(value):
+    """One JND per block, so the threshold is a place on the line rather than a number
+    to remember. Capped at 20 -- past that the point is made."""
+    blocks = min(20, int(round(value)))
+    return ("#" * blocks) + ("." if blocks == 0 else "")
+
+
 def main(argv):
-    path = Path(argv[1]) if len(argv) > 1 else DEFAULT_LOG
+    global SHOW_CURVE
+    arguments = [value for value in argv[1:] if value != "--curve"]
+    SHOW_CURVE = "--curve" in argv[1:]
+
+    path = Path(arguments[0]) if arguments else DEFAULT_LOG
     if not path.is_file():
         print(f"No meter log at {path}")
         return 1
