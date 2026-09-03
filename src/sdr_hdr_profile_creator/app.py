@@ -46,6 +46,7 @@ from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
+from . import ddc
 from . import delta_itp
 from . import greyscale
 from .hotkeys import GammaHotkeyListener
@@ -2720,6 +2721,15 @@ class MainWindow(FluentWidget):
             # setting a 70% error and sends someone hunting a fault that is a preference.
             "intent": self._measurement_intent(peak),
             "sdr_gamma_correction": self.state.hdr.sdr_gamma_correction,
+            # What the monitor itself was set to. Without this a run that behaves
+            # differently from its neighbours cannot be explained afterwards, and one
+            # already has: the saturation sweeps show a ~2x boost on saturated patches in
+            # four runs out of fourteen and not in the other ten, on the same display.
+            # It correlates with neither the SDR-in-HDR correction nor the trims already
+            # applied -- both checked against the log -- and every remaining candidate,
+            # picture mode, colour preset, or the panel simply being cold, is a monitor
+            # state nothing recorded. Reading it costs about a second.
+            "monitor": self._monitor_state(),
         })
         self._set_status(
             f"Measuring {display.friendly_name} with {instrument.label}. Keep the meter "
@@ -2861,6 +2871,40 @@ class MainWindow(FluentWidget):
             f" Measured accuracy over {len(scored)} points: dITP median "
             f"{median:.1f}, worst {scored[-1]:.1f} (1.0 is the visible threshold)."
         )
+
+    def _monitor_state(self) -> dict:
+        """The monitor's own controls, for the run log.
+
+        Read-only, and never allowed to stop a measurement: a display with DDC/CI turned
+        off in its own menu is perfectly calibratable, and a diagnostic that refused to
+        run on one would be worse than the gap it fills.
+
+        Only the controls that could plausibly change what the meter sees. The whole set
+        is 25 codes on this hardware and reading all of them would cost seconds for
+        volume and input source.
+        """
+        wanted = (
+            ("picture_mode", ddc.PICTURE_MODE),
+            ("colour_preset", ddc.COLOUR_PRESET),
+            ("brightness", ddc.LUMINANCE),
+            ("contrast", ddc.CONTRAST),
+            ("gamma", ddc.GAMMA),
+            ("red_gain", ddc.RED_GAIN),
+            ("green_gain", ddc.GREEN_GAIN),
+            ("blue_gain", ddc.BLUE_GAIN),
+        )
+        try:
+            display = self._selected_display()
+            link = ddc.open_link(display.friendly_name if display else "")
+            if isinstance(link, ddc.UnavailableLink):
+                return {"available": False, "why": link.reason}
+            state: dict[str, object] = {"available": True}
+            for name, code in wanted:
+                control = ddc.read_control(link, code)
+                state[name] = None if control is None else control.current
+            return state
+        except Exception as error:   # noqa: BLE001
+            return {"available": False, "why": f"{type(error).__name__}: {error}"}
 
     def _measurement_intent(self, peak: float) -> dict:
         """The luminance the profile asks for at each greyscale level, keyed like the plan.

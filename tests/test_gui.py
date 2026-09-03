@@ -1592,6 +1592,57 @@ class RebootStabilityTests(WindowTestCase):
         self.assertIn(other.key, entries, "another monitor's record was pruned")
 
 
+class MonitorStateTests(WindowTestCase):
+    """The run log records what the monitor itself was set to.
+
+    Without it a run that behaves differently from its neighbours cannot be explained
+    afterwards, and one already could not be: the saturation sweeps show a ~2x boost on
+    saturated patches in four of fourteen logged runs on the same display, correlating
+    with neither the SDR-in-HDR correction nor the trims already applied. Every remaining
+    candidate is a monitor state nothing recorded.
+    """
+
+    def test_the_controls_that_could_change_what_the_meter_sees_are_recorded(self):
+        from sdr_hdr_profile_creator import ddc
+
+        class Link:
+            description = "fake"
+
+            def read(self, code):
+                return ddc.Control(code=code, current=7, maximum=100)
+
+            def set(self, code, value):
+                return True
+
+        with mock.patch.object(app_module.ddc, "open_link", lambda _n: Link()):
+            state = self.window._monitor_state()
+        self.assertTrue(state["available"])
+        for key in ("picture_mode", "colour_preset", "brightness", "contrast",
+                    "gamma", "red_gain", "green_gain", "blue_gain"):
+            with self.subTest(key=key):
+                self.assertEqual(7, state[key])
+
+    def test_a_monitor_without_ddc_is_recorded_as_such_rather_than_stopping_the_run(self):
+        """A display with DDC/CI turned off in its own menu is perfectly calibratable. A
+        diagnostic that refused to run on one would be worse than the gap it fills."""
+        with mock.patch.object(
+            app_module.ddc, "open_link",
+            lambda _n: app_module.ddc.UnavailableLink("it said nothing"),
+        ):
+            state = self.window._monitor_state()
+        self.assertFalse(state["available"])
+        self.assertIn("it said nothing", state["why"])
+
+    def test_a_failure_in_the_ddc_layer_cannot_stop_a_measurement(self):
+        def explode(_name):
+            raise OSError("the handle went away")
+
+        with mock.patch.object(app_module.ddc, "open_link", explode):
+            state = self.window._monitor_state()
+        self.assertFalse(state["available"])
+        self.assertIn("handle went away", state["why"])
+
+
 class RuntimePublishFailureTests(WindowTestCase):
     """A publish that does not land must not pass for one that did.
 
