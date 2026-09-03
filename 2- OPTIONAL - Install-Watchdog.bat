@@ -94,6 +94,37 @@ $TaskName = 'Virtual HDR OSD - Color Profile Mode Watchdog'
 $script:GammaCacheStamp = $null
 $script:GammaCacheValue = $null
 
+# The last line written for each repeating condition, so a state that persists is
+# reported once rather than on every pass. See Write-LogOnce.
+$script:LastLogOnce = @{}
+
+function Write-LogOnce {
+    param([string]$Key, [string]$Message)
+
+    # For conditions that are a *state* rather than an event. The three call sites --
+    # a requested correction whose profiles are not installed, and a failing STANDARD or
+    # EXTENDED write -- all sit on the reconcile path, which runs about 1.3 times a
+    # second per display. At roughly 140 bytes a line that is 500 KB in an hour, and
+    # Write-Log rotates at 512 KB keeping one .old, so a fault that lasted two hours
+    # erased every line from before it happened. The log exists to answer "what took my
+    # profile, and when"; flooding it with the consequence destroys the evidence of the
+    # cause.
+    #
+    # Keyed on display and site, deduped on the message itself rather than on a timer,
+    # so a fault that changes -- a different HRESULT, a different variant -- is reported
+    # again immediately. Clear-LogOnce is called from the matching success branch, so a
+    # condition that comes back is logged afresh rather than silenced forever.
+    if ($script:LastLogOnce[$Key] -eq $Message) { return }
+    $script:LastLogOnce[$Key] = $Message
+    Write-Log $Message
+}
+
+function Clear-LogOnce {
+    param([string]$Key)
+
+    if ($script:LastLogOnce.ContainsKey($Key)) { $script:LastLogOnce.Remove($Key) }
+}
+
 function Write-Log {
     param([string]$Message)
 
@@ -1165,6 +1196,9 @@ function Get-DesiredExtendedProfile {
 
             # Never hand Windows a profile that is not installed.
             if ((-not [string]::IsNullOrWhiteSpace($name)) -and (Test-InstalledColorProfile -ProfileName $name)) {
+                # Recovered: forget the "not installed" line so the next occurrence is
+                # reported rather than deduped against a fault that has since been fixed.
+                Clear-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName)
                 return $name
             }
 
@@ -1176,9 +1210,14 @@ function Get-DesiredExtendedProfile {
             $sameDirection = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
             if ((-not [string]::IsNullOrWhiteSpace($sameDirection)) -and
                 (Test-InstalledColorProfile -ProfileName $sameDirection)) {
+                Clear-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName)
                 return $sameDirection
             }
-            Write-Log ('Gamma correction {0} was requested for {1} but no installed profile provides it; leaving the association unchanged.' -f $wanted.ToUpper(), $CurrentDisplay.GdiName)
+            # Once per distinct message: this branch's precondition -- the GUI asking for
+            # a variant whose profile is not installed -- is a state that persists until
+            # someone reinstalls it, and it is reached on every reconcile pass.
+            Write-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName) (
+                'Gamma correction {0} was requested for {1} but no installed profile provides it; leaving the association unchanged.' -f $wanted.ToUpper(), $CurrentDisplay.GdiName)
             return ''
         }
     }
@@ -1247,8 +1286,14 @@ function Restore-SavedProfiles {
                 $sdrDesired
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
+                # A write that fails leaves the association unchanged, so the gate above
+                # is true again next pass and this repeats for as long as the cause
+                # lasts. The HRESULT is in the message, so a different failure still
+                # gets its own line.
+                Write-LogOnce ('{0}|STANDARD' -f $CurrentDisplay.GdiName) (
+                    'Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } elseif ($current -ne $sdrDesired) {
+                Clear-LogOnce ('{0}|STANDARD' -f $CurrentDisplay.GdiName)
                 # Only a real correction. The forced pass rewrites this every five
                 # seconds whether anything drifted or not, and logging that made 614 of
                 # 618 lines identical: 37 bytes a second, the 512 KB cap reached in
@@ -1276,8 +1321,10 @@ function Restore-SavedProfiles {
                 [string]$desiredExtended
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
+                Write-LogOnce ('{0}|EXTENDED' -f $CurrentDisplay.GdiName) (
+                    'Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } elseif ($current -ne $desiredExtended) {
+                Clear-LogOnce ('{0}|EXTENDED' -f $CurrentDisplay.GdiName)
                 Write-Log ('Corrected EXTENDED profile on {0}: was {1}, restored {2}' -f $CurrentDisplay.GdiName, $(if ($current) { $current } else { '<none>' }), $desiredExtended)
             }
         }
@@ -1526,6 +1573,19 @@ Loop
         $taskDefinition.Settings.DisallowStartIfOnBatteries = $false
         $taskDefinition.Settings.StopIfGoingOnBatteries = $false
         $taskDefinition.Settings.MultipleInstances = 2  # TASK_INSTANCES_IGNORE_NEW
+        # PT0S means no limit. Left unset, the task inherits Task Scheduler's default of
+        # PT72H -- read back from the registered task on the development machine to check,
+        # since the XML carries no ExecutionTimeLimit element at all. At that limit Task
+        # Scheduler terminates the task's job object, which takes the wscript.exe
+        # supervisor and its PowerShell child together, and with only a logon trigger
+        # nothing re-fires until the next sign-in. Any session signed in for three days --
+        # sleep and hibernate included -- silently loses profile protection, with no log
+        # line, because the watchdog's own finally block never runs on an abrupt kill.
+        #
+        # Giving up the 72-hour reap costs nothing: ArmStartupGuard already kills a hung
+        # instance far sooner and far more precisely (25s startup, 60s reconcile,
+        # Environment.Exit(9)), and the launcher restarts it afterwards.
+        $taskDefinition.Settings.ExecutionTimeLimit = 'PT0S'
 
         # TASK_LOGON_INTERACTIVE_TOKEN = 3, TASK_RUNLEVEL_LUA = 0.
         $taskDefinition.Principal.UserId = $currentSid

@@ -12,6 +12,11 @@ $ErrorActionPreference = 'Stop'   # matches the watchdog itself
 $script:fail = 0
 function Write-Log { param([string]$Message) }
 
+# Write-LogOnce and Clear-LogOnce come from the payload alongside the functions under
+# test, because Get-DesiredExtendedProfile calls them. This is the table they keep,
+# which the payload initialises at the top level where the extractor cannot reach it.
+$script:LastLogOnce = @{}
+
 $colorDir = Join-Path ([System.IO.Path]::GetTempPath()) ('vhdrosd-wd-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $colorDir | Out-Null
 foreach ($n in 'VOff.icm', 'VOn.icm', 'NewOff.icm', 'NewOn.icm', 'RealBase.icm', 'Vendor.icm') {

@@ -357,6 +357,25 @@ class WatchdogPackagingTests(unittest.TestCase):
         self.assertIn("logonTrigger.UserId = $currentSid", script)
         self.assertIn("HKCU Run fallback", script)
 
+    def test_the_task_is_not_given_a_lifetime(self):
+        """Unset, ExecutionTimeLimit inherits Task Scheduler's default of PT72H, and the
+        registered task on the development machine reads back exactly that with no
+        ExecutionTimeLimit element in its XML.
+
+        At the limit Task Scheduler terminates the task's job object, which takes the
+        wscript.exe supervisor and its PowerShell child together. With only a logon
+        trigger nothing re-fires, so a session signed in for three days -- sleep and
+        hibernate included -- silently stops having its profiles protected. Nothing is
+        logged, because the watchdog's finally block never runs on an abrupt kill, and
+        the GUI cannot see it either: watchdog_is_running opens the singleton mutex the
+        PowerShell child creates, so a dead supervisor with a live child still reads as
+        healthy.
+        """
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn("Settings.ExecutionTimeLimit = 'PT0S'", script)
+
 
 class InstallerOutcomeTests(unittest.TestCase):
     """The scripts have to record what happened; the GUI cannot see their console.
