@@ -57,6 +57,12 @@ MIN_RESPONSE_POINTS = 8
 #: properly, and clamping keeps the damage bounded instead of unbounded.
 MAX_CODE_SHIFT = 0.10
 
+#: How much brighter a ramp point must read than everything before it to count as the
+#: panel still rising rather than the meter wobbling on a clipped plateau. A genuine step
+#: near the top of the ramp is around 20% in luminance, so no real point is ever dropped;
+#: a plateau that varies by a few tenths of a percent is.
+PLATEAU_MARGIN = 0.005
+
 
 @dataclass(frozen=True, slots=True)
 class PanelResponse:
@@ -236,7 +242,26 @@ class _Inverse:
         for code, nits in ordered:
             if code <= codes[-1]:
                 continue
-            highest = max(highest, nits)
+            if nits <= highest * (1.0 + PLATEAU_MARGIN):
+                # The panel has stopped rising. Every run plans the ramp to what the EDID
+                # claims and most panels stop well short of it, so the top of a real ramp
+                # is a plateau of clipped readings -- 1015 asked for, about 460 delivered,
+                # on the display this was developed against.
+                #
+                # Keeping those gave the table entries whose code climbs against an
+                # unchanged level, so code_for's "beyond what was measured" branch handed
+                # back the top ramp code for every level at or above the clip. A channel
+                # that happened to be drifting when it clipped then carried that drift as
+                # one large fixed shift across the whole highlight range: measured here at
+                # +0.0697 for blue against +0.0084 for red and green, a 0.061 spread where
+                # everything below the clip agrees to 0.0015.
+                #
+                # The first clipped sample survives this test on its own merits -- it is a
+                # genuine rise, the last real step the panel took -- so levels[-1] still
+                # equals the clip level and still lines up with the peak_code the fade in
+                # correct() is keyed on. No gap opens between the table and the fade.
+                continue
+            highest = nits
             codes.append(code)
             levels.append(highest)
         self._codes = codes

@@ -67,9 +67,16 @@ class FakePanel:
             return Reading(0.0, 0.0, 0.0, *D65)
         return Reading(X, Y, Z, X / total, Y / total)
 
-    def measure(self, lut=None):
-        """Run the real plan through the panel, returning the plan and the readings."""
-        steps = measure.plan(PEAK)
+    def measure(self, lut=None, plan_peak=None):
+        """Run the real plan through the panel, returning the plan and the readings.
+
+        ``plan_peak`` above the panel's own ceiling is the normal case on hardware: the
+        plan asks for what the EDID claims and the panel stops well short, so the top of
+        the ramp is a plateau of clipped readings. Defaulting it to PEAK meant the
+        fixture planned exactly to its own ceiling and never produced that plateau --
+        the one situation the app deliberately creates every run.
+        """
+        steps = measure.plan(PEAK if plan_peak is None else plan_peak)
         readings = {}
         for step in steps:
             codes = []
@@ -80,8 +87,8 @@ class FakePanel:
             readings[step.key] = self.read(codes)
         return steps, readings
 
-    def response(self, lut=None):
-        steps, readings = self.measure(lut)
+    def response(self, lut=None, plan_peak=None):
+        steps, readings = self.measure(lut, plan_peak)
         calibration = measure.derive(readings, steps)
 
         def sent(nits):
@@ -351,6 +358,74 @@ class ProfileRoundTripTests(unittest.TestCase):
         rebuilt = curves.build_transform(imported.state, hdr=True)
         self.assertEqual(rebuilt.red, transform.red)
         self.assertEqual(rebuilt.blue, transform.blue)
+
+
+class ClippedRampTests(unittest.TestCase):
+    """A ramp planned above what the panel can actually reach.
+
+    Which is what every real run looks like: the plan asks for the peak the EDID claims
+    and the panel stops well short, so the top of the ramp is a plateau of clipped
+    readings -- 1015 asked for and about 460 delivered on the display this was developed
+    against. The fixture could not produce that until FakePanel.measure took a plan_peak,
+    because it planned exactly to its own ceiling, so the plateau was the one thing on
+    the hot path with no coverage at all.
+    """
+
+    def worst_channel_spread(self, response, floor=0.4):
+        """How far apart the three corrections get, above ``floor``.
+
+        Above the floor only: the bottom of the range has its own, older, behaviour and
+        including it would hide the highlight defect inside a larger shadow number.
+        """
+        _state, lut = build(response)
+        plain = curves.build_transform(model.ModeState.neutral("HDR"), hdr=True).red
+        entries = len(plain)
+        worst, where = 0.0, 0.0
+        for index in range(entries):
+            code = index / (entries - 1)
+            if code < floor:
+                continue
+            values = [lut[name][index] - plain[index] for name in CHANNELS]
+            spread = max(values) - min(values)
+            if spread > worst:
+                worst, where = spread, code
+        return worst, where
+
+    def test_a_clipped_plateau_does_not_pin_a_drifting_channel_to_the_top_ramp_code(self):
+        """The plateau gave the inverse table entries whose code climbed against an
+        unchanged level, so code_for handed back the top ramp code for every level at or
+        above the clip. A channel drifting when it clipped kept that drift as one large
+        fixed shift across the whole highlight range: measured at +0.0697 for blue
+        against +0.0084 for red and green, a spread of 0.061 where everything below the
+        clip agreed to 0.0015. That is a visible tint in highlights, from a panel whose
+        only fault was being dimmer than its EDID claims.
+        """
+        panel = FakePanel(blue_error=lambda code: 1.0 - 0.06 * code)
+        worst, where = self.worst_channel_spread(panel.response(plan_peak=PEAK * 2))
+        self.assertLess(
+            worst, 0.005,
+            f"the three channels disagree by {worst:.5f} at code {where:.4f}",
+        )
+
+    def test_the_same_panel_measured_inside_its_range_is_unaffected(self):
+        """The control. Without it the test above would still pass if the correction
+        stopped doing anything at all."""
+        panel = FakePanel(blue_error=lambda code: 1.0 - 0.06 * code)
+        worst, _where = self.worst_channel_spread(panel.response())
+        self.assertLess(worst, 0.005)
+
+    def test_the_trimmed_response_still_has_enough_points_to_be_usable(self):
+        """Dropping the plateau costs entries, and below MIN_RESPONSE_POINTS correct()
+        silently falls back to one common curve."""
+        panel = FakePanel(blue_error=lambda code: 1.0 - 0.06 * code)
+        response = panel.response(plan_peak=PEAK * 2)
+        self.assertTrue(response.usable)
+        _state, lut = build(response)
+        # With blue misbehaving, a correction that survived gives blue its own curve.
+        # Equal curves would mean correct() bailed out and returned the intent unchanged.
+        self.assertNotEqual(
+            lut["red"], lut["blue"], "the correction fell back to one common curve"
+        )
 
 
 class ClosedLoopTests(unittest.TestCase):
