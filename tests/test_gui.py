@@ -2999,6 +2999,32 @@ class MeterIntegrationTests(WindowTestCase):
         self.assertGreaterEqual(self.window.state.hdr.red_channel, -25.0)
         self.assertIn("clamped", self.window.status_label.text())
 
+    def test_a_clamp_that_only_shows_up_after_composing_is_still_announced(self):
+        """The normal case, and the one that said nothing.
+
+        The clamp applies to the composed trims that get stored; the warning was gated
+        on result.trims_exceed_range, which measure computes from this run's incremental
+        gains alone. They agree only while no trim is in force -- so from the second pass
+        onwards a real clamp went unmentioned, and the sentence that routes the user to
+        the monitor's own colour temperature control was exactly the one suppressed.
+        """
+        self.window.state.hdr.blue_channel = -15.0
+        self.window._measure_finished(self.calibration(gains=(1.0, 1.0, 0.85)), "")
+        self.assertAlmostEqual(self.window.state.hdr.blue_channel, -25.0, places=3)
+        text = self.window.status_label.text()
+        self.assertIn("clamped", text)
+        self.assertIn("B -25.0%", text, "the status must quote what was stored")
+        self.assertNotIn("-27.8", text, "not the figure the profile does not carry")
+
+    def test_an_incremental_overshoot_that_composes_back_inside_is_not_announced(self):
+        """The other direction. A -30% correction against a +20% trim already in force
+        composes to about -16%, which the profile carries perfectly well -- warning about
+        it sends the user to change a monitor setting that is not the problem."""
+        self.window.state.hdr.blue_channel = 20.0
+        self.window._measure_finished(self.calibration(gains=(1.0, 1.0, 0.70)), "")
+        self.assertGreater(self.window.state.hdr.blue_channel, -25.0)
+        self.assertNotIn("clamped", self.window.status_label.text())
+
     def test_measured_values_outrank_whatever_was_there(self):
         """A measurement describes this unit; everything else describes a model."""
         self.window.state.hdr.peak_luminance_nits = 1019.5

@@ -2998,10 +2998,21 @@ class MainWindow(FluentWidget):
         # on that would mean the trims survive by accident rather than on purpose --
         # and "the display measured neutral" and "the readings could not say" produce
         # the same numbers and must not produce the same behaviour.
+        # Whether the clamp below actually bit, judged on the composed trims that get
+        # stored. result.trims_exceed_range answers a different question -- whether this
+        # one run's incremental gains overshoot -- and the two disagree whenever a trim
+        # is already in force, which is every pass after the first. Both directions were
+        # reachable: a composed -27.75% silently stored as -25.0% with no warning, and an
+        # incremental -30% composing to a comfortable -16% with a warning anyway.
+        clamped = any(abs(trim) > limit for trim in (red, green, blue))
         if not result.balance_refused:
             state.red_channel = max(-limit, min(limit, red))
             state.green_channel = max(-limit, min(limit, green))
             state.blue_channel = max(-limit, min(limit, blue))
+            # Quote what was stored, not what was asked for. The status used to name the
+            # pre-clamp figures while the sliders beside it already showed the clamped
+            # ones, so the app reported a trim the profile does not carry.
+            red, green, blue = state.red_channel, state.green_channel, state.blue_channel
 
         self._save_state_now()
         self._load_mode_into_controls()
@@ -3057,7 +3068,7 @@ class MainWindow(FluentWidget):
                 )
         if not result.balance_refused:
             level = "ok"
-        if result.trims_exceed_range and not result.balance_refused:
+        if clamped and not result.balance_refused:
             white_note += (
                 f". The correction needed exceeds the {limit:.0f}% a profile can carry and "
                 "has been clamped, so white will still be off -- check the monitor's own "
