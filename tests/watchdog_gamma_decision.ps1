@@ -174,6 +174,40 @@ $noOff.WorkingOff = 'AlsoGone.icm'
 Assert-Profile 'Off requested and nothing provides it -> change nothing' '' `
     (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $noOff)
 
+# --- the captured fallback must also refuse uninstalled names ---------------
+# The guard above covers the branch where the GUI's record is newer. These cases reach
+# the captured Off/On pair instead, which needs it more rather than less: the names are
+# recorded at install time and embed the adapter LUID, which Windows reissues across
+# reboots, so they go stale by design. Naming a file that is gone makes the association
+# write fail on every pass for as long as it lasts.
+Remove-Item -LiteralPath $script:GammaStatePath -Force -ErrorAction SilentlyContinue
+
+$goneOn = New-Saved $true $null
+$goneOn.WorkingOn = 'NeverInstalled_On.icm'
+Assert-Profile 'captured On is missing -> change nothing, never the opposite variant' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $goneOn)
+
+$goneOff = New-Saved $false $null
+$goneOff.WorkingOff = 'NeverInstalled_Off.icm'
+Assert-Profile 'captured Off is missing -> change nothing, never the opposite variant' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $goneOff)
+
+# With no pair captured at all there is no variant to get wrong, so the remaining
+# candidates are tried in turn -- and the last of them is guarded too.
+$noPair = New-Saved $false $null
+$noPair.WorkingOff = ''
+$noPair.WorkingOn = ''
+$noPair.ExtendedProfile = 'VanishedBase.icm'
+Assert-Profile 'no pair and an uninstalled captured base -> change nothing' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $noPair)
+
+$noPairReal = New-Saved $false $null
+$noPairReal.WorkingOff = ''
+$noPairReal.WorkingOn = ''
+$noPairReal.ExtendedProfile = 'Vendor.icm'
+Assert-Profile 'no pair and an installed captured base -> that base' 'Vendor.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $noPairReal)
+
 # --- Resolve-BaseExtendedProfile -------------------------------------------
 # The captured HDR fallback must never be one of the app's own working profiles.
 function New-Entry {

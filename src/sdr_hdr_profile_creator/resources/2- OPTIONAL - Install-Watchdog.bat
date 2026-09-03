@@ -1224,19 +1224,42 @@ function Get-DesiredExtendedProfile {
 
     # The standalone watchdog owns a persistent copy of the prepared Off/On names.
     # This works even when Virtual HDR OSD is closed and its runtime JSON is stale.
+    #
+    # "Never hand Windows a profile that is not installed" applied only to the branch
+    # above, and these names need it more, not less: they are captured at install time
+    # and the working pair embeds the adapter LUID, which Windows reissues across
+    # reboots, so they go stale by design rather than by accident.
+    #
+    # A missing name here returns '' -- change nothing -- rather than falling through to
+    # the next candidate. Falling through would answer with the OPPOSITE variant
+    # whenever the pair is half-installed, turning the correction back on moments after
+    # the user chose Off, which is the same guarantee the block above exists to keep.
     if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaEnabled') {
         if ([bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOn) {
-            return [string]$SavedDisplay.WorkingOn
+            if (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.WorkingOn)) {
+                return [string]$SavedDisplay.WorkingOn
+            }
+            return ''
         }
         if (-not [bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOff) {
-            return [string]$SavedDisplay.WorkingOff
+            if (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.WorkingOff)) {
+                return [string]$SavedDisplay.WorkingOff
+            }
+            return ''
         }
     }
 
-    if ($entry -and $entry.active_profile) {
+    # No pair captured for this display, so there is no variant to get wrong and the
+    # remaining candidates can be tried in turn.
+    if ($entry -and $entry.active_profile -and
+        (Test-InstalledColorProfile -ProfileName ([string]$entry.active_profile))) {
         return [string]$entry.active_profile
     }
-    return [string]$SavedDisplay.ExtendedProfile
+    if ($SavedDisplay.ExtendedProfile -and
+        (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.ExtendedProfile))) {
+        return [string]$SavedDisplay.ExtendedProfile
+    }
+    return ''
 }
 
 function Restore-SavedProfiles {
