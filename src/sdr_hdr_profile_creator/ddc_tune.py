@@ -189,6 +189,27 @@ def tune(
         current = proposed
         outcome.ended_at = proposed
 
+    # Gains that were written, read back, and changed nothing.
+    #
+    # This is the failure mode read-back cannot see, and it is not hypothetical on the
+    # hardware this was built for: a meter-verified test on 2026-08-22 wrote red gain to
+    # 70, read back 70, and moved measured white by 0.0001 in xy -- noise. The monitor
+    # accepts the value, stores it, reports it, and does not apply it while HDR is on.
+    #
+    # So the only honest confirmation is the meter, and if white did not move there is
+    # nothing to keep. Leaving the gains where the loop put them would be the worst
+    # outcome available: a monitor whose settings no longer match its factory state, in
+    # exchange for no change on screen and no way for the user to know that.
+    if outcome.changed and not outcome.improved and not outcome.refused:
+        _restore(link, ddc.GAINS, outcome.started_at)
+        outcome.ended_at = outcome.started_at
+        outcome.refused = (
+            "Adjusting the monitor's RGB gains did not move measured white, so the "
+            "original settings were put back. The gains read back correctly, which "
+            "means the monitor is storing them and not applying them -- many panels "
+            "ignore these controls while HDR is on."
+        )
+
     return outcome
 
 

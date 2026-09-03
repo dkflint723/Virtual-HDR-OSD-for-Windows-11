@@ -155,6 +155,32 @@ class TuneTests(unittest.TestCase):
         self.assertIn("did not apply it", outcome.refused)
         self.assertEqual(outcome.started_at, outcome.ended_at)
 
+    def test_gains_that_read_back_but_change_nothing_are_put_back(self):
+        """The failure read-back cannot see, and the reason this loop trusts the meter
+        and nothing else.
+
+        A meter-verified test on this project's own monitor wrote red gain to 70, read
+        back 70, and moved measured white by 0.0001 in xy -- noise. The panel accepts the
+        value, stores it, reports it, and does not apply it while HDR is on. A loop that
+        believed read-back would leave the monitor's settings changed from its factory
+        state in exchange for nothing on screen, with no way for the user to know.
+        """
+        link = FakeLink(gains=(90, 90, 90))
+
+        def measure():
+            return {"n": 1}
+
+        # White never moves however the gains are set: the panel is ignoring them.
+        outcome = ddc_tune.tune(
+            link, measure, lambda _r: (0.97, 1.0, 1.0), lambda _r: 0.0090
+        )
+        self.assertIn("did not move measured white", outcome.refused)
+        self.assertEqual(outcome.started_at, outcome.ended_at)
+        self.assertEqual(
+            [90, 90, 90], [link.values[code] for code in ddc.GAINS],
+            "the monitor must be left exactly as it was found",
+        )
+
     def test_a_busy_link_is_retried_rather_than_called_locked(self):
         """29% of single DDC/CI operations fail on the hardware this was written for, so
         a refused write says nothing on its own. Reporting it as a locked control would

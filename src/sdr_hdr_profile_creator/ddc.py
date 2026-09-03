@@ -10,8 +10,14 @@ compensating downstream, and it is what a hardware calibration workflow does fir
 **What this display actually exposes**, read from an ASUS PG32UCDM with HDR on:
 brightness (0x10), contrast (0x12), colour preset (0x14), RGB gain (0x16/0x18/0x1A), RGB
 black level (0x6C/0x6E/0x70), gamma (0x72) and picture mode (0xDC), 25 codes in total.
-Writes take effect while HDR is on -- confirmed by writing red gain 86 -> 87, reading it
-back, and restoring it.
+
+**Read-back is not proof the image changed, and on this monitor it is known to lie.**
+Writing red gain 86 -> 87 reads back 87. But a meter-verified test on the same panel
+wrote red gain to 70, read back 70, and moved measured white by 0.0001 in xy -- noise.
+The monitor accepts the value, stores it, reports it, and does not apply it while HDR is
+on. So ``write_control`` succeeding means the value was *stored*, never that the display
+obeyed it, and the only honest confirmation is a meter. ``ddc_tune`` treats it that way:
+if white does not move, it puts the gains back and says why.
 
 **Reads fail intermittently and mean nothing on one attempt.** The first probe of this
 hardware reported brightness, contrast and red and green gain as unsupported; a second
