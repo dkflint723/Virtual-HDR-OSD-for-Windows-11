@@ -2999,6 +2999,28 @@ class MeterIntegrationTests(WindowTestCase):
         self.assertGreaterEqual(self.window.state.hdr.red_channel, -25.0)
         self.assertIn("clamped", self.window.status_label.text())
 
+    def test_an_implausible_black_reading_is_named_as_a_meter_problem(self):
+        """The run's own check bounds black only as a fraction of peak, so 2% of a
+        1015-nit panel -- about 20 nits -- passes and lands in the profile's
+        minimum-luminance field. No absolute threshold works, because one strict enough
+        to catch that also refuses a good LCD; a contrast ratio does, since nothing this
+        app is aimed at is worse than 200:1.
+
+        Said rather than refused: the figure reaches one header field, the greyscale
+        correction comes from the ramp, and the rest of the run is still worth keeping.
+        """
+        self.window._measure_finished(self.calibration(peak=450.0, black=20.0), "")
+        text = self.window.status_label.text()
+        self.assertIn("meter is probably seeing", text)
+        self.assertIn("22:1", text, "the measured ratio should be quoted")
+        self.assertAlmostEqual(self.window.state.hdr.minimum_luminance_nits, 20.0, places=3)
+
+    def test_a_credible_black_reading_is_left_alone(self):
+        """450 nits against 0.05 is 9,000:1 -- an ordinary OLED reading, and saying
+        anything about it would train the user to ignore the message."""
+        self.window._measure_finished(self.calibration(peak=450.0, black=0.05), "")
+        self.assertNotIn("meter is probably seeing", self.window.status_label.text())
+
     def test_a_clamp_that_only_shows_up_after_composing_is_still_announced(self):
         """The normal case, and the one that said nothing.
 

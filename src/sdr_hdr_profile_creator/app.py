@@ -103,6 +103,14 @@ WATCHDOG_INSTALL_ROOT = Path(
 ) / "ColorProfileModeWatchdog"
 GAMMA_RUNTIME_SCHEMA = "virtual-hdr-osd-gamma-hotkeys-v2"
 
+#: Below this, a measured black is the meter rather than the display. The run's own
+#: check bounds black only as a fraction of peak, which lets 2% of a 1015-nit panel --
+#: about 20 nits -- through as a black level. An absolute threshold cannot work here:
+#: one strict enough to catch that would refuse a perfectly good LCD. A contrast ratio
+#: can, because no display this app is aimed at is worse than 200:1, so anything below
+#: it is stray light or a meter off the glass.
+MIN_CREDIBLE_CONTRAST = 200.0
+
 # SDR handling is deliberately opt-in. Third-party calibration suites (Calman,
 # DisplayCAL, i1Profiler) install an SDR profile *and* run their own loader that
 # re-asserts its VCGT; a second process re-associating profiles behind their back
@@ -3033,6 +3041,22 @@ class MainWindow(FluentWidget):
             "contrast too high to measure" if contrast == float("inf")
             else f"{contrast:,.0f}:1 contrast"
         )
+        # A black reading is only bounded as a fraction of peak, so 2% of a 1015-nit
+        # panel -- about 20 nits -- passes validation and is written into the profile's
+        # minimum-luminance field. No absolute threshold works, because one that refuses
+        # a bad OLED reading also refuses a good LCD, but a contrast ratio does: no
+        # display this app is aimed at manages worse than 200:1, so a reading below that
+        # is the meter seeing stray light, not the panel. Said rather than refused --
+        # the figure only reaches one header field, and the greyscale correction comes
+        # from the ramp, so the run is still worth keeping.
+        black_note = ""
+        if 0.0 < contrast < MIN_CREDIBLE_CONTRAST:
+            black_note = (
+                f" Black read {result.black_nits:.4f} nits, only {contrast:,.0f}:1 -- "
+                "far worse than any HDR display manages, so the meter is probably seeing "
+                "room light or is not flush against the screen. Everything else in this "
+                "run is fine; re-measure black alone if you want that figure right."
+            )
 
         # The error this run *found* is the verdict on whatever was applied before
         # it, which is what makes every pass after the first a verification.
@@ -3105,7 +3129,7 @@ class MainWindow(FluentWidget):
                 f"Measured {result.peak_nits:.1f} nits peak on a "
                 f"{result.peak_window_fraction:.0%} window{window_peak_note} and "
                 f"{result.black_nits:.4f} black "
-                f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
+                f"({contrast_text}).{black_note} {white_note}.{additivity_note}{grey_note} "
                 "Press Apply Edits to store what was measured.",
                 level,
             )
@@ -3122,7 +3146,7 @@ class MainWindow(FluentWidget):
             f"Measured {result.peak_nits:.1f} nits peak on a "
             f"{result.peak_window_fraction:.0%} window{window_peak_note} and "
             f"{result.black_nits:.4f} black "
-            f"({contrast_text}). {white_note}.{additivity_note}{grey_note} "
+            f"({contrast_text}).{black_note} {white_note}.{additivity_note}{grey_note} "
             "Press Apply Edits to store it.",
             level,
         )

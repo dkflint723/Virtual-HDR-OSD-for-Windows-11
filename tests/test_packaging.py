@@ -357,6 +357,43 @@ class WatchdogPackagingTests(unittest.TestCase):
         self.assertIn("logonTrigger.UserId = $currentSid", script)
         self.assertIn("HKCU Run fallback", script)
 
+    def test_a_watchdog_that_dies_between_sign_ins_is_revived(self):
+        """With only a logon trigger, anything that ended the supervisor -- a crash, a
+        security product, Task Manager -- left the display unprotected until the next
+        sign-in, silently.
+
+        The repetition is only affordable alongside starting through the task: with the
+        supervisor running as the task's own instance, MultipleInstances = IgnoreNew
+        suppresses every repeat while the watchdog is healthy. Started outside the task,
+        as it used to be, Task Scheduler would see no instance and launch a spare
+        supervisor every five minutes -- about 1,150 a day, each spawning a PowerShell
+        that reads exit 4 and stands down, which is the churn the launcher's
+        four-consecutive-4s counter exists to stop. The two must not be separated, so
+        this test asserts both.
+        """
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertIn("$logonTrigger.Repetition.Interval = 'PT5M'", script)
+        self.assertIn("$logonTrigger.Repetition.Duration = ''", script)
+        self.assertIn("$taskDefinition.Settings.MultipleInstances = 2", script)
+        self.assertIn("$registeredTask.Run($null)", script)
+        # And the direct launch survives for the paths with no task of ours.
+        self.assertIn("if (-not $started) {", script)
+
+    def test_the_install_result_is_written_after_the_watchdog_is_started(self):
+        """A task that registers but will not start now is a warning worth showing, and
+        the GUI reads warnings only from install_result.json. Written first, that
+        warning went nowhere."""
+        script = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        self.assertLess(
+            script.index("$registeredTask.Run($null)"),
+            script.index("$result | ConvertTo-Json"),
+            "the start must happen before the result is recorded",
+        )
+
     def test_the_task_is_not_given_a_lifetime(self):
         """Unset, ExecutionTimeLimit inherits Task Scheduler's default of PT72H, and the
         registered task on the development machine reads back exactly that with no
@@ -410,9 +447,10 @@ class InstallerOutcomeTests(unittest.TestCase):
         in is behind a `pause` the user may never read."""
         script = self.install()
         self.assertEqual(
-            3, script.count("$script:InstallWarnings +="),
+            4, script.count("$script:InstallWarnings +="),
             "each degraded outcome should record its own warning: the Run-key fallback, "
-            "the un-replaceable task, and a running watchdog that cannot be stopped",
+            "the un-replaceable task, a running watchdog that cannot be stopped, and a "
+            "task that registered but would not start now",
         )
 
     def test_the_gui_reads_the_same_file_the_scripts_write(self):

@@ -1579,6 +1579,10 @@ Loop
     $currentSid = $currentIdentity.User.Value
     $wscriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
     $taskArguments = '//B //Nologo "{0}"' -f $LauncherPath
+    # Set on a successful registration, and the thing the watchdog is then started
+    # through. Left $null, the start below falls back to launching the supervisor
+    # directly, which is right for the paths where no task of ours is in place.
+    $registeredTask = $null
 
     try {
         $taskService = New-Object -ComObject 'Schedule.Service'
@@ -1620,6 +1624,22 @@ Loop
         $logonTrigger.UserId = $currentSid
         $logonTrigger.Delay = 'PT10S'
         $logonTrigger.Enabled = $true
+        # Repeat indefinitely, so a watchdog that dies between sign-ins comes back.
+        # With only the logon trigger, anything that ended the supervisor -- a crash, a
+        # security product, Task Manager -- left the display unprotected until the next
+        # sign-in, and said nothing about it.
+        #
+        # This is only affordable because the post-install start below is the task's OWN
+        # instance. MultipleInstances = IgnoreNew then suppresses every repeat while the
+        # watchdog is alive, so the repetition costs nothing until something has actually
+        # gone wrong. Started outside the task -- as it used to be -- Task Scheduler would
+        # see no instance running and launch a spare supervisor every five minutes, about
+        # 1,150 a day, each spawning a PowerShell that reads exit 4 and stands down. That
+        # is the respawn churn the launcher's four-consecutive-4s counter exists to stop,
+        # so the two changes have to land together.
+        $logonTrigger.Repetition.Interval = 'PT5M'
+        $logonTrigger.Repetition.Duration = ''
+        $logonTrigger.Repetition.StopAtDurationEnd = $false
 
         # TASK_ACTION_EXEC = 0.
         $execAction = $taskDefinition.Actions.Create(0)
@@ -1627,7 +1647,10 @@ Loop
         $execAction.Arguments = $taskArguments
 
         # TASK_CREATE_OR_UPDATE = 6; TASK_LOGON_INTERACTIVE_TOKEN = 3.
-        $taskRoot.RegisterTaskDefinition(
+        # Kept rather than discarded: the watchdog is started through this below, so that
+        # the running supervisor is an instance of the task and the repetition above can
+        # tell "already protected" from "needs reviving".
+        $registeredTask = $taskRoot.RegisterTaskDefinition(
             $TaskName,
             $taskDefinition,
             6,
@@ -1635,7 +1658,7 @@ Loop
             $null,
             3,
             $null
-        ) | Out-Null
+        )
 
         # Remove an old fallback entry if a previous installation needed it.
         Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
@@ -1692,11 +1715,39 @@ Loop
         Write-Host ('    Gamma ON       : {0}' -f $(if ($item.WorkingOn) { $item.WorkingOn } else { '<not prepared by Virtual HDR OSD>' }))
     }
 
+    # Through the task when there is one, so the supervisor now running IS the task's
+    # instance. That is what lets MultipleInstances = IgnoreNew suppress the five-minute
+    # repetition while the watchdog is healthy -- started outside the task, every repeat
+    # would launch a spare.
+    #
+    # Start-Process stays as the fallback for the paths that have no task of ours: the
+    # HKCU Run-key install, and a registration that failed against a task this account
+    # cannot replace. Protection now matters more than tidiness, so a Run() that throws
+    # falls back rather than leaving nothing running.
+    $started = $false
+    if ($registeredTask) {
+        try {
+            $registeredTask.Run($null) | Out-Null
+            $started = $true
+        } catch {
+            $script:InstallWarnings += ('The scheduled task was registered but would not start now ({0}). The watchdog was started directly instead, and the task will start it at the next sign-in.' -f $_.Exception.Message)
+            Write-Warning ('Could not start the task immediately: {0}' -f $_.Exception.Message)
+        }
+    }
+    if (-not $started) {
+        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') `
+            -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
+            -WindowStyle Hidden
+    }
+
     # The GUI used to decide "installed" from Watchdog.ps1's mtime, which the .bat
     # writes before the integrity check, before -Install, before the display capture
     # and before Task Scheduler registration. So every later failure -- including an
     # outright throw -- was still reported as a green "Watchdog installed."
     # Write down what actually happened instead, for the GUI to read.
+    #
+    # Written after the start above, so a task that registers but will not start now is
+    # a warning the GUI can show rather than one nobody ever sees.
     $result = [PSCustomObject]@{
         action   = 'install'
         # Not ok when the previous watchdog is still running: the files are right but
@@ -1717,9 +1768,6 @@ Loop
     Write-Host ('State: {0}' -f $StatePath)
     Write-Host ('Log  : {0}' -f $LogPath)
 
-    Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') `
-        -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
-        -WindowStyle Hidden
 
     exit 0
 }
