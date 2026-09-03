@@ -3785,8 +3785,24 @@ class ControlRowFitTests(WindowTestCase):
     failed, because Qt elides silently. Splitting the row was not enough on its
     own: the two halves still wanted 1196 and 1626 against a 1080 minimum.
 
-    Headroom is now about 30px per row, so this is the guard that catches the
-    next control before a user does.
+    Every width measured here is an OFFSCREEN width, and offscreen has no font
+    database: Qt advances a flat ~12px per character for tofu. Under
+    QT_QPA_PLATFORM=offscreen, which is what line 21 sets and what the suite
+    runs under, the switch row measures 1028 and the action row 1054 against a
+    1080 minimum -- 52px and 26px of headroom. The same rows under
+    QT_QPA_PLATFORM=windows with Segoe UI 9pt measure 584 and 611: 496px and
+    469px. So the "about 30px" this used to claim was an artefact, wrong by
+    roughly sixteen times about the shipped UI.
+
+    The guard is kept anyway, because 12px a character is wider than the widest
+    Segoe UI 9pt ASCII glyph (W, 11px). The offscreen total therefore
+    over-estimates, so this can only ever fail a row that would have fitted --
+    never pass one that elides. That is the direction a tripwire should err in,
+    and the surplus doubles as headroom for text scaling and longer localised
+    labels.
+
+    If this ever blocks a control you want to add, re-measure with
+    QT_QPA_PLATFORM=windows before splitting a row.
     """
 
     SPACING = 12

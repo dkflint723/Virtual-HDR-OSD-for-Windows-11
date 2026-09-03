@@ -1087,14 +1087,51 @@ class TrackRenderingTests(PatternViewTestCase):
         self.assertNotEqual(left, right, "the track did not move with the value")
 
     def test_a_level_driven_pattern_draws_its_own_track(self):
+        """Compared over the probe track's own pixels, not over the whole strip.
+
+        Comparing whole buffers passed on the level label alone: offscreen has no font
+        database, so "Level  10 nits" and "Level  900 nits" differ by one tofu advance
+        and nothing about the track has to be drawn at all. Confirmed against two
+        mutants -- deleting the draw_track call, and freezing the fill at a constant --
+        and the old assertion survived both, in the one file whose own source comment
+        documents this trap for the neighbouring drawText.
+
+        Cropping to the track's reported rectangle rather than picking level values with
+        equal label lengths, because the latter is only true while the platform has no
+        fonts: line 16 sets QT_QPA_PLATFORM with setdefault, so an externally-set
+        platform with real glyphs would make it vacuous again without anyone noticing.
+
+        The boundary this still does not reach: a fill that is wrong but monotonic -- a
+        linear ratio where PQ is meant, the mistake pattern_view.py warns about. Only an
+        assertion on the drawn fraction would catch that.
+        """
         from dataclasses import replace
 
         context = context_for(capability(), 240.0)
-        dim, _, _ = render_overlay(420, 700, pattern_view.pattern_by_key("peak-white"),
-                                   replace(context, probe_nits=10.0), self.controls, 0)
-        bright, _, _ = render_overlay(420, 700, pattern_view.pattern_by_key("peak-white"),
-                                      replace(context, probe_nits=900.0), self.controls, 0)
-        self.assertNotEqual(dim, bright)
+        dim_tracks: list[tuple[str, int, int, int, int]] = []
+        bright_tracks: list[tuple[str, int, int, int, int]] = []
+        dim, width, _height = render_overlay(
+            420, 700, pattern_view.pattern_by_key("peak-white"),
+            replace(context, probe_nits=10.0), self.controls, 0, tracks=dim_tracks)
+        bright, _w, _h = render_overlay(
+            420, 700, pattern_view.pattern_by_key("peak-white"),
+            replace(context, probe_nits=900.0), self.controls, 0, tracks=bright_tracks)
+
+        def band(buffer, tracks):
+            entry = next(
+                (item for item in tracks if item[0] == pattern_view.PROBE_TRACK_KEY), None)
+            self.assertIsNotNone(entry, "the probe track was not drawn at all")
+            _key, x, y, track_width, track_height = entry
+            stride = width * 4
+            return b"".join(
+                buffer[row * stride + x * 4:row * stride + (x + track_width) * 4]
+                for row in range(y, y + track_height)
+            )
+
+        self.assertNotEqual(
+            band(dim, dim_tracks), band(bright, bright_tracks),
+            "the probe track's own pixels did not change with the level",
+        )
 
 
 class OverlayFittingTests(PatternViewTestCase):
