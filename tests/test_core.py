@@ -1134,9 +1134,14 @@ class InPlaceProfileRetryTests(unittest.TestCase):
     def test_the_message_leads_with_the_likely_cause(self):
         """Telling the user to elevate first is wrong for the common case, and
         elevating is not something to advise lightly."""
-        from pathlib import Path as _Path
-
-        app_source = _Path("src/sdr_hdr_profile_creator/app.py").read_text(encoding="utf-8")
+        # Anchored on this file, not on the working directory. As a relative path it
+        # read app.py only when the suite happened to be started from the repository
+        # root, and raised FileNotFoundError from anywhere else -- an error rather than
+        # a failure, so it read as the suite being broken rather than this test being
+        # wrong about where it lives.
+        app_source = (
+            Path(__file__).resolve().parents[1] / "src/sdr_hdr_profile_creator/app.py"
+        ).read_text(encoding="utf-8")
         start = app_source.index("Windows kept the previous")
         message = app_source[start:start + 420]
         self.assertLess(
