@@ -4864,5 +4864,266 @@ class WatchdogBuildTests(WindowTestCase):
         self.assertIn("Task Scheduler", text)
 
 
+class PlacementCancelTests(WindowTestCase):
+    """Pressing Esc while the meter is still being placed.
+
+    The run has not started at that point -- there is no worker and no thread, only a
+    fullscreen window showing a green square -- so _measure_finished, which is the one
+    place that releases the surface, never runs.
+    """
+
+    def arrange(self):
+        """Get as far as the placement target and stop there.
+
+        Deliberately not MeasurementBriefingTests.drive: its fake emits `ready` from
+        show_placement_target, which starts the run immediately and steps straight over
+        the state this class is about.
+        """
+        from PySide6.QtCore import QObject, Signal
+
+        class PlacingWindow(QObject):
+            ready = Signal()
+            closed = Signal()
+            failure = ""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+                PlacingWindow.instance = self
+
+            def show_placement_target(self, fraction=None):
+                # The meter has not found the target yet, so `ready` is NOT emitted.
+                return True
+
+            def setGeometry(self, *args):
+                pass
+
+            def showFullScreen(self):
+                pass
+
+            def begin(self):
+                return True
+
+            def close(self):
+                # A real MeasureWindow emits closed from closeEvent unconditionally.
+                self.closed.emit()
+
+            def activateWindow(self):
+                pass
+
+            def setFocus(self, *args):
+                pass
+
+        patches = [
+            mock.patch.object(app_module, "find_spotread", return_value=Path("spotread")),
+            mock.patch.object(app_module, "list_instruments",
+                              return_value=[app_module_instrument()]),
+            mock.patch.object(app_module, "read_panel_metadata", lambda _p: None),
+            mock.patch.object(app_module.measure_view, "MeasureWindow", PlacingWindow),
+            mock.patch.object(app_module.measure_view, "start",
+                              lambda *a, **k: (mock.MagicMock(), mock.MagicMock())),
+            mock.patch.object(app_module.QMessageBox, "question",
+                              return_value=QMessageBox.StandardButton.Ok),
+            # The placement watcher is a REAL QThread here, and its poll calls
+            # read_emissive. Left unpatched it shells out to a "spotread" that is not
+            # on PATH, once per poll, for as long as the fixture lives -- a test that
+            # reaches outside the process for hardware it must never touch.
+            mock.patch.object(app_module, "read_emissive",
+                              side_effect=app_module.MeterError("no meter in tests")),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        self.window._measure_with_meter()
+        return PlacingWindow.instance
+
+    def test_the_surface_is_released_when_placement_is_abandoned(self):
+        """The bug: one Esc during placement used to block every later measurement AND
+        every pattern window for the rest of the session, with "A measurement is still
+        running" and no measurement running. Only a restart cleared it."""
+        window = self.arrange()
+        self.assertIsNotNone(
+            getattr(self.window, "_measure_window", None),
+            "the fixture did not reach the placement stage",
+        )
+        window.close()
+        self.assertIsNone(
+            getattr(self.window, "_measure_window", None),
+            "the closed window is still held as the live measurement surface",
+        )
+        self.assertEqual(
+            "", self.window._fullscreen_surface_busy(),
+            "a later measurement or pattern window is refused after a cancelled "
+            "placement",
+        )
+        # The last thing on screen was "Put the meter flat on the green square ... Esc
+        # cancels", or after a timeout "Press Enter to start anyway, or Esc to stop".
+        # Left standing, either one tells the user to place a meter on a square that is
+        # no longer there and promises a start that will never come. This is the only
+        # abandonment in the app that used to say nothing.
+        status = self.window.status_label.text()
+        self.assertIn("cancelled", status.lower())
+        self.assertNotIn("green square", status)
+
+    def test_a_run_still_holds_the_surface_while_it_is_running(self):
+        """The other half: releasing on every close would let a second surface open on
+        top of a live run, and two swapchains on one display present nothing."""
+        self.arrange()
+        self.window._measure_thread = mock.MagicMock()
+        self.addCleanup(setattr, self.window, "_measure_thread", None)
+        self.window._placement_surface_closed()
+        self.assertIsNotNone(
+            getattr(self.window, "_measure_window", None),
+            "a running measurement must keep its surface",
+        )
+
+
+class ModePollDuringMeasurementTests(WindowTestCase):
+    """The 900 ms Windows-mode poll, while a measurement is in flight.
+
+    _poll_windows_mode reacts to an SDR/HDR transition by rewriting state.hdr through
+    _capture_current_hdr_base(load_controls=True) and then scheduling _apply_mode_profile
+    with force=True -- a full profile reinstall with the installed-content cache
+    deliberately bypassed. Both are correct when the user flips HDR at the desk. Both
+    are destructive during a run: the profile is what shapes the signal at scanout, so
+    reinstalling it between two patches means the readings either side describe
+    different displays, and nothing downstream can tell.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.window._last_detected_mode = "SDR"
+        # Without both of these the automatic response is never armed, so a test that
+        # watched for it would pass whatever the guard did.
+        self.window.state.follow_windows_mode = True
+        self.window.state.auto_refresh_after_mode_change = True
+        self.captured = []
+        self.applied = []
+        patcher = mock.patch.object(
+            app_module.MainWindow, "_capture_current_hdr_base",
+            lambda _self, display, **kw: self.captured.append(display),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        applier = mock.patch.object(
+            app_module.MainWindow, "_apply_mode_profile",
+            lambda _self, *a, **kw: self.applied.append(a),
+        )
+        applier.start()
+        self.addCleanup(applier.stop)
+
+    def test_a_mode_change_mid_run_does_not_rewrite_the_display_state(self):
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.window._poll_windows_mode()
+        self.assertEqual([], self.captured, "state.hdr was recaptured during a run")
+
+    def test_the_transition_is_handled_once_the_run_is_over(self):
+        """Deferred, not swallowed. The poll returns before it records what it saw, so
+        the next tick after the run still sees the change and acts on it -- otherwise
+        suppressing the poll would quietly lose a real mode switch."""
+        self.window._measure_window = object()
+        self.window._poll_windows_mode()
+        self.assertEqual(
+            "SDR", self.window._last_detected_mode,
+            "the poll recorded the new mode while refusing to act on it, so the "
+            "transition can never be handled",
+        )
+        self.window._measure_window = None
+        self.window._poll_windows_mode()
+        self.assertEqual(
+            1, len(self.captured), "the deferred transition was never handled"
+        )
+
+
+class DisplaySurfaceGuardTests(WindowTestCase):
+    """Everything that may not touch the display while a fullscreen surface owns it.
+
+    The first version of this guard covered the measurement window and the 900 ms mode
+    poll, and an adversarial review found three ways round it: the pattern window owns
+    the display just as exclusively, the mode response is armed 650 ms ahead and never
+    re-checked, and two other things rewrite the same state on their own timers.
+    """
+
+    def test_the_pattern_window_counts_as_owning_the_display(self):
+        """Not a measurement, but the same exclusivity and the same damage: someone is
+        judging those patches by eye while a reinstall changes them."""
+        self.assertFalse(self.window._display_surface_in_use())
+        self.window._pattern_window = object()
+        self.addCleanup(setattr, self.window, "_pattern_window", None)
+        self.assertTrue(self.window._display_surface_in_use())
+
+    def test_a_response_armed_before_the_run_does_not_fire_during_it(self):
+        """The reachable gap: QMessageBox.question runs a nested event loop, so the
+        900 ms poll keeps firing while the measurement briefing is on screen and can arm
+        a forced reinstall in the seconds before the surface goes up."""
+        ran = []
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.window._last_detected_mode = "HDR"
+        self.window._deferred_mode_response("SDR", lambda: ran.append(1))
+        self.assertEqual([], ran, "a profile reinstall landed inside a run")
+
+    def test_a_response_held_back_is_rewound_rather_than_dropped(self):
+        """Otherwise suppressing it loses a real mode change: the poll would have
+        already recorded the new mode, so nothing would ever detect it again."""
+        self.window._measure_window = object()
+        self.window._last_detected_mode = "HDR"
+        self.window._deferred_mode_response("SDR", lambda: None)
+        self.assertEqual(
+            "SDR", self.window._last_detected_mode,
+            "the transition can never be re-detected after the run",
+        )
+        self.window._measure_window = None
+        ran = []
+        self.window._deferred_mode_response("SDR", lambda: ran.append(1))
+        self.assertEqual([1], ran, "the response never ran once the display was free")
+
+    def test_the_gamma_runtime_poll_stands_down_during_a_run(self):
+        """450 ms, and it assigns state.hdr.sdr_gamma_correction from the watchdog's
+        shared JSON -- the response the run is solving for, changed mid-run."""
+        GAMMA = app_module.GAMMA_HOTKEY_STATE_PATH
+        GAMMA.write_text(
+            json.dumps({"displays": {self.display.key: {"correction": "Off"}}}),
+            encoding="utf-8",
+        )
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.window._sync_external_gamma_hotkey_state()
+        self.assertEqual(
+            "Auto (Recommended)", self.window.state.hdr.sdr_gamma_correction,
+            "the watchdog's state was adopted in the middle of a measurement",
+        )
+
+    def test_alt_1_is_refused_while_a_surface_is_up(self):
+        """Both handlers end in _select_gamma_correction, which installs and associates
+        a different profile -- at scanout, between two patches."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.window._gamma_hotkey_disable()
+        self.assertEqual(
+            "Auto (Recommended)", self.window.state.hdr.sdr_gamma_correction,
+            "Alt+1 swapped the profile during a measurement",
+        )
+        self.assertIn("Alt+1", self.window.status_label.text())
+
+    def test_alt_2_is_refused_while_a_surface_is_up(self):
+        self.window.state.hdr.sdr_gamma_correction = "Off"
+        self.window._pattern_window = object()
+        self.addCleanup(setattr, self.window, "_pattern_window", None)
+        self.window._gamma_hotkey_enable()
+        self.assertEqual(
+            "Off", self.window.state.hdr.sdr_gamma_correction,
+            "Alt+2 swapped the profile while patterns were on screen",
+        )
+
+    def test_the_hotkeys_still_work_with_nothing_on_screen(self):
+        """The refusal must be conditional, or the feature is simply gone."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        self.window._gamma_hotkey_disable()
+        self.assertEqual("Off", self.window.state.hdr.sdr_gamma_correction)
+
+
 if __name__ == "__main__":
     unittest.main()

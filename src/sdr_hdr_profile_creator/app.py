@@ -8,6 +8,7 @@ import os
 import subprocess
 import time
 from types import SimpleNamespace
+from typing import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -1064,7 +1065,30 @@ class MainWindow(FluentWidget):
                     detected = None
         return resolve_white_level(option, detected)
 
+    def _hotkey_refused_during_a_run(self, chord: str) -> bool:
+        """Refuse a gamma hotkey while a fullscreen surface owns the display.
+
+        Both handlers end in _select_gamma_correction, which installs and associates a
+        different profile. Mid-measurement that swaps the shaping at scanout between two
+        patches; mid-pattern it changes what someone is looking at while they judge it.
+
+        The status line is written for afterwards -- the surface covers it -- so that
+        someone who pressed the chord and saw nothing happen is told why once the screen
+        comes back, rather than being left thinking the hotkey is broken.
+        """
+        if not self._display_surface_in_use():
+            return False
+        self._set_status(
+            f"{chord} ignored: a fullscreen measurement or pattern is on screen, and "
+            "switching the profile under it would change what is being measured. Close "
+            "it first.",
+            "warning",
+        )
+        return True
+
     def _gamma_hotkey_disable(self) -> None:
+        if self._hotkey_refused_during_a_run("Alt+1"):
+            return
         if self.state.hdr.sdr_gamma_correction != "Off":
             self._last_enabled_gamma_correction = self.state.hdr.sdr_gamma_correction
         self._set_status(
@@ -1074,6 +1098,8 @@ class MainWindow(FluentWidget):
         self._select_gamma_correction("Off", "Gamma hotkey OFF")
 
     def _gamma_hotkey_enable(self) -> None:
+        if self._hotkey_refused_during_a_run("Alt+2"):
+            return
         target = self._last_enabled_gamma_correction if self._last_enabled_gamma_correction != "Off" else "Auto (Recommended)"
         self._set_status(f"Alt+2: SDR-in-HDR gamma correction enabled ({target}).", "warning")
         self._select_gamma_correction(target, "Gamma hotkey ON")
@@ -1085,6 +1111,12 @@ class MainWindow(FluentWidget):
         GUI cannot register the same chords; the shared JSON state is therefore the
         single synchronization channel and no profile is reapplied here.
         """
+        if self._display_surface_in_use():
+            # Every 450 ms, and it assigns state.hdr.sdr_gamma_correction from the
+            # watchdog's shared JSON. During a run that is the response being solved
+            # for, changed between one patch and the next, with the readings either
+            # side folded into one curve as though nothing had moved.
+            return
         display = self._selected_display()
         if display is None or not GAMMA_HOTKEY_STATE_PATH.is_file():
             return
@@ -1820,7 +1852,59 @@ class MainWindow(FluentWidget):
             return selected
         return None
 
+    def _display_surface_in_use(self) -> bool:
+        """Whether a fullscreen surface owns the display right now.
+
+        Both windows take the display exclusively through a D3D swapchain, and both
+        are ruined by the same thing, so both are covered:
+
+        * ``_measure_window`` is up from the moment the placement target is drawn until
+          teardown. Checked rather than ``_measure_thread``, which exists only for the
+          patch sequence and so would leave placement unguarded.
+        * ``_pattern_window`` is the calibration patterns, which someone is judging by
+          eye. Changing the profile under them is not a corrupted measurement, but it
+          is a corrupted judgement, and it is the same fix.
+        """
+        return (
+            getattr(self, "_measure_window", None) is not None
+            or getattr(self, "_pattern_window", None) is not None
+        )
+
+    def _deferred_mode_response(
+        self, previous: DisplayMode | None, action: Callable[[], None]
+    ) -> None:
+        """Act on a mode change 650 ms later, unless the display got claimed meanwhile.
+
+        The guard at the top of _poll_windows_mode cannot see a response that was
+        already armed when the surface went up, and that gap is reachable rather than
+        theoretical: QMessageBox.question runs a nested event loop, so the 900 ms poll
+        keeps firing while the measurement briefing is on screen, and a forced reinstall
+        armed there lands well inside the run that follows.
+
+        _last_detected_mode is rewound rather than the response simply dropped. The
+        transition really happened and still needs handling, so putting the poll back
+        where it was lets the first tick after the surface closes act on it -- the same
+        deferral the poll guard gives, applied to work already in flight.
+        """
+        if self._display_surface_in_use():
+            self._last_detected_mode = previous
+            return
+        action()
+
     def _poll_windows_mode(self) -> None:
+        # Nothing here is safe during a run. A detected transition rewrites state.hdr
+        # through _capture_current_hdr_base(load_controls=True) and then schedules
+        # _apply_mode_profile(force=True) -- a full profile reinstall with the
+        # installed-content cache deliberately bypassed. The profile is what shapes the
+        # signal at scanout, so reinstalling it between two patches means the readings
+        # either side describe different displays, and nothing downstream can tell:
+        # the numbers are all plausible and the run is quietly worthless.
+        #
+        # Returned before _last_detected_mode is updated, so the change is deferred
+        # rather than swallowed -- the first poll after the run still sees it and acts
+        # on it then, when acting is safe.
+        if self._display_surface_in_use():
+            return
         if self.display_combo.count() == 0:
             return
         key = self.state.selected_display_key
@@ -1845,7 +1929,8 @@ class MainWindow(FluentWidget):
         self._set_status(f"Windows mode changed from {previous} to {detected}.", "warning")
         if detected == "SDR":
             if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
-                QTimer.singleShot(650, self, lambda d=selected: self._restore_remembered_sdr_profile(d, "Automatic Mode Switching"))
+                QTimer.singleShot(650, self, lambda d=selected, p=previous: self._deferred_mode_response(
+                    p, lambda: self._restore_remembered_sdr_profile(d, "Automatic Mode Switching")))
             else:
                 self._set_status("Windows switched to SDR. Automatic Mode Switching is disabled; Windows keeps its current SDR association.", "ok")
             return
@@ -1856,7 +1941,8 @@ class MainWindow(FluentWidget):
         if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
             # Windows can drop the association across the transition, so force a
             # full reinstall rather than trusting the installed-content cache.
-            QTimer.singleShot(650, self, lambda: self._apply_mode_profile("Automatic Mode Switching", force=True))
+            QTimer.singleShot(650, self, lambda p=previous: self._deferred_mode_response(
+                p, lambda: self._apply_mode_profile("Automatic Mode Switching", force=True)))
 
     # ----------------------------------------------------------------------------------
     # Per-display profile bindings
@@ -2770,9 +2856,41 @@ class MainWindow(FluentWidget):
         # started -- so the thread has to be joined from here as well, or it outlives
         # the window it was polling for.
         window.closed.connect(self._stop_placement_watch)
+        # And release the surface itself. _measure_finished is the only other thing that
+        # clears _measure_window, and it never runs on this path -- no worker was ever
+        # created to finish -- so the attribute went on pointing at a closed window for
+        # the rest of the session. _fullscreen_surface_busy then refused every later
+        # measurement and every pattern window with "A measurement is still running",
+        # with nothing running, and only a restart cleared it.
+        window.closed.connect(self._placement_surface_closed)
         self._placement_thread = watcher_thread
         self._placement_watcher = watcher
         watcher_thread.start()
+
+    def _placement_surface_closed(self) -> None:
+        """Give the fullscreen surface back when a run ends before it starts.
+
+        `closed` is emitted from closeEvent on every close, so this runs for a run that
+        was abandoned during placement, for one that finished, and for one cancelled
+        after it started. Only the first has no other owner: _measure_finished handles
+        the other two and clears _measure_window itself. The _measure_thread check is
+        what tells them apart -- the thread is assigned only once the patch sequence
+        starts, so its absence means no run was ever begun, and acting when it is
+        present would put a second owner on state _measure_finished is midway through
+        tearing down.
+
+        The status line matters because this is the one abandonment in the app that
+        used to say nothing. What was on screen last is "Put the meter flat on the green
+        square ... Esc cancels", or, after a timeout, "Press Enter to start anyway, or
+        Esc to stop" -- both left standing after Esc, instructing the user to place a
+        meter on a square that is no longer there.
+        """
+        if getattr(self, "_measure_thread", None) is not None:
+            return
+        if getattr(self, "_measure_window", None) is None:
+            return
+        self._measure_window = None
+        self._set_status("Measurement cancelled. Nothing was changed.", "ok")
 
     def _placement_timed_out(self) -> None:
         """The meter never saw the target. Say so, and leave the way out obvious."""
