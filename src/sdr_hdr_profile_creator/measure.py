@@ -970,8 +970,13 @@ def sustained(
     sleep: Callable[[float], None] = time.sleep,
     should_abort: Callable[[], bool] | None = None,
     on_reading: Callable[[int, float], None] | None = None,
+    probe: Callable[[], DisplayState] | None = None,
+    expected: DisplayState | None = None,
 ) -> Sustained:
     """Hold full-screen white and read until it stops falling.
+
+    ``probe`` as for :func:`run`: a display that changes mode or profile while it is
+    being held at white is not the display whose sustained level was asked for.
 
     Asks for ``peak_nits`` and lets the display's limiter decide, because the answer is
     what the panel does rather than what it was told. Stops when two consecutive
@@ -989,6 +994,8 @@ def sustained(
     )
 
     values: list[float] = []
+    baseline = probe() if probe is not None else None
+    _check_baseline(expected, baseline)
     for index in range(SUSTAINED_MAX_READS):
         if should_abort is not None and should_abort():
             raise Aborted()
@@ -1003,6 +1010,12 @@ def sustained(
         values.append(max(0.0, reading.Y))
         if on_reading is not None:
             on_reading(index, values[-1])
+        if probe is not None:
+            sample = probe()
+            drift = describe_drift(baseline, sample)
+            if drift:
+                raise _refuse_drift(f"after reading {index + 1}", drift)
+            _adopt_unread(baseline, sample)
         if len(values) >= 2:
             latest, previous = values[-1], values[-2]
             if previous > 0.0 and abs(latest - previous) / previous <= SUSTAINED_TOLERANCE:
@@ -1123,6 +1136,71 @@ class Aborted(Exception):
     """The user stopped the run. Not an error, and never partially applied."""
 
 
+#: What a display probe reports. Keys are whatever the caller chooses to watch; a value
+#: of ``None`` means "could not be read this time" and is never treated as a change.
+DisplayState = dict
+
+
+def describe_drift(before: DisplayState | None, after: DisplayState | None) -> str:
+    """Name every field that differs between two samples of the display, or "".
+
+    A ``None`` on either side is an unreadable sample, not a change: a Windows call
+    that fails once in the middle of a four-minute run is far likelier than the
+    display changing at exactly that moment, and refusing the run over it would cost
+    the user the whole run for nothing. A field that reads on both sides and differs
+    is a change.
+    """
+    if not before or not after:
+        return ""
+    changed = []
+    for key in sorted(set(before) | set(after)):
+        was, now = before.get(key), after.get(key)
+        if was is None or now is None or was == now:
+            continue
+        changed.append(f"{key} went from {was} to {now}")
+    return "; ".join(changed)
+
+
+def _refuse_drift(when: str, drift: str) -> MeasurementError:
+    return MeasurementError(
+        f"The display changed during the run, {when}: {drift}. Nothing was kept. "
+        "Whatever moved it -- Windows leaving HDR, the watchdog re-applying a profile, "
+        "the SDR brightness slider -- measure again once it has settled."
+    )
+
+
+def _adopt_unread(baseline: DisplayState | None, sample: DisplayState) -> None:
+    """Fill in baseline fields that could not be read at the start.
+
+    Without this a field that failed once, on the very first sample, stayed disarmed
+    for the whole run: every later comparison saw None on the baseline side and
+    ignored it. The first readable value is the best available statement of where the
+    display started, so it becomes the reference from then on.
+    """
+    if baseline is None:
+        return
+    for key, value in sample.items():
+        if baseline.get(key) is None and value is not None:
+            baseline[key] = value
+
+
+def _check_baseline(expected: DisplayState | None, baseline: DisplayState | None) -> None:
+    """Refuse before the first patch if the display is not in the state the run needs.
+
+    The baseline used to be trusted rather than validated. The only HDR check on the
+    meter path runs on the UI thread, before the surface exists; a display that left
+    HDR between that check and the worker's first sample gave an all-SDR run that was
+    perfectly self-consistent -- every later sample matched the baseline -- and it
+    passed. ``expected`` is what the caller knows the run needs, compared the same way
+    every later sample is.
+    """
+    if expected is None or baseline is None:
+        return
+    drift = describe_drift(expected, baseline)
+    if drift:
+        raise _refuse_drift("before the first patch", drift)
+
+
 class Display(Protocol):
     """Whatever can put a patch on screen and keep it there."""
 
@@ -1139,6 +1217,8 @@ def run(
     should_abort: Callable[[], bool] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     full: bool = True,
+    probe: Callable[[], DisplayState] | None = None,
+    expected: DisplayState | None = None,
 ) -> Calibration:
     """Show each patch, read it, and reduce the set to profile values.
 
@@ -1149,9 +1229,25 @@ def run(
     A failed reading ends the run rather than being skipped. Channels measured
     without their matching white cannot be combined, and a peak carried over from
     a previous attempt is not a measurement of anything.
+
+    ``probe`` is the operating system's view of the display -- its mode, the profile
+    associated with it, the SDR white level -- sampled before the first patch and
+    after every reading. The app keeps its own hands off the display while a run is
+    up, but Windows can leave HDR by itself and the standalone watchdog can re-apply a
+    profile from outside this process, and either one between two patches means the
+    readings on each side describe different displays while every number stays
+    plausible. The check runs after the reading is reported, so the log keeps the
+    number that was taken under the old state, and the refusal names the patch.
+
+    ``expected`` is the state the run needs to start in, checked against the first
+    sample the same way every later sample is checked against it -- a display that
+    left HDR just before the first patch is otherwise self-consistent all the way
+    through, and passes.
     """
     steps = plan(peak_nits, full=full)
     readings: dict[str, Reading] = {}
+    baseline = probe() if probe is not None else None
+    _check_baseline(expected, baseline)
 
     for index, step in enumerate(steps):
         if should_abort is not None and should_abort():
@@ -1175,5 +1271,11 @@ def run(
             # Reported as it arrives rather than at the end, so a run that is
             # later refused still leaves the numbers that caused it.
             on_reading(step, reading)
+        if probe is not None:
+            sample = probe()
+            drift = describe_drift(baseline, sample)
+            if drift:
+                raise _refuse_drift(f"after {step.label}", drift)
+            _adopt_unread(baseline, sample)
 
     return derive(readings, steps)

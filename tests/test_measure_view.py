@@ -223,6 +223,53 @@ class MeasurementWorkerTests(unittest.TestCase):
         worker.finished.connect(lambda result, message: outcomes.append((result, message)))
         return worker, display, outcomes
 
+    def test_a_display_that_changes_mid_run_reaches_the_outcome_as_a_message(self):
+        """The probe is threaded through the worker to measure.run, and its refusal
+        comes back the way every other refusal does: no calibration, one message."""
+        order = iter(GOOD_ORDER)
+        samples = iter([{"profile": "A.icm"}] * 3 + [{"profile": "B.icm"}] * 99)
+        worker = measure_view.MeasurementWorker(
+            FakeDisplay(), lambda: next(order), 1015.24,
+            sleep=lambda _seconds: None, full=False, probe=lambda: next(samples),
+        )
+        outcomes = []
+        worker.finished.connect(lambda result, message: outcomes.append((result, message)))
+        worker.run()
+        self.assertEqual(len(outcomes), 1)
+        result, message = outcomes[0]
+        self.assertIsNone(result)
+        self.assertIn("profile went from A.icm to B.icm", message)
+
+    def test_the_expected_state_reaches_the_run_through_the_worker(self):
+        order = iter(GOOD_ORDER)
+        worker = measure_view.MeasurementWorker(
+            FakeDisplay(), lambda: next(order), 1015.24,
+            sleep=lambda _seconds: None, full=False,
+            probe=lambda: {"mode": "SDR"}, expected={"mode": "HDR"},
+        )
+        outcomes = []
+        worker.finished.connect(lambda result, message: outcomes.append((result, message)))
+        worker.run()
+        self.assertEqual(1, len(outcomes))
+        self.assertIsNone(outcomes[0][0])
+        self.assertIn("before the first patch", outcomes[0][1])
+
+    def test_the_sustained_worker_forwards_the_probe_too(self):
+        """A second worker with its own constructor and its own run(): a probe that
+        only the sweep forwarded would leave the one measurement that lights every
+        pixel unguarded."""
+        samples = iter([{"mode": "HDR"}] * 2 + [{"mode": "SDR"}] * 99)
+        worker = measure_view.SustainedWorker(
+            FakeDisplay(), lambda: GOOD_ORDER[1], 1000.0,
+            sleep=lambda _seconds: None, probe=lambda: next(samples),
+        )
+        outcomes = []
+        worker.finished.connect(lambda result, message: outcomes.append((result, message)))
+        worker.run()
+        self.assertEqual(1, len(outcomes))
+        self.assertIsNone(outcomes[0][0])
+        self.assertIn("mode went from HDR to SDR", outcomes[0][1])
+
     def test_a_good_run_reports_a_calibration_and_no_message(self):
         order = iter(GOOD_ORDER)
         worker, display, outcomes = self.run_worker(lambda: next(order))
@@ -627,7 +674,7 @@ class ThreadLifetimeTests(unittest.TestCase):
     def setUpClass(cls):
         cls.qt_app = QApplication.instance() or QApplication([])
 
-    def run_one(self):
+    def run_one(self, **extra):
         """Drive a complete measurement and report what on_finished saw."""
         from PySide6.QtCore import QEventLoop, QObject, QThread, QTimer, Signal
 
@@ -665,6 +712,7 @@ class ThreadLifetimeTests(unittest.TestCase):
             on_finished=on_finished,
             sleep=lambda _seconds: None,
             full=False,
+            **extra,
         )
         holder["thread"], holder["worker"] = thread, worker
 
@@ -696,6 +744,61 @@ class ThreadLifetimeTests(unittest.TestCase):
         seen = self.run_one()
         self.assertEqual("", seen.get("message"))
         self.assertIsInstance(seen.get("result"), Calibration)
+
+    def test_an_expected_state_handed_to_start_is_checked(self):
+        seen = self.run_one(probe=lambda: {"mode": "SDR"}, expected={"mode": "HDR"})
+        self.assertIsNone(seen.get("result"))
+        self.assertIn("before the first patch", seen.get("message", ""))
+
+    def test_a_probe_handed_to_start_sustained_can_stop_the_run(self):
+        """start_sustained is a separate function with its own worker construction;
+        a probe it dropped would leave every real sustained run unguarded."""
+        from PySide6.QtCore import QEventLoop, QObject, QTimer, Signal
+
+        class Window(QObject):
+            closed = Signal()
+
+            def __init__(self):
+                super().__init__()
+                # require_shown() aborts the run unless the last patch reached the
+                # display; without this the run ends with no result and no message
+                # before the probe is ever consulted, and the test proves nothing.
+                self.shown = True
+
+            def show_patch(self, step):
+                self.shown = True
+
+        loop = QEventLoop()
+        seen = {}
+
+        def on_finished(result, message):
+            seen["result"], seen["message"] = result, message
+            loop.quit()
+
+        # Baseline and the sample after reading 1 agree; the sample after reading 2
+        # is the change, so the refusal names reading 2.
+        samples = iter([{"mode": "HDR"}] * 2 + [{"mode": "SDR"}] * 99)
+        thread, worker = measure_view.start_sustained(
+            Window(), lambda: GOOD_ORDER[1], 1000.0,
+            on_reading=lambda *_: None, on_finished=on_finished,
+            sleep=lambda _seconds: None, probe=lambda: next(samples),
+        )
+        QTimer.singleShot(30000, loop.quit)
+        loop.exec()
+        thread.quit()
+        thread.wait(5000)
+        self.assertIsNone(seen.get("result"))
+        self.assertIn("after reading 2", seen.get("message", ""))
+        self.assertIn("mode went from HDR to SDR", seen.get("message", ""))
+
+    def test_a_probe_handed_to_start_can_stop_the_run(self):
+        """start() is the only way the app reaches the worker, so a probe that start()
+        dropped on the floor would leave every real run unguarded while the unit
+        tests of the worker stayed green."""
+        samples = iter([{"mode": "HDR"}] * 2 + [{"mode": "SDR"}] * 99)
+        seen = self.run_one(probe=lambda: next(samples))
+        self.assertIsNone(seen.get("result"))
+        self.assertIn("mode went from HDR to SDR", seen.get("message", ""))
 
 
 @unittest.skipUnless(GUI_AVAILABLE, GUI_IMPORT_ERROR)

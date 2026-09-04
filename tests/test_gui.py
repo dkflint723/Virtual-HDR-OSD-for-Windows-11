@@ -4220,7 +4220,8 @@ class PeakPatchTargetTests(WindowTestCase):
     def requested_peak(self, stored, panel):
         captured = {}
 
-        def fake_start(window, read, peak, on_progress, on_finished, on_reading=None):
+        def fake_start(window, read, peak, on_progress, on_finished, on_reading=None,
+                       **kwargs):
             captured["peak"] = peak
             raise RuntimeError("stop before the run begins")
 
@@ -5123,6 +5124,212 @@ class DisplaySurfaceGuardTests(WindowTestCase):
         self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
         self.window._gamma_hotkey_disable()
         self.assertEqual("Off", self.window.state.hdr.sdr_gamma_correction)
+
+
+class DisplayProbeTests(WindowTestCase):
+    """The run's view of the display comes from Windows, not from this app's state.
+
+    _shaping_fingerprint is a function of self.state and cannot see the display move.
+    The two things that move it from outside -- Windows leaving HDR, and the standalone
+    watchdog re-applying a profile from another process -- are exactly what nothing
+    else in the app can prevent, so the probe has to ask the OS.
+    """
+
+    def test_the_probe_reports_what_windows_says_not_what_the_app_believes(self):
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        probe = self.window._display_state_probe(self.display)
+        self.assertEqual(
+            {"mode": "HDR", "profile": "BaseCalibration.icm", "sdr_white": 240.0},
+            probe(),
+        )
+        # The fixture's fake of Windows changes; nothing in self.state does.
+        self.default_profiles["HDR"] = "SomethingTheWatchdogPutBack.icm"
+        self.assertEqual("SomethingTheWatchdogPutBack.icm", probe()["profile"])
+
+    def test_a_display_that_left_hdr_reads_as_sdr(self):
+        probe = self.window._display_state_probe(self.display)
+        dropped = dataclasses.replace(
+            self.display, advanced_color_enabled=False, advanced_color_kind="SDR"
+        )
+        with mock.patch.object(app_module, "enumerate_displays", lambda: [dropped]):
+            self.assertEqual("SDR", probe()["mode"])
+
+    def test_the_sdr_white_level_is_watched_only_when_the_run_will_read_it(self):
+        """The measurement surface is scRGB, 1.0 = 80 nits absolute on an HDR
+        display, so the slider cannot change what the meter sees. The one consumer is
+        _effective_sdr_white_nits, which consults Windows only under Auto and only
+        after the run. Refusing an Off-mode run because the slider moved would blame
+        the user for a thing that changed nothing."""
+        self.window.state.hdr.sdr_gamma_correction = "Off"
+        self.assertNotIn("sdr_white", self.window._display_state_probe(self.display)())
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        self.assertEqual(240.0, self.window._display_state_probe(self.display)()["sdr_white"])
+
+    def test_a_failed_advanced_colour_query_reads_as_unknown_not_as_sdr(self):
+        """enumerate_displays does not raise when the per-path query fails; it falls
+        back to supported=False, kind="SDR", bits=0 and returns the display anyway. On
+        a panel the run already proved HDR-capable, that is the signature of a failed
+        query -- and reporting it as SDR refused good runs with a message telling the
+        user Windows had left HDR when it had not."""
+        failed_query = dataclasses.replace(
+            self.display, advanced_color_supported=False, advanced_color_enabled=False,
+            bits_per_color_channel=0, advanced_color_kind="SDR",
+        )
+        probe = self.window._display_state_probe(self.display)
+        with mock.patch.object(app_module, "enumerate_displays", lambda: [failed_query]):
+            self.assertIsNone(probe()["mode"])
+
+    def test_each_field_fails_on_its_own(self):
+        """The docstring's claim, pinned: one unreadable field must not take the
+        others with it, or a single flaky call blinds the whole probe."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        probe = self.window._display_state_probe(self.display)
+
+        def boom(*_a, **_k):
+            raise app_module.WindowsColorError("no")
+
+        with mock.patch.object(app_module, "get_default_profile", boom):
+            sample = probe()
+        self.assertEqual({"mode": "HDR", "profile": None, "sdr_white": 240.0}, sample)
+        with mock.patch.object(app_module, "get_sdr_white_level_nits", boom):
+            sample = probe()
+        self.assertEqual({"mode": "HDR", "profile": "BaseCalibration.icm", "sdr_white": None}, sample)
+
+    def test_a_removed_association_is_a_change_not_an_unreadable_field(self):
+        """The watchdog dropping the HDR profile mid-run is a real change to the
+        display. get_default_profile raises for it -- the same base type as a failed
+        call -- and treating both as "unread" would swallow exactly the event the probe
+        exists to catch."""
+        from sdr_hdr_profile_creator.measure import describe_drift
+
+        probe = self.window._display_state_probe(self.display)
+
+        def gone(*_a, **_k):
+            raise app_module.NoDefaultProfile("Windows returned an empty default profile name")
+
+        with mock.patch.object(app_module, "get_default_profile", gone):
+            sample = probe()
+        self.assertEqual("(none)", sample["profile"])
+        self.assertEqual(
+            "profile went from BaseCalibration.icm to (none)",
+            describe_drift({"profile": "BaseCalibration.icm"}, sample),
+        )
+        # And every existing `except WindowsColorError` still catches it.
+        self.assertTrue(issubclass(app_module.NoDefaultProfile, app_module.WindowsColorError))
+
+    def test_a_failing_windows_call_reads_as_unknown_not_as_an_error(self):
+        """A diagnostic that could end a four-minute run over one failed call would be
+        worse than the gap it fills, so every field degrades to None on its own."""
+        self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
+        probe = self.window._display_state_probe(self.display)
+
+        def boom(*_a, **_k):
+            raise app_module.WindowsColorError("no")
+
+        with mock.patch.object(app_module, "get_default_profile", boom), \
+             mock.patch.object(app_module, "get_sdr_white_level_nits", boom), \
+             mock.patch.object(app_module, "enumerate_displays", boom):
+            sample = probe()
+        self.assertEqual({"mode": None, "profile": None, "sdr_white": None}, sample)
+
+    def test_the_run_is_started_with_the_probe(self):
+        """A probe that exists but is never handed to start() guards nothing."""
+        from PySide6.QtCore import QObject, Signal
+
+        class Surface(QObject):
+            closed = Signal()
+
+        captured = {}
+
+        def fake_start(*args, **kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock(), mock.MagicMock()
+
+        with mock.patch.object(app_module.measure_view, "start", fake_start), \
+             mock.patch.object(app_module.MainWindow, "_monitor_state", lambda _s: {}):
+            self.window._start_measurement(
+                Surface(), self.display, Path("spotread"), app_module_instrument(), 450.0
+            )
+        self.addCleanup(setattr, self.window, "_measure_thread", None)
+        self.addCleanup(setattr, self.window, "_measure_worker", None)
+        probe = captured.get("probe")
+        self.assertIsNotNone(probe, "start() was called without a display probe")
+        # Not a tautology: the value comes from the fixture's fake of Windows.
+        self.assertEqual("BaseCalibration.icm", probe()["profile"])
+        self.assertEqual(
+            {"mode": "HDR"}, captured.get("expected"),
+            "the run was started without the state it needs the display to be in",
+        )
+        # The baseline is written to the log with the start record, so a refusal can
+        # be read against what it changed from and an unread field is visible as such.
+        last = json.loads(
+            app_module.METER_LOG_PATH.read_text(encoding="utf-8").strip().splitlines()[-1]
+        )
+        self.assertEqual("start", last["event"])
+        self.assertEqual("BaseCalibration.icm", last["display_state"]["profile"])
+
+    def test_the_sustained_run_is_started_with_the_probe_and_the_expected_state(self):
+        """start_sustained is reached by a different method with its own window and
+        its own start record; a probe only the sweep passed would leave the one
+        measurement that lights every pixel unguarded."""
+        from types import SimpleNamespace
+        from PySide6.QtCore import QObject, Signal
+
+        class Surface(QObject):
+            ready = Signal()
+            closed = Signal()
+            failure = ""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__()
+
+            def setGeometry(self, *args):
+                pass
+
+            def showFullScreen(self):
+                pass
+
+            def begin(self):
+                return True
+
+            def close(self):
+                pass
+
+            def activateWindow(self):
+                pass
+
+            def setFocus(self, *args):
+                pass
+
+        ready = SimpleNamespace(
+            display=self.display, spotread=Path("spotread"),
+            instrument=app_module_instrument(), sdr_white=240.0, panel=None,
+            capability=mock.MagicMock(), peak=450.0,
+        )
+        captured = {}
+
+        def fake_start_sustained(*args, **kwargs):
+            captured.update(kwargs)
+            return mock.MagicMock(), mock.MagicMock()
+
+        with mock.patch.object(app_module.MainWindow, "_meter_preconditions", lambda _s, _r: ready), \
+             mock.patch.object(app_module.MainWindow, "_screen_for", lambda _s, _d: None), \
+             mock.patch.object(app_module.QMessageBox, "question",
+                               return_value=QMessageBox.StandardButton.Ok), \
+             mock.patch.object(app_module.measure_view, "MeasureWindow", Surface), \
+             mock.patch.object(app_module.measure_view, "start_sustained", fake_start_sustained):
+            self.window._measure_sustained()
+        for attribute in ("_measure_window", "_measure_thread", "_measure_worker"):
+            self.addCleanup(setattr, self.window, attribute, None)
+        probe = captured.get("probe")
+        self.assertIsNotNone(probe, "start_sustained() was called without a display probe")
+        self.assertEqual("BaseCalibration.icm", probe()["profile"])
+        self.assertEqual({"mode": "HDR"}, captured.get("expected"))
+        last = json.loads(
+            app_module.METER_LOG_PATH.read_text(encoding="utf-8").strip().splitlines()[-1]
+        )
+        self.assertEqual("sustained-start", last["event"])
+        self.assertEqual("BaseCalibration.icm", last["display_state"]["profile"])
 
 
 if __name__ == "__main__":

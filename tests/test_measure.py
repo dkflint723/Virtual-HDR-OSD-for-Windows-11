@@ -1055,5 +1055,187 @@ class FullSweepPlanTests(unittest.TestCase):
         self.assertLess(estimated_seconds(full), 600.0)
 
 
+class DisplayDriftTests(unittest.TestCase):
+    """A run whose display changed underneath it is not a measurement of anything.
+
+    The app keeps its own hands off the display while a run is up, but two things move
+    it from outside: Windows leaving HDR by itself, and the standalone watchdog -- a
+    separate process -- re-applying a profile. Either one between two patches means the
+    readings on each side describe different displays while every number stays
+    plausible, so the run carries the OS's view of the display and stops when it moves.
+    """
+
+    ORDER = RunTests.ORDER
+
+    def setUp(self):
+        self.display = FakeDisplay()
+        self.delivered = []
+
+    def good_reader(self):
+        order = iter([NEUTRAL[key] for key in self.ORDER])
+        return lambda: next(order)
+
+    def flipping_probe(self, after_calls, before, after):
+        """Reports `before` for the first `after_calls` samples, then `after`."""
+        calls = {"n": 0}
+
+        def probe():
+            calls["n"] += 1
+            return dict(before if calls["n"] <= after_calls else after)
+
+        probe.calls = calls
+        return probe
+
+    def sequence_probe(self, *samples):
+        """Reports the samples in order, then repeats the last one."""
+        pending = list(samples)
+
+        def probe():
+            if len(pending) > 1:
+                return dict(pending.pop(0))
+            return dict(pending[0])
+
+        return probe
+
+    def run_with(self, probe, **extra):
+        return run(
+            self.display, self.good_reader(), peak_nits=1015.24,
+            sleep=lambda _s: None, full=False, probe=probe,
+            on_reading=lambda step, value: self.delivered.append(step.key),
+            **extra,
+        )
+
+    def test_a_display_not_in_the_expected_state_is_refused_before_the_first_patch(self):
+        """The baseline used to be trusted rather than validated. The only HDR check
+        on the meter path runs on the UI thread before the surface exists; a display
+        that left HDR between that check and the worker's first sample gave an
+        all-SDR run that was self-consistent from end to end, and it passed."""
+        with self.assertRaises(MeasurementError) as caught:
+            self.run_with(self.sequence_probe({"mode": "SDR", "profile": "A.icm"}),
+                          expected={"mode": "HDR"})
+        self.assertIn("before the first patch", str(caught.exception))
+        self.assertIn("mode went from HDR to SDR", str(caught.exception))
+        self.assertEqual([], self.display.shown, "a patch was shown to an SDR display")
+        self.assertEqual([], self.delivered)
+
+    def test_an_expected_state_that_matches_lets_the_run_proceed(self):
+        self.run_with(self.sequence_probe({"mode": "HDR", "profile": "A.icm"}),
+                      expected={"mode": "HDR"})
+        self.assertEqual(list(self.ORDER), self.delivered)
+
+    def test_the_reference_is_the_baseline_not_the_previous_sample(self):
+        """A change that lands while one sample is unreadable must still be caught.
+        Comparing each sample to the previous one would see None -> B.icm, treat the
+        None side as unread, and let the swap through."""
+        probe = self.sequence_probe(
+            {"profile": "A.icm"}, {"profile": None}, {"profile": "B.icm"},
+        )
+        with self.assertRaises(MeasurementError) as caught:
+            self.run_with(probe)
+        self.assertIn("profile went from A.icm to B.icm", str(caught.exception))
+
+    def test_a_field_unreadable_at_the_start_is_armed_by_its_first_reading(self):
+        """Otherwise one failed call on the very first sample disarmed that field for
+        the whole run: every later comparison saw None on the baseline side."""
+        probe = self.sequence_probe(
+            {"profile": None}, {"profile": "A.icm"}, {"profile": "A.icm"},
+            {"profile": "B.icm"},
+        )
+        with self.assertRaises(MeasurementError) as caught:
+            self.run_with(probe)
+        self.assertIn("profile went from A.icm to B.icm", str(caught.exception))
+
+    def test_sustained_is_refused_before_the_first_reading_when_not_in_hdr(self):
+        from sdr_hdr_profile_creator.measure import sustained
+
+        stable = reading(400.0, 0.3130, 0.3290)
+        with self.assertRaises(MeasurementError) as caught:
+            sustained(self.display, lambda: stable, peak_nits=1000.0,
+                      sleep=lambda _s: None, probe=lambda: {"mode": "SDR"},
+                      expected={"mode": "HDR"})
+        self.assertIn("before the first patch", str(caught.exception))
+        self.assertEqual([], self.display.shown)
+
+    def test_a_display_that_did_not_change_is_sampled_and_the_run_completes(self):
+        probe = self.flipping_probe(99, {"mode": "HDR", "profile": "A.icm"}, {})
+        self.run_with(probe)
+        # Once before the first patch, then once after each of the seven readings.
+        self.assertEqual(len(self.ORDER) + 1, probe.calls["n"])
+        self.assertEqual(list(self.ORDER), self.delivered)
+
+    def test_a_profile_swapped_mid_run_stops_it_and_names_what_moved(self):
+        """The baseline plus two clean readings, then the watchdog re-associates."""
+        probe = self.flipping_probe(
+            3, {"mode": "HDR", "profile": "A.icm"}, {"mode": "HDR", "profile": "B.icm"}
+        )
+        with self.assertRaises(MeasurementError) as caught:
+            self.run_with(probe)
+        message = str(caught.exception)
+        self.assertIn("profile went from A.icm to B.icm", message)
+        self.assertIn("display changed during the run", message)
+        # Stopped at the third patch: nothing after it was shown or read.
+        self.assertEqual(list(self.ORDER[:3]), self.display.shown)
+        # The reading taken under the old state is still delivered, so the log keeps
+        # the number and the refusal can be read against it afterwards.
+        self.assertEqual(list(self.ORDER[:3]), self.delivered)
+
+    def test_a_mode_drop_is_said_in_words(self):
+        from sdr_hdr_profile_creator.measure import describe_drift
+
+        self.assertEqual(
+            "mode went from HDR to SDR",
+            describe_drift({"mode": "HDR", "profile": "A.icm"},
+                           {"mode": "SDR", "profile": "A.icm"}),
+        )
+        self.assertEqual(
+            "mode went from HDR to SDR; sdr_white went from 240.0 to 80.0",
+            describe_drift({"mode": "HDR", "sdr_white": 240.0},
+                           {"mode": "SDR", "sdr_white": 80.0}),
+        )
+        self.assertEqual("", describe_drift({"mode": "HDR"}, {"mode": "HDR"}))
+
+    def test_an_unreadable_sample_is_not_a_change(self):
+        """One failed Windows call in the middle of a four-minute run is far likelier
+        than the display changing at exactly that moment, and refusing the run over
+        it would cost the user the whole run for nothing."""
+        from sdr_hdr_profile_creator.measure import describe_drift
+
+        self.assertEqual("", describe_drift({"profile": "A.icm"}, {"profile": None}))
+        self.assertEqual("", describe_drift({"profile": None}, {"profile": "A.icm"}))
+        self.assertEqual("", describe_drift(None, {"profile": "A.icm"}))
+        probe = self.flipping_probe(2, {"profile": "A.icm"}, {"profile": None})
+        self.run_with(probe)   # must not raise
+        self.assertEqual(list(self.ORDER), self.delivered)
+
+    def test_a_run_without_a_probe_is_unchanged(self):
+        self.run_with(None)
+        self.assertEqual(list(self.ORDER), self.delivered)
+
+    def test_sustained_is_refused_when_the_display_changes_while_held(self):
+        from sdr_hdr_profile_creator.measure import sustained
+
+        stable = reading(400.0, 0.3130, 0.3290)
+        probe = self.flipping_probe(1, {"mode": "HDR"}, {"mode": "SDR"})
+        seen = []
+        with self.assertRaises(MeasurementError) as caught:
+            sustained(self.display, lambda: stable, peak_nits=1000.0,
+                      sleep=lambda _s: None, probe=probe,
+                      on_reading=lambda index, nits: seen.append(index))
+        self.assertIn("after reading 1", str(caught.exception))
+        self.assertIn("mode went from HDR to SDR", str(caught.exception))
+        # The reading taken under the old state was delivered before the refusal, so
+        # the log keeps it -- the same invariant run() documents.
+        self.assertEqual([0], seen)
+
+    def test_sustained_completes_when_the_display_holds_still(self):
+        from sdr_hdr_profile_creator.measure import sustained
+
+        stable = reading(400.0, 0.3130, 0.3290)
+        result = sustained(self.display, lambda: stable, peak_nits=1000.0,
+                           sleep=lambda _s: None,
+                           probe=lambda: {"mode": "HDR", "profile": "A.icm"})
+        self.assertTrue(result.settled)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -67,6 +67,18 @@ class WindowsColorError(RuntimeError):
     pass
 
 
+class NoDefaultProfile(WindowsColorError):
+    """The display has no profile associated for that mode.
+
+    Its own type because one caller needs to tell it from a failed call. The measurement
+    run's display probe treats an unreadable field as "not read" and ignores it, so if
+    a REMOVED association raised the same type as a flaky Win32 call, the watchdog
+    dropping the HDR profile mid-run -- a real change to the display -- would be
+    swallowed as noise. Still a WindowsColorError, so nothing that catches that stops
+    working.
+    """
+
+
 if IS_WINDOWS:
     ULONG = wintypes.ULONG
     UINT32 = wintypes.UINT
@@ -635,7 +647,7 @@ def get_default_profile(display: DisplayInfo, mode: str) -> str:
     if result < 0:
         raise _hresult_error("ColorProfileGetDisplayDefault failed", result)
     if not allocated.value:
-        raise WindowsColorError("Windows returned an empty default profile name")
+        raise NoDefaultProfile("Windows returned an empty default profile name")
     try:
         return ctypes.wstring_at(allocated.value)
     finally:

@@ -290,6 +290,8 @@ class MeasurementWorker(QObject):
         peak_nits: float,
         sleep: Callable[[float], None] = time.sleep,
         full: bool = True,
+        probe: Callable[[], measure.DisplayState] | None = None,
+        expected: measure.DisplayState | None = None,
     ) -> None:
         super().__init__()
         # A display rather than a window: the worker has no business knowing about
@@ -299,6 +301,11 @@ class MeasurementWorker(QObject):
         self._display = display
         self._read = read
         self._peak_nits = peak_nits
+        # Runs on this worker's thread, between patches. The Windows calls behind it
+        # are plain Win32 and carry no thread affinity; what must not happen is the
+        # probe touching a widget, and the app builds it so it never does.
+        self._probe = probe
+        self._expected = expected
         # Injected so tests are not charged the panel's settling time; the real
         # delays exist for the display, not for the code.
         self._sleep = sleep
@@ -325,6 +332,8 @@ class MeasurementWorker(QObject):
                 should_abort=lambda: self._abort,
                 sleep=self._sleep,
                 full=self._full,
+                probe=self._probe,
+                expected=self._expected,
             )
         except measure.Aborted:
             self.finished.emit(None, "")
@@ -355,12 +364,16 @@ class SustainedWorker(QObject):
         read: Callable[[], Reading],
         peak_nits: float,
         sleep: Callable[[float], None] = time.sleep,
+        probe: Callable[[], measure.DisplayState] | None = None,
+        expected: measure.DisplayState | None = None,
     ) -> None:
         super().__init__()
         self._display = display
         self._read = read
         self._peak_nits = peak_nits
         self._sleep = sleep
+        self._probe = probe
+        self._expected = expected
         self._abort = False
 
     def cancel(self) -> None:
@@ -376,6 +389,8 @@ class SustainedWorker(QObject):
                 sleep=self._sleep,
                 should_abort=lambda: self._abort,
                 on_reading=lambda index, nits: self.reading.emit(index, nits),
+                probe=self._probe,
+                expected=self._expected,
             )
         except measure.Aborted:
             self.finished.emit(None, "")
@@ -394,6 +409,8 @@ def start_sustained(
     on_reading: Callable[[int, float], None],
     on_finished: Callable[[object, str], None],
     sleep: Callable[[float], None] = time.sleep,
+    probe: Callable[[], measure.DisplayState] | None = None,
+    expected: measure.DisplayState | None = None,
 ) -> tuple[QThread, SustainedWorker]:
     """Begin a sustained measurement, returning the thread and worker to keep alive.
 
@@ -402,7 +419,9 @@ def start_sustained(
     before the outcome is handed back or finalising it aborts the process.
     """
     thread = QThread()
-    worker = SustainedWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep)
+    worker = SustainedWorker(
+        _WindowDisplay(window), read, peak_nits, sleep=sleep, probe=probe, expected=expected
+    )
     worker.moveToThread(thread)
     window.closed.connect(worker.cancel, Qt.ConnectionType.DirectConnection)
     thread.started.connect(worker.run)
@@ -427,6 +446,8 @@ def start(
     on_reading: Callable[[str, Reading], None] | None = None,
     sleep: Callable[[float], None] = time.sleep,
     full: bool = True,
+    probe: Callable[[], measure.DisplayState] | None = None,
+    expected: measure.DisplayState | None = None,
 ) -> tuple[QThread, MeasurementWorker]:
     """Begin a run, returning the thread and worker so the caller can cancel.
 
@@ -438,7 +459,10 @@ def start(
     # MeasurementWorker takes an injectable sleep so tests are not charged the panel's
     # settling time; start() used not to forward one, which put every end-to-end test
     # of this function back on the real delays and is why there were none.
-    worker = MeasurementWorker(_WindowDisplay(window), read, peak_nits, sleep=sleep, full=full)
+    worker = MeasurementWorker(
+        _WindowDisplay(window), read, peak_nits, sleep=sleep, full=full, probe=probe,
+        expected=expected,
+    )
     worker.moveToThread(thread)
     # "Esc cancels" is what the status line and the README both promise. Nothing
     # called cancel() before this, so the whole abort path -- measure.Aborted,

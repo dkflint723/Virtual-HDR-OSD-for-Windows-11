@@ -83,6 +83,7 @@ from .windows_api import (
     reapply_existing_default_profile,
     remove_profile,
     watchdog_is_running,
+    NoDefaultProfile,
     WindowsColorError,
 )
 
@@ -2639,11 +2640,13 @@ class MainWindow(FluentWidget):
         # No placement target. Every pixel is lit, so there is nowhere on the screen the
         # instrument could be that would read the wrong thing -- the one measurement here
         # where aim genuinely does not matter.
+        probe = self._display_state_probe(ready.display)
         self._log_meter({
             "event": "sustained-start",
             "display": ready.display.friendly_name,
             "instrument": ready.instrument.label,
             "requested_nits": ready.peak,
+            "display_state": probe(),
         })
         self._set_status(
             "Measuring sustained luminance. The screen stays white until the reading "
@@ -2656,6 +2659,8 @@ class MainWindow(FluentWidget):
             ready.peak,
             self._sustained_reading,
             self._sustained_finished,
+            probe=probe,
+            expected=self.EXPECTED_DISPLAY_STATE,
         )
         self._measure_thread = thread
         self._measure_worker = worker
@@ -2917,11 +2922,86 @@ class MainWindow(FluentWidget):
         self._placement_watcher = None
         self._placement_thread = None
 
+    def _display_state_probe(self, display: DisplayInfo):
+        """The operating system's view of one display, as a callable for the run.
+
+        Three things, each the OS's word rather than this app's: whether the display is
+        still in HDR, which profile Windows has associated with it, and the SDR white
+        level. The app's own _shaping_fingerprint is a function of self.state and so
+        cannot see any of them move -- and the two that move by themselves, Windows
+        leaving HDR and the standalone watchdog re-applying a profile from outside this
+        process, are exactly the ones nothing else here can prevent.
+
+        Never raises, and reports an unreadable field as None. It runs on the worker
+        thread between patches, and a diagnostic that could end a four-minute run over
+        one failed Windows call would be worse than the gap it fills; the run's drift
+        check treats None as "not read", never as "changed".
+
+        Everything that decides WHAT to watch is read here, on the UI thread, once. The
+        probe itself touches nothing of this app's state.
+        """
+        # The SDR white level, only when something in this run will read it. The
+        # measurement surface is scRGB, where 1.0 is 80 nits absolute on an HDR display,
+        # so the slider cannot change what the meter sees. The one consumer is
+        # _effective_sdr_white_nits, which consults Windows only under Auto and only
+        # after the run. In every other mode a slider move mid-run changes nothing
+        # measured and nothing derived, and refusing over it would blame the user for
+        # a thing that did not matter.
+        watch_sdr_white = self.state.hdr.sdr_gamma_correction == "Auto (Recommended)"
+
+        def probe() -> measure.DisplayState:
+            sample: measure.DisplayState = {}
+            try:
+                fresh = next(
+                    (d for d in enumerate_displays() if d.key == display.key), None
+                )
+                # enumerate_displays does not raise when the advanced-colour query for
+                # a path fails: it falls back to supported=False, kind="SDR", bits=0 and
+                # returns the display anyway. On a panel _meter_preconditions has
+                # already proved HDR-capable, "unsupported" is therefore the signature
+                # of a failed query, not of a display that left HDR -- and reporting it
+                # as SDR would refuse a good run with a message blaming Windows.
+                if (
+                    fresh is None
+                    or not fresh.advanced_color_supported
+                    or fresh.bits_per_color_channel == 0
+                ):
+                    sample["mode"] = None
+                else:
+                    sample["mode"] = fresh.current_mode
+            except Exception:  # noqa: BLE001
+                sample["mode"] = None
+            try:
+                sample["profile"] = get_default_profile(display, "HDR") or None
+            except NoDefaultProfile:
+                # A value, not None: no association is a state of the display, and
+                # going from a profile to none of one is exactly the change the
+                # watchdog makes when it drops the HDR profile. None is reserved for
+                # "could not read", which the drift check ignores.
+                sample["profile"] = "(none)"
+            except Exception:  # noqa: BLE001
+                sample["profile"] = None
+            if watch_sdr_white:
+                try:
+                    sample["sdr_white"] = round(float(get_sdr_white_level_nits(display)), 1)
+                except Exception:  # noqa: BLE001
+                    sample["sdr_white"] = None
+            return sample
+
+        return probe
+
+    #: What every measurement needs the display to be in when it starts. Compared
+    #: against the probe's first sample the same way every later sample is compared
+    #: against that one, so a display that left HDR just before the first patch is
+    #: refused instead of measured as a self-consistent SDR run.
+    EXPECTED_DISPLAY_STATE: dict = {"mode": "HDR"}
+
     def _start_measurement(self, window, display, spotread, instrument, peak) -> None:
         """Begin the sequence, once the meter is on the target."""
         if getattr(self, "_measure_thread", None) is not None:
             return   # Detected and Enter pressed; one run is enough.
         self._stop_placement_watch()
+        probe = self._display_state_probe(display)
         # Kept because the plan was built with it, and the peak the run then *measures*
         # is a different number. Scoring the ramp afterwards needs the requests, and
         # those can only be rebuilt from the peak they were made with.
@@ -2953,6 +3033,11 @@ class MainWindow(FluentWidget):
             # picture mode, colour preset, or the panel simply being cold, is a monitor
             # state nothing recorded. Reading it costs about a second.
             "monitor": self._monitor_state(),
+            # The OS's view of the display as the run begins, so a refusal that names
+            # a change can be read against what it changed from -- and so a field that
+            # could not be read at the start is visible as such rather than silently
+            # never compared.
+            "display_state": probe(),
         })
         self._set_status(
             f"Measuring {display.friendly_name} with {instrument.label}. Keep the meter "
@@ -2967,6 +3052,8 @@ class MainWindow(FluentWidget):
             self._measure_progress,
             self._measure_finished,
             on_reading=self._measure_reading,
+            probe=probe,
+            expected=self.EXPECTED_DISPLAY_STATE,
         )
         # Held on self so neither is collected mid-run: a QThread that goes out of
         # scope takes its worker with it and reports nothing useful about why.
