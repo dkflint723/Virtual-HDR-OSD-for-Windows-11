@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import hashlib
 import json
 import os
@@ -102,6 +103,57 @@ GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
 WATCHDOG_INSTALL_ROOT = Path(
     os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")
 ) / "ColorProfileModeWatchdog"
+#: The installer carries the watchdog script as a payload after this marker and writes
+#: it to WATCHDOG_INSTALL_ROOT. Nothing in the deployed copy records which build it is,
+#: which is how an August portable build kept in another folder installed its own
+#: watchdog over a September one on 2026-09-03 -- silently, and with every check this
+#: app performs still reporting success. Comparing what is on disk against what we ship
+#: is the only way to see that, so both sides are reduced to one short id.
+WATCHDOG_INSTALLER_NAME = "2- OPTIONAL - Install-Watchdog.bat"
+WATCHDOG_PAYLOAD_MARKER = ":__WATCHDOG_POWERSHELL_PAYLOAD__"
+
+
+def watchdog_payload(installer_text: str) -> str:
+    """The script the installer would deploy, or "" when the marker is missing.
+
+    Searched from the end for the same reason the .bat uses ``LastIndexOf``: the marker
+    also appears in the extraction command near the top of the file, and matching that
+    one would return the whole installer instead of the payload.
+    """
+    index = installer_text.rfind(WATCHDOG_PAYLOAD_MARKER)
+    if index < 0:
+        return ""
+    return installer_text[index + len(WATCHDOG_PAYLOAD_MARKER):]
+
+
+def watchdog_build_id(script_text: str) -> str:
+    """A short identity for a watchdog script, stable across how it reached us.
+
+    Normalised rather than hashed raw, because the two sides arrive differently: the
+    deployed copy is written by PowerShell's ``Set-Content -Encoding UTF8``, which adds
+    a byte-order mark and keeps CRLF, while the shipped side is sliced out of the .bat.
+    Reading both with ``utf-8-sig`` already folds the mark and the line endings, so this
+    is belt and braces -- but it is the half worth stating, since a normalisation that
+    disagreed would report every build as wrong and be worse than no check at all.
+    """
+    body = script_text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not body:
+        return ""
+    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+
+
+@functools.lru_cache(maxsize=1)
+def shipped_watchdog_build() -> str:
+    """The build this app would install. Cached: it cannot change while the app runs."""
+    try:
+        installer = (RESOURCE_ROOT / WATCHDOG_INSTALLER_NAME).read_text(
+            encoding="utf-8-sig", errors="replace"
+        )
+    except OSError:
+        return ""
+    return watchdog_build_id(watchdog_payload(installer))
+
+
 GAMMA_RUNTIME_SCHEMA = "virtual-hdr-osd-gamma-hotkeys-v2"
 
 #: Below this, a measured black is the meter rather than the display. The run's own
@@ -1370,7 +1422,7 @@ class MainWindow(FluentWidget):
             return
         self._lock_pending = "install" if checked else "uninstall"
         self._run_watchdog_script(
-            "2- OPTIONAL - Install-Watchdog.bat" if checked else "Uninstall-Watchdog.bat"
+            WATCHDOG_INSTALLER_NAME if checked else "Uninstall-Watchdog.bat"
         )
 
     def _refresh_elevation_button(self) -> None:
@@ -1438,11 +1490,21 @@ class MainWindow(FluentWidget):
         hint = CaptionLabel("Install captures the current SDR/HDR associations. Re-run Install after intentionally changing either default profile.", dialog)
         hint.setWordWrap(True)
         layout.addWidget(hint)
+        mismatch = self._watchdog_build_mismatch()
+        if mismatch:
+            # An August portable build kept in a second checkout installed its own
+            # watchdog over this one on 2026-09-03 and every check still reported
+            # success, because the deployed script records no identity of its own. An
+            # hour went into looking for the bug in the registration code, which was
+            # correct throughout. This line is the whole of what was missing.
+            drift = CaptionLabel(f"Note: {mismatch}.", dialog)
+            drift.setWordWrap(True)
+            layout.addWidget(drift)
         buttons = QHBoxLayout()
         install = PrimaryPushButton("Install Watchdog", dialog)
         uninstall = PushButton("Uninstall Watchdog", dialog)
         close = PushButton("Close", dialog)
-        install.clicked.connect(lambda: self._run_watchdog_script("2- OPTIONAL - Install-Watchdog.bat"))
+        install.clicked.connect(lambda: self._run_watchdog_script(WATCHDOG_INSTALLER_NAME))
         uninstall.clicked.connect(lambda: self._run_watchdog_script("Uninstall-Watchdog.bat"))
         close.clicked.connect(dialog.accept)
         buttons.addWidget(install)
@@ -1548,6 +1610,38 @@ class MainWindow(FluentWidget):
             return None
         return payload if isinstance(payload, dict) else None
 
+    @staticmethod
+    def _installed_watchdog_build() -> str:
+        """The build actually on disk, or "" when there is nothing to read."""
+        try:
+            script = (WATCHDOG_INSTALL_ROOT / "Watchdog.ps1").read_text(
+                encoding="utf-8-sig", errors="replace"
+            )
+        except OSError:
+            return ""
+        return watchdog_build_id(script)
+
+    def _watchdog_build_mismatch(self) -> str:
+        """A clause naming both builds when the installed watchdog is not ours, else "".
+
+        Silent whenever either side is unknown. No watchdog installed is not a mismatch,
+        and neither is one this app cannot read -- a check that cried wolf on a fresh
+        machine would be turned off long before it caught the case it exists for.
+
+        Lower case and unpunctuated because both callers set it in a sentence of their
+        own; wording it once is what stops the dialog and the status bar drifting into
+        two different accounts of the same fact.
+        """
+        shipped = shipped_watchdog_build()
+        installed = self._installed_watchdog_build()
+        if not shipped or not installed or shipped == installed:
+            return ""
+        return (
+            f"the watchdog on disk is build {installed}, not the {shipped} this app "
+            "ships -- another copy of Virtual HDR OSD installed over it, and installing "
+            "from here replaces it"
+        )
+
     def _report_watchdog_outcome(
         self, installing: bool, before: float, launched_at: float | None = None
     ) -> None:
@@ -1576,11 +1670,22 @@ class MainWindow(FluentWidget):
                     # It works, but not the way it was meant to. Amber, not green.
                     self._set_status(f"Watchdog installed, with a caveat: {warnings[0]}", "warning")
                 else:
-                    self._set_status(
-                        f"Watchdog installed via {result.get('startup') or 'the usual startup entry'}. "
-                        "It now keeps your SDR/HDR associations stable and owns Alt+1 / Alt+2.",
-                        "ok",
-                    )
+                    started_via = result.get("startup") or "the usual startup entry"
+                    # Checked after a success, not instead of one: the install really
+                    # did finish, it just may not have been this app's build that
+                    # landed. Reporting that in green is exactly what hid the problem.
+                    mismatch = self._watchdog_build_mismatch()
+                    if mismatch:
+                        self._set_status(
+                            f"Watchdog installed via {started_via}, but {mismatch}.",
+                            "warning",
+                        )
+                    else:
+                        self._set_status(
+                            f"Watchdog installed via {started_via}. "
+                            "It now keeps your SDR/HDR associations stable and owns Alt+1 / Alt+2.",
+                            "ok",
+                        )
                 return
             if after > before:
                 # Not success. The .bat writes Watchdog.ps1 before the integrity check,

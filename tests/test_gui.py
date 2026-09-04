@@ -1297,6 +1297,14 @@ class WatchdogLaunchTests(WindowTestCase):
         patcher = mock.patch.object(app_module, "WATCHDOG_INSTALL_ROOT", self.install_root)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # These tests write placeholder scripts, which are by definition not the build
+        # this app ships. "" is what the app reports when it cannot read its own
+        # installer, and it is treated as unknown rather than as a mismatch -- so this
+        # keeps the outcome reporting under test here and leaves the build comparison
+        # to WatchdogBuildTests, instead of every case below reading as a foreign build.
+        shipped = mock.patch.object(app_module, "shipped_watchdog_build", lambda: "")
+        shipped.start()
+        self.addCleanup(shipped.stop)
         self.script = self.install_root / "Watchdog.ps1"
 
     def write_result(self, **payload):
@@ -4682,6 +4690,178 @@ class HotkeyOwnershipTests(WindowTestCase):
     def test_holding_them_is_reported_plainly(self):
         self.window._hotkey_registration_changed(True, "registered")
         self.assertIn("active", self.window.hotkey_status_label.text().lower())
+
+
+class WatchdogBuildTests(WindowTestCase):
+    """Telling our own watchdog apart from somebody else's.
+
+    On 2026-09-03 an August portable build kept in a second checkout installed its own
+    watchdog over the current one. The scheduled task kept showing the old settings
+    through two reinstalls, every check the app performs still reported success, and an
+    hour went into hunting a bug in the registration code that was correct throughout.
+    Nothing could see it because the deployed script carries no identity of its own.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.install_root = self.temp / "ColorProfileModeWatchdog"
+        self.install_root.mkdir(parents=True, exist_ok=True)
+        patcher = mock.patch.object(app_module, "WATCHDOG_INSTALL_ROOT", self.install_root)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.script = self.install_root / "Watchdog.ps1"
+
+    def ship(self, build):
+        """Pin what this app claims to ship, without touching the real resource."""
+        patcher = mock.patch.object(app_module, "shipped_watchdog_build", lambda: build)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_the_marker_is_found_from_the_end_of_the_installer(self):
+        """The .bat names the marker twice: once in the extraction command near the top,
+        and once where the payload actually starts. Matching the first would hand back
+        the whole installer as though it were the script, and every comparison after
+        that would be against the wrong thing."""
+        installer = (
+            "@echo off\n"
+            "powershell -Command \"$marker=':__WATCHDOG_POWERSHELL_PAYLOAD__'\"\n"
+            ":__WATCHDOG_POWERSHELL_PAYLOAD__\n"
+            "param([switch]$Install)\n"
+        )
+        payload = app_module.watchdog_payload(installer)
+        self.assertIn("param([switch]$Install)", payload)
+        # The assertions that actually separate rfind from find. Taking the first
+        # marker leaves the payload starting midway through the extraction command,
+        # which still excludes "@echo off" and still contains the param line -- so
+        # checking only those two would pass with the bug in place.
+        self.assertNotIn(
+            app_module.WATCHDOG_PAYLOAD_MARKER, payload,
+            "a payload that still contains the marker was cut at the wrong one",
+        )
+        self.assertNotIn("powershell -Command", payload)
+        self.assertTrue(
+            payload.strip().startswith("param([switch]$Install)"),
+            f"the payload should begin at the script, not inside the .bat: {payload[:60]!r}",
+        )
+
+    def test_an_installer_without_the_marker_yields_nothing(self):
+        self.assertEqual("", app_module.watchdog_payload("no marker anywhere in here"))
+
+    def test_the_same_script_gets_the_same_id_however_it_reached_us(self):
+        """The deployed copy is written by PowerShell's Set-Content -Encoding UTF8,
+        which adds a byte-order mark and keeps CRLF; the shipped copy is sliced out of
+        the .bat. A comparison that tripped on that would call every build foreign and
+        would be worse than having no check."""
+        plain = app_module.watchdog_build_id("param($Install)\nexit 0\n")
+        self.assertEqual(plain, app_module.watchdog_build_id("param($Install)\r\nexit 0\r\n"))
+        self.assertEqual(
+            plain, app_module.watchdog_build_id("\ufeffparam($Install)\r\nexit 0\r\n")
+        )
+        self.assertEqual(plain, app_module.watchdog_build_id("param($Install)\nexit 0"))
+
+    def test_a_changed_script_gets_a_different_id(self):
+        self.assertNotEqual(
+            app_module.watchdog_build_id("exit 0\n"),
+            app_module.watchdog_build_id("exit 1\n"),
+        )
+
+    def test_an_empty_script_has_no_id_at_all(self):
+        """"" means unknown everywhere in this check, so it must not collide with the
+        id of some real script."""
+        self.assertEqual("", app_module.watchdog_build_id(""))
+        self.assertEqual("", app_module.watchdog_build_id("   \r\n  "))
+
+    def test_this_app_can_identify_the_build_it_ships(self):
+        """Guards the silent failure: rename the marker, or drop the .bat out of the
+        packaged resources, and shipped_watchdog_build() quietly returns "" -- which is
+        treated as unknown, so the check would never fire again and nothing would say
+        so."""
+        app_module.shipped_watchdog_build.cache_clear()
+        self.addCleanup(app_module.shipped_watchdog_build.cache_clear)
+        self.assertNotEqual(
+            "", app_module.shipped_watchdog_build(),
+            "the app must be able to fingerprint its own installer payload",
+        )
+
+    def test_nothing_installed_is_not_a_mismatch(self):
+        """A fresh machine has no watchdog. Reporting that as a foreign build is how a
+        warning gets ignored by the time it matters."""
+        self.ship("aaaaaaaaaaaa")
+        self.assertFalse(self.script.exists())
+        self.assertEqual("", self.window._watchdog_build_mismatch())
+
+    def test_our_own_build_is_not_reported(self):
+        script = "param([switch]$Install)\nexit 0\n"
+        self.script.write_text(script, encoding="utf-8")
+        self.ship(app_module.watchdog_build_id(script))
+        self.assertEqual("", self.window._watchdog_build_mismatch())
+
+    def test_a_build_written_the_way_powershell_writes_it_is_still_ours(self):
+        """Set-Content -Encoding UTF8 is what actually puts the file on disk, so the
+        bytes that arrive carry a BOM and CRLF. This is the case that decides whether
+        the check is usable at all."""
+        script = "param([switch]$Install)\nexit 0\n"
+        as_powershell_writes_it = "\ufeff" + script.replace("\n", "\r\n")
+        self.script.write_bytes(as_powershell_writes_it.encode("utf-8"))
+        self.ship(app_module.watchdog_build_id(script))
+        self.assertEqual(
+            "", self.window._watchdog_build_mismatch(),
+            "a BOM and CRLF are how the installer writes every file; they are not a "
+            "different build",
+        )
+
+    def test_a_foreign_build_names_both_sides(self):
+        """Both ids, because "yours is wrong" without saying which is which leaves the
+        user no way to tell whether the reinstall worked."""
+        self.script.write_text("this is somebody else's watchdog\n", encoding="utf-8")
+        self.ship("bbbbbbbbbbbb")
+        mismatch = self.window._watchdog_build_mismatch()
+        self.assertIn("bbbbbbbbbbbb", mismatch)
+        self.assertIn(
+            app_module.watchdog_build_id("this is somebody else's watchdog\n"), mismatch
+        )
+
+    def test_a_successful_install_of_a_foreign_build_is_not_reported_as_ready(self):
+        """The whole point. The install genuinely succeeded -- ok=True, a real startup
+        method, no warnings -- and the green line it earned is exactly what hid an
+        August watchdog sitting on disk for an evening."""
+        import json as _json
+
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text("somebody else's build\n", encoding="utf-8")
+        (self.install_root / "install_result.json").write_text(
+            _json.dumps({
+                "action": "install", "ok": True,
+                "startup": "Task Scheduler (COM / current-user SID)", "warnings": [],
+            }),
+            encoding="utf-8",
+        )
+        self.ship("cccccccccccc")
+        self.window._report_watchdog_outcome(True, before)
+        text = self.window.status_label.text()
+        self.assertIn("Attention", text, "a foreign build must not read as success")
+        self.assertIn("cccccccccccc", text, "the status has to name what we ship")
+        self.assertNotIn("Ready", text)
+
+    def test_our_own_build_still_reports_ready(self):
+        """The other half: the check must not turn every good install amber."""
+        import json as _json
+
+        script = "param([switch]$Install)\nexit 0\n"
+        before = self.window._watchdog_script_stamp()
+        self.script.write_text(script, encoding="utf-8")
+        (self.install_root / "install_result.json").write_text(
+            _json.dumps({
+                "action": "install", "ok": True,
+                "startup": "Task Scheduler (COM / current-user SID)", "warnings": [],
+            }),
+            encoding="utf-8",
+        )
+        self.ship(app_module.watchdog_build_id(script))
+        self.window._report_watchdog_outcome(True, before)
+        text = self.window.status_label.text()
+        self.assertIn("Ready", text)
+        self.assertIn("Task Scheduler", text)
 
 
 if __name__ == "__main__":
