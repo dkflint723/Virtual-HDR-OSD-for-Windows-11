@@ -54,6 +54,21 @@ BLUE_BLACK = 0x70
 GAMMA = 0x72
 PICTURE_MODE = 0xDC
 
+#: The monitor's HDR preset. A VENDOR code, not MCCS, identified on an ASUS PG32UCDM on
+#: 2026-09-04 by read-diff: a 256-code scan taken before and after changing Image > HDR
+#: Setting in the OSD moved exactly one code out of the 64 that answer. Gaming HDR reads 2,
+#: Console HDR reads 3.
+#:
+#: Worth a name because of what separates those two values. Measured in one controlled
+#: test, same session and same instrument: (R+G+B)/white was 2.19 under Gaming HDR and 1.04
+#: under Console HDR, every primary falling by about 2.36x while white moved 1.13. The
+#: standard codes are blind to it -- PICTURE_MODE and COLOUR_PRESET both read 5 in either
+#: state -- so a run record built from them alone reports a monitor that did not change.
+#:
+#: Vendor codes mean different things on different hardware, so this is recorded and
+#: compared against itself, never interpreted as a preset name.
+HDR_SETTING = 0xE2
+
 GAINS = (RED_GAIN, GREEN_GAIN, BLUE_GAIN)
 
 #: How many times to ask before believing a code is unsupported, and how long to wait

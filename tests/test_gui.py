@@ -1625,8 +1625,8 @@ class MonitorStateTests(WindowTestCase):
         with mock.patch.object(app_module.ddc, "open_link", lambda _n: Link()):
             state = self.window._monitor_state()
         self.assertTrue(state["available"])
-        for key in ("picture_mode", "colour_preset", "brightness", "contrast",
-                    "gamma", "red_gain", "green_gain", "blue_gain"):
+        for key in ("hdr_setting", "picture_mode", "colour_preset", "brightness",
+                    "contrast", "gamma", "red_gain", "green_gain", "blue_gain"):
             with self.subTest(key=key):
                 self.assertEqual(7, state[key])
 
@@ -2335,6 +2335,15 @@ class ShapingProvenanceTests(WindowTestCase):
         self.measure()
         self.assertTrue(self.window.state.hdr.panel_response)
         self.assertTrue(self.window.state.hdr.panel_response_shaping)
+
+    def test_a_measurement_records_the_monitor_preset_it_was_taken_under(self):
+        """Read once when the run starts and stamped from that, rather than re-read at the
+        end. A preset that changed mid-run then leaves the start record and the stamp
+        disagreeing in the log, instead of the new value being quietly adopted as though
+        the whole run had happened under it."""
+        self.window._measure_monitor_setting = 2
+        self.measure()
+        self.assertEqual(2, self.window.state.hdr.panel_response_monitor)
 
     def test_nothing_is_said_while_the_shaping_is_unchanged(self):
         self.measure()
@@ -5330,6 +5339,140 @@ class DisplayProbeTests(WindowTestCase):
         )
         self.assertEqual("sustained-start", last["event"])
         self.assertEqual("BaseCalibration.icm", last["display_state"]["profile"])
+
+
+class MonitorPresetTests(WindowTestCase):
+    """The monitor's own HDR setting, recorded with a run and checked against afterwards.
+
+    VCP 0xE2 was identified on 2026-09-04 by read-diff: of the 64 codes this panel answers,
+    it was the only one that moved when the HDR Setting was changed in the OSD. Gaming HDR
+    reads 2 and Console HDR reads 3, and in one controlled test the difference between them
+    was (R+G+B)/white of 2.19 against 1.04 -- every primary scaled by about 2.36 while white
+    moved 1.13 and no chromaticity moved at all.
+
+    It matters because the owner reports the setting changing with nobody touching the OSD,
+    which is the only account ever found for 22 logged runs splitting into a clean cluster
+    and a boosted one with nothing in between. The codes the app logged before this are
+    blind to it: picture mode and colour preset both read 5 in either state.
+    """
+
+    def link(self, value):
+        """A monitor answering `value` for the HDR setting and 7 for everything else."""
+        from sdr_hdr_profile_creator import ddc
+
+        class Link:
+            description = "fake"
+
+            def read(_self, code):
+                return ddc.Control(
+                    code=code,
+                    current=value if code == ddc.HDR_SETTING else 7,
+                    maximum=100,
+                )
+
+            def set(_self, code, _value):
+                return True
+
+        return lambda _name: Link()
+
+    def measured_under(self, recorded):
+        """A window carrying a greyscale correction taken under `recorded`."""
+        self.window.state.hdr.panel_response = (0.1, 0.2, 0.3)
+        self.window.state.hdr.panel_response_monitor = recorded
+
+    def test_the_setting_is_read_from_the_code_it_actually_lives_on(self):
+        """0xE2, not the standard picture mode or colour preset, both of which read
+        identically in the boosted and clean states."""
+        from sdr_hdr_profile_creator import ddc
+
+        self.assertEqual(0xE2, ddc.HDR_SETTING)
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.assertEqual(3, self.window._monitor_hdr_setting())
+
+    def test_nothing_is_said_while_the_setting_is_unchanged(self):
+        self.measured_under(3)
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.assertEqual("", self.window._monitor_moved_since_measuring())
+
+    def test_a_moved_setting_names_both_values(self):
+        """Both, because "your monitor changed" without saying what it changed from
+        leaves no way to put it back."""
+        self.measured_under(2)
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            moved = self.window._monitor_moved_since_measuring()
+        self.assertIn("now 3", moved)
+        self.assertIn("at 2", moved)
+
+    def test_an_unreadable_setting_is_not_a_change(self):
+        """Roughly a quarter of single DDC/CI reads fail on this hardware, and plenty of
+        machines have no DDC/CI at all. A check that cried wolf on "not read" would be
+        switched off long before it caught the case it exists for."""
+        self.measured_under(2)
+        with mock.patch.object(
+            app_module.ddc, "open_link",
+            lambda _n: app_module.ddc.UnavailableLink("the monitor said nothing"),
+        ):
+            self.assertEqual("", self.window._monitor_moved_since_measuring())
+
+    def test_a_correction_that_predates_the_field_says_nothing(self):
+        """A state file written before this existed records no setting. Guessing would put
+        a warning on every profile that predates it."""
+        self.measured_under(None)
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.assertEqual("", self.window._monitor_moved_since_measuring())
+
+    def test_no_correction_means_nothing_to_say(self):
+        self.window.state.hdr.panel_response = ()
+        self.window.state.hdr.panel_response_monitor = 2
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.assertEqual("", self.window._monitor_moved_since_measuring())
+
+    def test_a_failing_ddc_layer_cannot_break_the_check(self):
+        """This runs on every profile apply. An apply must not fail over a diagnostic."""
+        def explode(_name):
+            raise OSError("the handle went away")
+
+        self.measured_under(2)
+        with mock.patch.object(app_module.ddc, "open_link", explode):
+            self.assertEqual("", self.window._monitor_moved_since_measuring())
+
+    def test_the_warning_is_appended_to_what_was_just_said(self):
+        """Appended rather than replacing: the message underneath explains what the user's
+        action did, and this is a consequence of it rather than a different subject."""
+        self.measured_under(2)
+        self.window._set_status("Applied the working profile.", "ok")
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.window._warn_if_monitor_moved()
+        text = self.window.status_label.text()
+        self.assertIn("Applied the working profile", text)
+        self.assertIn("now 3", text)
+        # On where the prefix sits, not whether the word appears. Appending to the
+        # rendered label used to carry the old prefix along, so "Attention" and "Ready"
+        # were both present and either assertion passed whatever the code did.
+        self.assertTrue(text.startswith("Attention"), text)
+        self.assertNotIn("Ready", text)
+
+    def test_a_matching_setting_leaves_the_status_alone(self):
+        """The warning has to be conditional, or every apply reads as a problem."""
+        self.measured_under(3)
+        self.window._set_status("Applied the working profile.", "ok")
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.window._warn_if_monitor_moved()
+        text = self.window.status_label.text()
+        self.assertTrue(text.startswith("Ready"), text)
+        self.assertNotIn("Note:", text)
+
+    def test_applying_a_profile_checks_the_monitor(self):
+        """The call site is the whole point. The moment the correction is put on the
+        display is the moment worth saying it was measured under a different preset, and a
+        check wired nowhere would leave every unit test above passing while no user ever
+        saw the warning."""
+        self.measured_under(2)
+        with mock.patch.object(app_module.ddc, "open_link", self.link(3)):
+            self.apply()
+        text = self.window.status_label.text()
+        self.assertIn("now 3", text)
+        self.assertTrue(text.startswith("Attention"), text)
 
 
 if __name__ == "__main__":

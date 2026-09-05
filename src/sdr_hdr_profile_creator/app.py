@@ -1262,6 +1262,7 @@ class MainWindow(FluentWidget):
             self.state.hdr.panel_response = ()
             self.state.hdr.panel_response_weights = ()
             self.state.hdr.panel_response_shaping = ()
+            self.state.hdr.panel_response_monitor = None
             discarded = True
         self._save_state_now()
         kept = (
@@ -3006,6 +3007,12 @@ class MainWindow(FluentWidget):
         # is a different number. Scoring the ramp afterwards needs the requests, and
         # those can only be rebuilt from the peak they were made with.
         self._measure_requested_peak = peak
+        # Read once, here, and reused for the stamp below. The response describes the
+        # display as it was when the run began, so that is the state to record it under --
+        # and re-reading at the end would quietly adopt a preset that changed mid-run
+        # instead of leaving the two figures in the log to disagree.
+        monitor = self._monitor_state()
+        self._measure_monitor_setting = monitor.get("hdr_setting")
         self._log_meter({
             "event": "start",
             "display": display.friendly_name,
@@ -3032,7 +3039,7 @@ class MainWindow(FluentWidget):
             # applied -- both checked against the log -- and every remaining candidate,
             # picture mode, colour preset, or the panel simply being cold, is a monitor
             # state nothing recorded. Reading it costs about a second.
-            "monitor": self._monitor_state(),
+            "monitor": monitor,
             # The OS's view of the display as the run begins, so a refusal that names
             # a change can be read against what it changed from -- and so a field that
             # could not be read at the start is visible as such rather than silently
@@ -3111,11 +3118,72 @@ class MainWindow(FluentWidget):
         """
         if not self._shaping_moved_since_measuring():
             return
-        self._set_status(
-            self.status_label.text().rstrip('.') + ". The measured greyscale "
-            "correction was taken with different tone settings, so it no longer "
-            "matches this curve — measure again to bring it back into step.",
-            "warning",
+        self._append_to_status(
+            "The measured greyscale correction was taken with different tone settings, "
+            "so it no longer matches this curve — measure again to bring it "
+            "back into step."
+        )
+
+    def _append_to_status(self, clause: str, level: str = "warning") -> None:
+        """Add a consequence to what was just said, without repeating its prefix.
+
+        _set_status renders "Ready · text", so appending to the rendered label and
+        re-rendering it produced "Attention · Ready · text". Splitting on
+        the separator leaves the prefix belonging to the new level alone.
+        """
+        current = self.status_label.text().split(" · ", 1)[-1]
+        self._set_status(current.rstrip(".") + ". " + clause, level)
+
+    def _monitor_hdr_setting(self) -> int | None:
+        """The monitor's HDR setting over DDC/CI, or None when it cannot be read.
+
+        One code rather than the eight _monitor_state asks for, because this runs on every
+        profile apply and a full probe costs about a second. Never raises: a display with
+        DDC/CI switched off in its own menu is perfectly calibratable, and an apply must
+        not fail over a diagnostic.
+        """
+        try:
+            display = self._selected_display()
+            link = ddc.open_link(display.friendly_name if display else "")
+            if isinstance(link, ddc.UnavailableLink):
+                return None
+            control = ddc.read_control(link, ddc.HDR_SETTING)
+            return None if control is None else control.current
+        except Exception:      # noqa: BLE001
+            return None
+
+    def _monitor_moved_since_measuring(self) -> str:
+        """A clause when the monitor's HDR setting is not the one measured under, else "".
+
+        Silent whenever either side is unknown. No correction stored, no setting recorded,
+        or a monitor that will not answer are all "nothing to say" -- and a check that
+        fired on an unread value would be switched off long before it caught the case it
+        exists for, since roughly a quarter of single DDC/CI reads fail on this hardware.
+        """
+        state = self.state.hdr
+        if not state.panel_response or state.panel_response_monitor is None:
+            return ""
+        now = self._monitor_hdr_setting()
+        if now is None or now == state.panel_response_monitor:
+            return ""
+        return (
+            f"the monitor's HDR setting is now {now} and the measured greyscale "
+            f"correction was taken with it at {state.panel_response_monitor}, which on "
+            "this display changes saturated colour by about a factor of two"
+        )
+
+    def _warn_if_monitor_moved(self) -> None:
+        """Append the monitor mismatch to whatever was just said, if there is one.
+
+        Appended rather than replacing, for the same reason the shaping warning is: the
+        message underneath explains what the user's action did, and this is a consequence
+        of it rather than a different subject.
+        """
+        moved = self._monitor_moved_since_measuring()
+        if not moved:
+            return
+        self._append_to_status(
+            f"Note: {moved} — measure again to bring them back into step."
         )
 
     def _shaping_moved_since_measuring(self) -> bool:
@@ -3194,6 +3262,9 @@ class MainWindow(FluentWidget):
         volume and input source.
         """
         wanted = (
+            # First because it is the one that decides whether the panel is additive, and
+            # the only one of these that the standard codes below cannot stand in for.
+            ("hdr_setting", ddc.HDR_SETTING),
             ("picture_mode", ddc.PICTURE_MODE),
             ("colour_preset", ddc.COLOUR_PRESET),
             ("brightness", ddc.LUMINANCE),
@@ -3552,6 +3623,9 @@ class MainWindow(FluentWidget):
         # Which shaping this was measured through. Stored with it, because the response
         # records the code that was sent and the shaping is what decided that code.
         state.panel_response_shaping = self._shaping_fingerprint()
+        # And which monitor preset. The response records a delivered luminance, and this
+        # display's HDR setting scales saturated colour by about 2.36x between presets.
+        state.panel_response_monitor = getattr(self, "_measure_monitor_setting", None)
         state.panel_source_key = getattr(self, "_measure_display_key", "") or state.panel_source_key
         self._log_meter({
             "event": "response",
@@ -4048,6 +4122,9 @@ class MainWindow(FluentWidget):
             f"gamma correction {'ON' if enabled else 'OFF'}. {detail}",
             "ok",
         )
+        # The moment the correction is actually put on the display is the moment worth
+        # saying it was measured under a different monitor preset.
+        self._warn_if_monitor_moved()
         return True
 
     def _release_active_working_profile(self, display: DisplayInfo, pending_names: set[str]) -> None:
@@ -4256,6 +4333,7 @@ class MainWindow(FluentWidget):
         state.panel_response = ()
         state.panel_response_weights = ()
         state.panel_response_shaping = ()
+        state.panel_response_monitor = None
         state.panel_source_key = display.stable_key
         self._save_state_soon()
         return True

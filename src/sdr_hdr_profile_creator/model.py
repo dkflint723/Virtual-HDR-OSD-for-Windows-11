@@ -112,6 +112,22 @@ class ModeState:
     # loud so the dip is expected rather than alarming.
     panel_response_shaping: tuple[float, ...] = ()
 
+    # The monitor's own HDR setting when the response was measured, read over DDC/CI. On
+    # the display this was developed against that preset decides whether the panel is
+    # additive: switching it moved every primary by about 2.36x while leaving white and
+    # every chromaticity alone, so a correction measured under one preset describes a
+    # different display under the other.
+    #
+    # It has been observed changing with nobody touching the OSD, which is the only
+    # account ever found for 22 logged runs splitting into a clean cluster and a boosted
+    # one with nothing in between.
+    #
+    # None means "not read", never "no preset". DDC/CI is absent on plenty of machines,
+    # roughly a quarter of single reads fail on this one, and a state written before this
+    # field existed says nothing either way -- so an unread value must never look like a
+    # change.
+    panel_response_monitor: int | None = None
+
     @classmethod
     def neutral(cls, mode: DisplayMode) -> "ModeState":
         if mode == "SDR":
@@ -183,6 +199,7 @@ class ModeState:
             merged["panel_response"] = ()
             merged["panel_response_weights"] = ()
             merged["panel_response_shaping"] = ()
+            merged["panel_response_monitor"] = None
         else:
             merged["panel_response"] = greyscale.to_values(response)
             merged["panel_response_weights"] = tuple(response.weights)
@@ -192,6 +209,11 @@ class ModeState:
                 )
             except (TypeError, ValueError):
                 merged["panel_response_shaping"] = ()
+            try:
+                recorded = merged.get("panel_response_monitor")
+                merged["panel_response_monitor"] = None if recorded is None else int(recorded)
+            except (TypeError, ValueError):
+                merged["panel_response_monitor"] = None
 
         # Removed controls are neutralized when legacy profiles are imported.
         merged["exposure"] = 0.0
