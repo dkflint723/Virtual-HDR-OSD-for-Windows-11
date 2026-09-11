@@ -248,5 +248,68 @@ class TuneTests(unittest.TestCase):
         self.assertIsNotNone(ddc.read_gains(link))
 
 
+class HandleReleaseTests(unittest.TestCase):
+    """Physical-monitor handles are Windows allocations, and nothing used to release them:
+    one leaked per attached monitor on every open_link, for the life of the process.
+
+    dxva2 is replaced by a recorder, so these run without a monitor."""
+
+    def setUp(self):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        self.destroyed = []
+        recorder = SimpleNamespace(
+            DestroyPhysicalMonitor=lambda handle: self.destroyed.append(handle.value) or True
+        )
+        for patcher in (mock.patch.object(ddc, "_dxva2", recorder, create=True),
+                        mock.patch.object(ddc, "IS_WINDOWS", True)):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def links(self, *descriptions):
+        found = [ddc.MonitorLink(index + 1, text) for index, text in enumerate(descriptions)]
+        # Zeroed before the recorder is unpatched, so no finaliser can reach real dxva2.
+        self.addCleanup(lambda: [setattr(link, "_handle", 0) for link in found])
+        return found
+
+    def open(self, found, name):
+        from unittest import mock
+
+        with mock.patch.object(ddc, "monitors", lambda: iter(found)):
+            return ddc.open_link(name)
+
+    def test_close_releases_the_handle_once(self):
+        link = ddc.MonitorLink(5, "PG32UCDM")
+        link.close()
+        link.close()
+        self.assertEqual([5], self.destroyed)
+
+    def test_dropping_the_last_reference_releases_it(self):
+        """How every caller in the app uses a link: read, then let it go."""
+        import gc
+
+        link = ddc.MonitorLink(6, "PG32UCDM")
+        del link
+        gc.collect()
+        self.assertEqual([6], self.destroyed)
+
+    def test_open_link_releases_every_monitor_it_does_not_return(self):
+        found = self.links("DELL U2720Q", "ROG PG32UCDM")
+        link = self.open(found, "PG32UCDM")
+        self.assertIs(found[1], link)
+        self.assertEqual([1], self.destroyed)
+
+    def test_no_match_releases_them_all(self):
+        found = self.links("DELL U2720Q", "LG 27GP950")
+        self.assertIsInstance(self.open(found, "PG32UCDM"), ddc.UnavailableLink)
+        self.assertEqual([1, 2], sorted(self.destroyed))
+
+    def test_a_single_monitor_is_handed_back_open(self):
+        found = self.links("ROG PG32UCDM")
+        self.assertIs(found[0], self.open(found, ""))
+        self.assertEqual([], self.destroyed)
+
+
 if __name__ == "__main__":
     unittest.main()

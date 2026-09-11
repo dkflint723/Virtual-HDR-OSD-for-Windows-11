@@ -133,11 +133,35 @@ if IS_WINDOWS:
 
 
 class MonitorLink:
-    """A real monitor, addressed through dxva2."""
+    """A real monitor, addressed through dxva2.
+
+    It holds a physical-monitor handle, which Windows allocates for it and keeps until
+    DestroyPhysicalMonitor. Nothing ever called that: every open_link leaked one handle per
+    attached monitor for the life of the process, twice per measurement. close() releases
+    it, and so does dropping the last reference -- which is how every caller uses a link.
+    """
 
     def __init__(self, handle: int, description: str) -> None:
         self._handle = handle
         self.description = description
+
+    def close(self) -> None:
+        """Release the handle. Safe to call twice; reads after it simply fail."""
+        handle, self._handle = self._handle, 0
+        if handle:
+            _dxva2.DestroyPhysicalMonitor(wintypes.HANDLE(handle))
+
+    def __enter__(self) -> "MonitorLink":
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self.close()
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 -- interpreter shutdown can take dxva2 first
+            pass
 
     def read(self, code: int) -> Control | None:
         """One attempt. The retrying is in :func:`read_control`, so that the policy is
@@ -206,9 +230,15 @@ def open_link(friendly_name: str = "") -> Link:
         return found[0]
 
     wanted = friendly_name.strip().casefold()
+    chosen = next(
+        (link for link in found if wanted and wanted in link.description.casefold()), None
+    )
+    # Every monitor was opened to be asked its name. Release the ones not handed back.
     for link in found:
-        if wanted and wanted in link.description.casefold():
-            return link
+        if link is not chosen:
+            link.close()
+    if chosen is not None:
+        return chosen
     return UnavailableLink(
         f"{len(found)} monitors answered and none matched {friendly_name!r}"
     )
