@@ -1,0 +1,40 @@
+# Runs on Windows with nothing but Python's standard library installed. For the colour
+# core that is the point: docs/adr/0001-split.md gives it no dependency on Qt or Windows,
+# so a test that passes here cannot be leaning on either. The Windows layer and the
+# installers are tested against fakes and need nothing more. The GUI tests need PySide6
+# and about half an hour, and stay with the local suite.
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  stdlib-only:
+    name: Core, Windows layer and packaging
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      PYTHONPATH: src
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Colour core and its import boundary
+        run: python -m unittest -v tests.test_import_boundary tests.test_core tests.test_delta_itp tests.test_greyscale tests.test_measure tests.test_patterns
+
+      - name: Windows layer, against fakes
+        run: python -m unittest -v tests.test_edid tests.test_ddc tests.test_elevation tests.test_meter tests.test_hdr_display tests.test_watchdog
+
+      - name: Packaging, installers and README claims
+        run: python -m unittest -v tests.test_packaging
