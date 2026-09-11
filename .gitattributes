@@ -5,5 +5,8 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
+# The standalone watchdog zip carries this with CRLF, and is compared with it byte for byte.
+LICENSE text eol=crlf
+
 # Distributed as built; never converted.
 *.zip binary
