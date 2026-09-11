@@ -1150,5 +1150,64 @@ class InPlaceProfileRetryTests(unittest.TestCase):
         )
 
 
+class CorruptStateTests(unittest.TestCase):
+    """What a damaged or hand-edited state file turns into.
+
+    The file is JSON a person can open in Notepad, so the only safe answer to a value
+    that makes no sense is the neutral one -- never the most extreme setting a control
+    allows, and never an exception that stops the app starting."""
+
+    CLAMPED = (
+        "temperature", "red_channel", "green_channel", "blue_channel", "tint", "gamma",
+        "saturation", "brightness_trim", "contrast", "brightness",
+        "minimum_luminance_nits", "peak_luminance_nits", "full_frame_luminance_nits",
+    )
+
+    def test_a_non_finite_number_falls_back_to_the_neutral_value(self):
+        neutral = ModeState.neutral("HDR")
+        for key in self.CLAMPED:
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(key=key, value=bad):
+                    state = ModeState.from_dict({key: bad}, "HDR")
+                    self.assertEqual(getattr(neutral, key), getattr(state, key))
+
+    def test_a_bare_nan_in_the_file_itself_is_caught(self):
+        """json.loads accepts NaN, so this is the path a corrupt file really takes --
+        not a float someone constructed in a test."""
+        import json
+
+        state = ApplicationState.from_dict(
+            json.loads('{"hdr": {"gamma": NaN, "peak_luminance_nits": Infinity}}')
+        )
+        self.assertEqual(2.2, state.hdr.gamma)
+        self.assertEqual(1000.0, state.hdr.peak_luminance_nits)
+
+    def test_a_top_level_that_is_not_an_object_gives_the_neutral_state(self):
+        neutral = ApplicationState.neutral().to_dict()
+        for payload in ([], [["hdr", {}]], "state", 3, None, True):
+            with self.subTest(payload=payload):
+                self.assertEqual(neutral, ApplicationState.from_dict(payload).to_dict())
+
+    def test_one_malformed_section_does_not_cost_the_rest(self):
+        state = ApplicationState.from_dict({
+            "sdr": "not a section",
+            "hdr": {"gamma": 2.4},
+            "argyll_path": r"C:\Argyll\bin",
+            "display_bindings": {"panel-a": {"sdr_profile": "sRGB.icm"}},
+        })
+        self.assertEqual(ModeState.neutral("SDR").to_dict(), state.sdr.to_dict())
+        self.assertAlmostEqual(2.4, state.hdr.gamma)
+        self.assertEqual(r"C:\Argyll\bin", state.argyll_path)
+        self.assertEqual("sRGB.icm", state.display_bindings["panel-a"].sdr_profile)
+
+    def test_a_mode_section_that_is_not_an_object_is_neutral(self):
+        for payload in ("text", ["gamma", 2.4], 7, None):
+            with self.subTest(payload=payload):
+                self.assertEqual(
+                    ModeState.neutral("HDR").to_dict(),
+                    ModeState.from_dict(payload, "HDR").to_dict(),
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

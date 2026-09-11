@@ -397,6 +397,55 @@ class EditorStructureTests(WindowTestCase):
                     self.assertTrue(detail)
 
 
+class UnreadableStateFileTests(WindowTestCase):
+    """A state file the app cannot use is set aside, never quietly overwritten.
+
+    Falling back to defaults was already the behaviour; what it cost was the file. The
+    first save after a bad load wrote the defaults over it, so every display binding and
+    measured correction went with nothing on screen to say they had."""
+
+    def aside(self):
+        return app_module.STATE_PATH.with_name("last_gui_state.unreadable.json")
+
+    def test_each_kind_of_unreadable_file_is_kept_and_reported(self):
+        for content in ("[]", '"state"', "{ not json", b"\xff\xfe\x00garbage"):
+            with self.subTest(content=content):
+                self.aside().unlink(missing_ok=True)
+                if isinstance(content, bytes):
+                    app_module.STATE_PATH.write_bytes(content)
+                else:
+                    app_module.STATE_PATH.write_text(content, encoding="utf-8")
+                original = app_module.STATE_PATH.read_bytes()
+
+                state = self.window._load_last_state()
+
+                self.assertEqual(ApplicationState.neutral().to_dict(), state.to_dict())
+                self.assertFalse(app_module.STATE_PATH.exists(), "left where a save would overwrite it")
+                self.assertEqual(original, self.aside().read_bytes())
+                self.assertIn("could not be read", self.window._state_load_problem)
+                self.assertIn(self.aside().name, self.window._state_load_problem)
+
+    def test_a_readable_file_is_not_touched(self):
+        app_module.STATE_PATH.write_text(json.dumps({"hdr": {"gamma": 2.4}}), encoding="utf-8")
+        state = self.window._load_last_state()
+        self.assertAlmostEqual(2.4, state.hdr.gamma)
+        self.assertTrue(app_module.STATE_PATH.exists())
+        self.assertFalse(self.aside().exists())
+        self.assertEqual("", self.window._state_load_problem)
+
+    def test_the_warning_reaches_the_status_line_on_startup(self):
+        """Checked on a freshly built window, because the load happens before the status
+        line exists and anything said while the window is built could overwrite it."""
+        app_module.STATE_PATH.write_text("[]", encoding="utf-8")
+        window = app_module.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        for timer in (window.mode_timer, window.gamma_runtime_timer, window.live_timer):
+            timer.stop()
+        self.assertTrue(window.status_label.text().startswith("Attention"))
+        self.assertIn("could not be read", window.status_label.text())
+
+
 class EditStateTests(WindowTestCase):
     def test_moving_a_control_updates_state_and_marks_edits_unapplied(self):
         self.apply()

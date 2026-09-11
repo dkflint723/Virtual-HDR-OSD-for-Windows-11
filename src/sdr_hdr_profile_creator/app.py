@@ -338,6 +338,9 @@ class MainWindow(FluentWidget):
         self._sync_lock_switch()
         self.watchdog_timer.start()
         self._update_activity_bar()
+        # Last, so nothing said while the window was being built can overwrite it.
+        if self._state_load_problem:
+            self._set_status(self._state_load_problem, "warning")
 
         if self._first_run:
             QTimer.singleShot(400, self, self._show_guide)
@@ -346,12 +349,36 @@ class MainWindow(FluentWidget):
     # State persistence
 
     def _load_last_state(self) -> ApplicationState:
+        self._state_load_problem = ""
         if not STATE_PATH.is_file():
             return ApplicationState.neutral()
         try:
-            return ApplicationState.from_dict(json.loads(STATE_PATH.read_text(encoding="utf-8-sig")))
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            payload = json.loads(STATE_PATH.read_text(encoding="utf-8-sig"))
+        except OSError:
+            # Unreadable right now is not the same as corrupt -- another process can
+            # simply have it open -- so the file is left exactly where it is.
             return ApplicationState.neutral()
+        except ValueError:
+            # Not UTF-8, or not JSON. JSONDecodeError is a ValueError.
+            payload = None
+        if isinstance(payload, dict):
+            try:
+                return ApplicationState.from_dict(payload)
+            except (ValueError, TypeError, AttributeError, KeyError):
+                pass
+        # Falling back to defaults used to be silent, and the first save afterwards wrote
+        # them over the file: every display binding and measured correction gone, with
+        # nothing on screen to say so. Keep what was there, and say it.
+        aside = STATE_PATH.with_name("last_gui_state.unreadable.json")
+        try:
+            STATE_PATH.replace(aside)
+            kept = f" The unreadable file was kept as {aside.name}."
+        except OSError:
+            kept = ""
+        self._state_load_problem = (
+            "The saved settings could not be read, so the app started from defaults." + kept
+        )
+        return ApplicationState.neutral()
 
     def _load_live_registry(self) -> dict[str, dict[str, str]]:
         if not LIVE_REGISTRY_PATH.is_file():

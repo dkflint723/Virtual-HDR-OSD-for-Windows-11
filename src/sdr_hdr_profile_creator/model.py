@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import PurePath
 from typing import Any, Literal
@@ -150,6 +151,8 @@ class ModeState:
     @classmethod
     def from_dict(cls, data: dict[str, Any], fallback_mode: DisplayMode) -> "ModeState":
         base = cls.neutral(fallback_mode)
+        if not isinstance(data, dict):
+            data = {}
         merged = base.to_dict()
         allowed = {f.name for f in fields(cls)}
         merged.update({k: v for k, v in data.items() if k in allowed})
@@ -183,6 +186,12 @@ class ModeState:
             try:
                 value = float(merged[key])
             except Exception:
+                value = float(getattr(base, key))
+            # NaN survives float() and then defeats the clamp, because min(high, nan)
+            # is high: a corrupt file turned every control into the most extreme
+            # setting it allows -- gamma 3.0, a 10,000-nit peak -- rather than the
+            # neutral one. JSON accepts a bare NaN, so this is one hand-edit away.
+            if not math.isfinite(value):
                 value = float(getattr(base, key))
             merged[key] = max(low, min(high, value))
 
@@ -345,7 +354,13 @@ class ApplicationState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "ApplicationState":
+    def from_dict(cls, data: Any) -> "ApplicationState":
+        # The state file is JSON a person can edit, so its top level is not always an
+        # object. A list or a string reached data.get and raised AttributeError, which
+        # nothing caught: the window failed to construct and the app would not start
+        # again until someone found this file and deleted it by hand.
+        if not isinstance(data, dict):
+            return cls.neutral()
         return cls(
             "HDR" if data.get("current_mode") != "SDR" else "SDR",
             bool(data.get("follow_windows_mode", True)),
@@ -356,8 +371,10 @@ class ApplicationState:
             # every session, which is the guide's own step 4.
             bool(data.get("live_mode", False)),
             str(data.get("selected_display_key", "")),
-            ModeState.from_dict(dict(data.get("sdr", {})), "SDR"),
-            ModeState.from_dict(dict(data.get("hdr", {})), "HDR"),
+            # One malformed section costs that section, not the whole file: dict() of a
+            # string raised, and the loader then threw away every binding and setting.
+            ModeState.from_dict(data.get("sdr"), "SDR"),
+            ModeState.from_dict(data.get("hdr"), "HDR"),
             cls._bindings_from_dict(data.get("display_bindings")),
             str(data.get("argyll_path", "") or ""),
         )
