@@ -48,6 +48,7 @@ from .controls import Card, ControlSpec, SliderControl
 from .curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
 from .gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
+from . import __version__
 from . import ddc
 from . import delta_itp
 from . import greyscale
@@ -287,7 +288,7 @@ class MainWindow(FluentWidget):
         self._base_is_user_selected = False
         self._active_profile_name: str = ""
 
-        self.setWindowTitle("Virtual HDR OSD for Windows")
+        self.setWindowTitle(f"Virtual HDR OSD for Windows {__version__}")
         self.setMinimumSize(1080, 720)
         self.resize(1380, 880)
         try:
@@ -2772,6 +2773,7 @@ class MainWindow(FluentWidget):
         probe = self._display_state_probe(ready.display)
         self._log_meter({
             "event": "sustained-start",
+            "app_version": __version__,
             "display": ready.display.friendly_name,
             "instrument": ready.instrument.label,
             "requested_nits": ready.peak,
@@ -3143,6 +3145,10 @@ class MainWindow(FluentWidget):
         self._measure_monitor_setting = monitor.get("hdr_setting")
         self._log_meter({
             "event": "start",
+            # Which build wrote this run. The log is read long afterwards, by tools that
+            # compare runs, and a change in behaviour between two runs is otherwise
+            # indistinguishable from a change in the display.
+            "app_version": __version__,
             "display": display.friendly_name,
             "instrument": instrument.label,
             "requested_peak_nits": peak,

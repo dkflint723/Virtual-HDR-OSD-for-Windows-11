@@ -5614,6 +5614,9 @@ class DisplayProbeTests(WindowTestCase):
         )
         self.assertEqual("start", last["event"])
         self.assertEqual("BaseCalibration.icm", last["display_state"]["profile"])
+        from sdr_hdr_profile_creator import __version__
+
+        self.assertEqual(__version__, last["app_version"])
 
     def test_the_sustained_run_is_started_with_the_probe_and_the_expected_state(self):
         """start_sustained is reached by a different method with its own window and
@@ -5677,6 +5680,28 @@ class DisplayProbeTests(WindowTestCase):
         )
         self.assertEqual("sustained-start", last["event"])
         self.assertEqual("BaseCalibration.icm", last["display_state"]["profile"])
+        from sdr_hdr_profile_creator import __version__
+
+        self.assertEqual(__version__, last["app_version"])
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class VersionReportingTests(WindowTestCase):
+    """Which build is running, said wherever it will be read later."""
+
+    def test_the_window_title_carries_the_version(self):
+        """What a screenshot in a bug report shows."""
+        from sdr_hdr_profile_creator import __version__
+
+        self.assertEqual(f"Virtual HDR OSD for Windows {__version__}", self.window.windowTitle())
+
+    def test_the_application_reports_the_version(self):
+        from sdr_hdr_profile_creator import __version__, __main__ as entry
+
+        with mock.patch("PySide6.QtWidgets.QApplication") as fake_app, \
+             mock.patch.object(app_module, "MainWindow"):
+            entry._run_app()
+        fake_app.return_value.setApplicationVersion.assert_called_once_with(__version__)
 
 
 class MonitorPresetTests(WindowTestCase):

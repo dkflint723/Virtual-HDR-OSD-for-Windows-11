@@ -9,12 +9,16 @@ to files that exist.
 from __future__ import annotations
 
 import hashlib
+import io
+import os
 import re
 import shutil
 import sys
+import tempfile
 import zipfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).parents[1]
 RESOURCES = ROOT / "src/sdr_hdr_profile_creator/resources"
@@ -790,6 +794,55 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("--onefile", builder)
         self.assertIn("--windows-console-mode=disable", builder)
         self.assertNotIn("--standalone", builder)
+
+
+class VersionTests(unittest.TestCase):
+    """One version, written once, and read by everything that reports one.
+
+    It was "0" for the life of the project, so no bug report, meter log or screenshot
+    could be matched to the code that produced it."""
+
+    def version(self) -> str:
+        from sdr_hdr_profile_creator import __version__
+
+        return __version__
+
+    def test_it_is_a_real_version(self):
+        self.assertRegex(self.version(), r"^[1-9]\d*\.\d+\.\d+$")
+
+    def test_pyproject_declares_the_same_version(self):
+        import tomllib
+
+        project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+        self.assertEqual(self.version(), project["version"])
+
+    def test_the_lockfile_records_the_same_version(self):
+        """Install.ps1 runs uv sync, which re-resolves a lock that disagrees with
+        pyproject and rewrites it on the user's machine instead of using the one
+        the release shipped."""
+        import tomllib
+
+        lock = tomllib.loads((ROOT / "uv.lock").read_text(encoding="utf-8"))
+        entry = next(p for p in lock["package"] if p["name"] == "virtual-hdr-osd-for-windows")
+        self.assertEqual(self.version(), entry["version"])
+
+    def test_a_startup_failure_log_names_the_version_first(self):
+        """That file is what gets pasted into a bug report."""
+        from sdr_hdr_profile_creator import __main__ as entry
+
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.dict(os.environ, {"LOCALAPPDATA": temp}), \
+             mock.patch.object(entry.sys, "platform", "linux"), \
+             mock.patch("sys.stderr", new_callable=io.StringIO):
+            try:
+                raise RuntimeError("boom")
+            except RuntimeError:
+                entry._report_startup_failure()
+            log = (Path(temp) / "Virtual_HDR_OSD_for_Windows" / "startup_error.log").read_text(
+                encoding="utf-8"
+            )
+        self.assertEqual(f"Virtual HDR OSD for Windows {self.version()}", log.splitlines()[0])
+        self.assertIn("RuntimeError: boom", log)
 
 
 class ReadmeAccuracyTests(unittest.TestCase):

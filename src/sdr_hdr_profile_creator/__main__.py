@@ -6,6 +6,8 @@ import sys
 import traceback
 from pathlib import Path
 
+from . import __version__
+
 
 def _run_app() -> int:
     from PySide6.QtCore import Qt
@@ -18,6 +20,7 @@ def _run_app() -> int:
     )
     app = QApplication(sys.argv)
     app.setApplicationName("Virtual HDR OSD for Windows")
+    app.setApplicationVersion(__version__)
     app.setOrganizationName("Local Display Tools")
     window = MainWindow()
     window.show()
@@ -29,7 +32,12 @@ def _report_startup_failure() -> None:
     try:
         root.mkdir(parents=True, exist_ok=True)
         log_path = root / "startup_error.log"
-        log_path.write_text(traceback.format_exc(), encoding="utf-8")
+        # The version first: a traceback without it cannot be matched to the code it
+        # came from, and this file is what gets pasted into a bug report.
+        log_path.write_text(
+            f"Virtual HDR OSD for Windows {__version__}\n\n{traceback.format_exc()}",
+            encoding="utf-8",
+        )
         details = f"The application could not start.\n\nDiagnostic log:\n{log_path}"
     except OSError:
         details = "The application could not start. Run Install.ps1 again and review its output."
