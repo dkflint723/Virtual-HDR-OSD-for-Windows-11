@@ -1,6 +1,6 @@
 # Virtual HDR OSD for Windows
 
-**Virtual HDR OSD for Windows** is a lightweight Windows 11 HDR profile editor designed as a software counterpart to the controls that many monitors disable when HDR mode is enabled.
+**Virtual HDR OSD for Windows** is an HDR calibration tool for Windows 11. It corrects a display's white balance, greyscale and tone through the MHC2 profile Windows applies to that display, the mechanism Windows HDR Calibration also uses. It starts from the figures the panel declares about itself; you can then adjust by eye against calibration patterns, or measure luminance, white balance and greyscale tracking with an optional colorimeter. It does not measure the panel's gamut, and it does not convert SDR into HDR: the name refers to the monitor menu, the OSD, that it stands in for.
 
 <img src="assets/tab1.png">
 
@@ -8,31 +8,169 @@
 
 Most HDR monitors lock or substantially reduce access to their physical OSD controls after switching to HDR. White balance, gamma, per-channel RGB balance, saturation, brightness, contrast, and related adjustments may become unavailable or much more limited. Virtual HDR OSD provides a practical **software pseudo-calibration layer** for making small subjective corrections to an existing Windows HDR ICC/ICM profile.
 
-The application is intended for visual fine-tuning: correcting a slight warm/cool cast, reducing a green or magenta bias, matching HDR white balance more closely to a preferred SDR appearance, or making small tonal changes that the monitor's HDR OSD does not expose.
+It began as a replacement for those OSD controls, and still does that: correcting a warm or cool cast, reducing a green or magenta bias, or making tonal changes the monitor's HDR menu does not expose.
+
+It now also generates its own calibration patterns. A guided sequence measures black level and peak luminance by the same disappearing-shape method Windows HDR Calibration uses, and writes those figures into the profile's MHC2 header. Sustained full-frame luminance is not among them: the brightness limiter dims a shape and its surround together, so that pattern found the signal's clipping point rather than a luminance. It is read from the panel's EDID instead. A further pattern sets the tone controls against a near-threshold target rather than by impression. Patterns are presented through a Direct3D swapchain in scRGB, so they address absolute luminance across the full ST.2084 range instead of being limited to the SDR white level.
 
 **In addition to the app, a watchdog has been integrated that fixes the bug causing incorrect switching between SDR and HDR profiles in Windows 11. This watchdog is standalone and can be distributed without the app. Feel free to use it. Below is a detailed explanation of how it works.**
 
 > [!NOTE]
-> Virtual HDR OSD is not a replacement for a colorimeter, spectrophotometer, reference display, or professional calibration software. Adjustments made by eye are inherently subjective. For an objective calibration workflow, use appropriate measurement hardware and color-management software.
+> The figures this tool writes come from three places, and they are not equally strong.
+>
+> **Read from the panel.** Peak, sustained and black luminance, and the display's primaries,
+> all come from its EDID. These are what the model was specified at, not your individual
+> unit measured, and they do not notice drift -- but they are exact, need no judgement, and
+> are the default.
+>
+> **By eye.** The optional test patterns work the way Windows HDR Calibration does. A
+> reading made by eye is genuinely useful, but it is not metrology: it depends on the
+> room, on adaptation, and on the observer.
+>
+> **Measured with an instrument.** The optional colorimeter path measures luminance,
+> white balance, and how the display tracks the PQ curve across a 33-point greyscale
+> ramp -- and corrects the last two. It does not characterise the gamut. That is a
+> limit of this app rather than of the method: every patch is clamped to colours inside
+> BT.709, so a reading describes what was asked for, not the panel's own primaries.
+> scRGB reaches wider colours through negative components, and on the one panel tried,
+> a QD-OLED, Windows passed them through: BT.2020's primaries sent that way read wider
+> than DCI-P3. The colour sweeps it measures are written to the meter log and never
+> applied, because the profile carries a matrix and three per-channel curves, and no such
+> thing can express an error that depends on both hue and saturation. A colorimeter also
+> needs a spectral correction matched to the panel type, and without one its chromaticity
+> readings can be several hundred kelvin out on a quantum-dot display.
+
+---
+
+## About this fork
+
+This is a modified version of **Virtual HDR OSD for Windows 11** by Mixomo:
+
+```text
+https://github.com/Mixomo/Virtual-HDR-OSD-for-Windows-11
+```
+
+It is distributed under the **GNU General Public License v3.0**, the same licence as the
+original. The original project's design intent, safety model and documentation are the
+basis for everything here.
+
+### What this fork changes
+
+**Correctness fixes**
+
+- `DISPLAYCONFIG_PATH_TARGET_INFO` was missing the SDK's `modeInfoIdx` member, making the
+  struct 44 bytes where Windows writes 48. `QueryDisplayConfig` overran its buffer, and
+  every field from the second display onward — including the adapter LUID and target id —
+  was read from the wrong offset, so multi-monitor systems addressed the wrong hardware.
+- The identity `chad` tag was written with eight values instead of nine, so every generated
+  HDR profile carried a malformed chromaticAdaptationTag.
+- Applying to one display uninstalled another display's working profiles.
+- The base profile chosen by the user was silently replaced by the current Windows default
+  on the first apply, so generated profiles carried the wrong colorimetry.
+- The standalone watchdog reverted every correction change made in the GUI within about
+  five seconds, because it decided solely from the state captured at install time. The
+  original project already documented "Off is authoritative"; this fork makes that true.
+- Profile filenames, and the records the watchdog reads, were keyed on the adapter LUID,
+  which Windows reissues on reboot. Every restart therefore orphaned a working profile in
+  the Windows colour folder and left a rival record the watchdog could read instead of the
+  current one. Both are now keyed on the monitor's device path.
+- A base profile that was truncated or missing a tag was merged tag by tag with the app's
+  own synthetic defaults, producing, for example, the display's real red tone curve beside
+  linear green and blue. Coupled tag groups are now all-or-nothing.
+- Applying skipped the display *association* whenever the generated profile's content was
+  unchanged. Installing a profile and associating it are separate operations, and removing
+  a profile drops it from the display's association list, so a correction change could
+  report success, verify its own read-back, and then be dropped by Windows.
+- The base profile was recorded by its ICC description rather than its filename. Windows
+  HDR Calibration describes a profile with slashes in the date while naming the file with
+  hyphens, so the recorded value was not merely wrong but an invalid path, and everything
+  that handed it back to Windows failed silently. Existing settings repair themselves on
+  load.
+- The watchdog could adopt one of the app's own working profiles as its HDR fallback,
+  making it restore already-edited data as though it were the source.
+- A watchdog instance that hung during startup kept the singleton lock forever, so every
+  healthy instance exited immediately and nothing enforced the user's setting — with no
+  log line to show why. Startup is now traced step by step, and an instance that has not
+  finished starting within 25 seconds logs the reason and exits so another can take over.
+
+**Behaviour**
+
+- Profiles are chosen per display from dropdowns of what is already installed, rather than
+  inferred, and the choices persist across restarts.
+- HDR can be switched per display from inside the app.
+- Applying compares against what Windows already has and skips redundant reinstalls.
+- Slider edits are saved shortly after you stop adjusting, rather than only on apply or on
+  a clean exit.
+
+**Hardening**
+
+Every DisplayConfig structure is size-checked against the Windows SDK at import. Neither
+`QueryDisplayConfig` nor `DisplayConfigGetDeviceInfo` validates the caller's layout — the
+first takes an element count, the second trusts the size in the header — so a wrong struct
+is never rejected, it just corrupts memory quietly. That is exactly how the bug above went
+unnoticed.
+
+The test suite also refuses to run unless every Windows call that can change the machine's
+colour configuration is faked, and fails when a new one is added without being faked. That
+guard was written after the tests were found to be calling the real association API against
+a fabricated display.
+
+**Divergence from the original's documented behaviour** — see
+[Pinning the SDR and HDR profiles](#pinning-the-sdr-and-hdr-profiles). The original states
+that automatic mode switching "only attempts to restore the SDR profile that Windows already
+had associated with that display." This fork additionally lets you pin a specific SDR
+profile. It still never creates, edits or overwrites an SDR profile, and the *Auto* setting
+reproduces the original behaviour exactly.
+
+---
 
 ---
 
 ## Recommended workflow
 
-The recommended starting point is a profile created with **Windows HDR Calibration** from Microsoft.
+A profile needs to know what the display can do. There are two ways to supply that, and either
+produces a complete profile.
 
-1. Enable HDR for the target display in Windows 11.
-2. Run **Windows HDR Calibration** and complete its black-level, peak-luminance, full-frame luminance, and color-saturation calibration.
-3. Save the HDR calibration profile generated by Windows.
-4. Start Virtual HDR OSD for Windows.
-5. Select the correct monitor under **Target Display**.
-6. Click **Import HDR Profile** and load the Windows HDR Calibration `.icm` profile.
-7. Enable **Live Apply** if you want every adjustment to be reflected on the display automatically.
-8. Make small tonal and color corrections.
-9. Use **Compare SDR / HDR** when useful to compare white balance, overall color appearance, and perceived brightness between the two Windows modes.
-10. When satisfied, use **Export Edited HDR Profile** to save the result.
+- **Build it from the display itself.** Press **Calibrate Display** in the top bar, or pick
+  the first entry in the **HDR** dropdown, *Build from this display's own panel data*. The
+  panel's luminance *and* its primaries are read from its EDID, and both go straight into
+  the profile. Nothing to download.
 
-Windows HDR Calibration is the preferred base because it is specifically designed to calibrate HDR-capable displays under Windows 11. Virtual HDR OSD is best treated as the final subjective fine-adjustment stage rather than the primary HDR calibration stage.
+  Primaries come from EDID rather than DXGI on purpose. `DXGI_OUTPUT_DESC1` reports
+  whatever ICC profile is currently associated, not the panel: on one display it answered
+  (0.6746, 0.3144) for red under one profile and (0.6486, 0.3312) under the next, each
+  matching that profile's own colorant tags, while the EDID said (0.6836, 0.3047)
+  throughout. A profile written from DXGI's answer becomes DXGI's next answer. DXGI is
+  kept only as a fallback for a panel whose EDID cannot be read.
+- **Start from a profile you already have.** Anything from Microsoft's free **Windows HDR
+  Calibration**, or from calibration software such as Calman or DisplayCAL, works as the base.
+
+The second is worth preferring when the profile was made with a meter, because a measurement
+describes your individual unit where the panel's own figures describe the model. Everything else
+runs inside the app: HDR is switched from the top bar, and both profiles are chosen from dropdowns
+of what is already installed -- no round trip through Windows Settings, no import/restart cycle.
+
+> [!TIP]
+> The **Getting Started** button in the top bar walks you through this entire
+> sequence one step at a time, and checks your progress as it goes: it tells you
+> whether HDR is actually active, whether a base profile has been imported, and
+> whether Live Apply is on. It opens automatically the first time you run the app.
+
+1. Start Virtual HDR OSD for Windows.
+2. Select the correct monitor under **1 · Target Display** and switch **HDR On** next to it.
+3. In **2 · Profiles for this Display**, choose where the colour data comes from: the
+   *Build from this display's own panel data* entry, or an installed profile of your own.
+4. Set the **SDR** dropdown (see below). If another program calibrates your SDR, choose *Leave unmanaged*.
+5. Use **Import…** only for a file that is not installed in the Windows colour folder.
+6. Enable **Live Apply** if you want every adjustment to be reflected on the display automatically.
+7. Make small tonal and color corrections. **Reset Sliders** returns everything to neutral, and **Revert** reloads the base profile untouched.
+8. Flip the **HDR** switch in row 1 off and on when you want to compare white balance, overall color appearance, and perceived brightness against the SDR desktop.
+9. Press **Apply Edits** to install and associate the result.
+10. Turn on **Lock Profile** so Windows cannot drop the association on the next mode change.
+11. Use **Export Copy…** to save a backup.
+
+Virtual HDR OSD is best treated as the final fine-adjustment stage. A profile built from the
+panel's own reported figures is a sound starting point, but those figures describe the model as
+specified, not the unit in front of you; a meter-made base still measures better.
 
 ---
 
@@ -78,18 +216,113 @@ The builder intentionally does **not** create a second standalone-folder distrib
 
 # Interface overview
 
-The interface is deliberately divided into a small number of functional areas:
+The top bar is numbered. **Calibrate Display**, above it, writes a profile and makes it the
+Windows default on its own; everything else that writes to your Windows colour
+configuration lives at the right-hand end of row 3:
 
-- **Target Display** — selects and monitors the physical display.
-- **HDR Profile Application** — controls profile application and automatic SDR/HDR transitions.
-- **SDR-in-HDR Gamma Correction** — optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys.
-- **HDR Calibration Profile** — imports, exports, and applies ICC/ICM profiles.
-- **Tone & Brightness** — fine tonal controls.
+- **1 · Target Display** — selects the display, and turns its HDR on or off without leaving the app.
+- **2 · Profiles for this Display** — pins which installed profile is this display's SDR profile and which HDR profile the sliders edit. Remembered per monitor, across restarts.
+- **3 · Edits & Apply** — Live Apply, automatic mode switching, and edit management on the left; the two buttons on the right are the ones that write to Windows.
+
+Below that:
+
+- **Tone & Brightness** — fine tonal controls, plus the **SDR-in-HDR Gamma Correction** dropdown (optional Windows piecewise-sRGB → pure gamma 2.2 correction, with automatic SDR-white readback and global hotkeys).
 - **Color & White Balance** — white-point, chroma, and RGB fine adjustments.
-- **Watchdog Settings…** — installs/removes the independent association watchdog and persistent gamma hotkeys.
+- **Getting Started** — the step-by-step walkthrough, with live progress checks.
+- **Measure…** — measures the display with a colorimeter instead of by eye.
+  Needs ArgyllCMS installed separately; see *Measuring with a colorimeter* below.
+- **Lock Profile** — the switch in row 3. Installs the independent association watchdog, which
+  puts the HDR profile back whenever Windows drops it, and keeps Alt+1 / Alt+2 working with the GUI
+  closed. It reports whether the watchdog is actually running rather than what was last clicked, so a
+  cancelled or failed install leaves it off rather than lying about it. The installer needs no
+  administrator rights; if Windows refuses its scheduled task it says so and uses a plain startup
+  entry instead.
+- **Watchdog…** — the same install/remove actions with a fuller explanation, and the only
+  way to force a reinstall while the watchdog is already running.
+- **Help** — the full usage guide, control reference, and recovery notes.
+
+Two bars run along the bottom:
+
+- **Activity bar** — the HDR profile Windows currently has associated, whether this window owns the Alt+1 / Alt+2 hotkeys, and whether your sliders differ from what is installed.
 - **Status** — reports profile operations, mode changes, and errors.
 
 Almost every interactive control has a tooltip. Hover over a button, switch, slider, numeric field, or status element for a concise explanation.
+
+## Pinning the SDR and HDR profiles
+
+Row 2 lists every ICC/ICM profile installed on the PC, so both choices are made
+in the app rather than through Windows' colour management dialogs.
+
+**HDR** selects the profile the sliders edit. Choosing one loads it as the base
+immediately — no import, no restart, no reapplying your settings afterwards. The
+app's own working profiles are deliberately excluded from this list, so edits can
+never compound on already-edited data.
+
+**SDR** decides what happens when Windows drops back to SDR:
+
+| Setting | Behaviour |
+|---|---|
+| *Auto* (default) | Restores whatever profile Windows had associated when the app last observed it. |
+| *Leave unmanaged* | The app never touches the SDR association at all. |
+| A specific profile | That profile is restored on every HDR → SDR transition. |
+
+Both choices are stored per monitor and survive restarts. They are keyed on the
+monitor's device path rather than its adapter LUID, because Windows reissues
+adapter LUIDs on reboot — anything keyed on those would be lost every restart.
+
+> [!NOTE]
+> **Known limitation.** The device path includes the port the monitor is plugged
+> into, so moving a display to a different output makes Windows report it as a new
+> device. Its pinned SDR and HDR choices will not follow, and its working profile
+> pair is regenerated under a new name — the old pair is reclaimed automatically,
+> so nothing accumulates, but the two dropdowns need setting again. Re-run the
+> watchdog installer afterwards, as the original project already advises after any
+> monitor or GPU topology change.
+
+> [!NOTE]
+> **This is the one place this fork goes beyond the original project's documented
+> behaviour.** The original restores only the SDR profile Windows already had associated;
+> pinning lets you nominate a different installed profile instead.
+>
+> What has not changed: no SDR profile is ever created, edited or overwritten — only the
+> *association* is set, and only to a profile already installed in the Windows colour
+> folder. The association is touched at exactly one moment, an HDR → SDR transition with
+> Automatic Mode Switching enabled, and never when you pick something from the dropdown.
+> Choosing **Auto** reproduces the original behaviour exactly, and **Leave unmanaged**
+> is stricter than the original.
+
+> [!IMPORTANT]
+> **If another program calibrates your SDR** — Calman, DisplayCAL, i1Profiler and
+> the like — which setting to use depends on what that program actually installed.
+>
+> Open its profile from the Windows colour folder and look for a **`vcgt`** tag.
+>
+> - **`vcgt` present.** The calibration lives in a 1D LUT that a resident loader
+>   pushes into the GPU. Choose *Leave unmanaged*: a second program re-associating
+>   profiles behind that loader's back is how calibration silently breaks. Note
+>   that restoring an ICC association does **not** reload a VCGT — that is the
+>   loader's job, never this app's.
+> - **No `vcgt`.** The profile is a pure characterisation, which is what you get
+>   when the calibration was written into the monitor's own hardware LUT. Nothing
+>   is loading anything at runtime, so there is no loader to conflict with, and
+>   *pinning that profile* is the more reliable choice: it guarantees the
+>   association comes back after an HDR → SDR switch.
+>
+> Either way, and on *Auto* too, the app reads what Windows already has and skips
+> the write when it matches, so it never re-asserts an association needlessly.
+
+## Knowing what is actually applied
+
+The activity bar answers the two questions that are otherwise invisible:
+
+- **Active HDR profile** is read back from Windows, not from what the app last
+  wrote. If a previous session or the watchdog left a different variant
+  associated, that is what you will see. The correction status shown next to it
+  is derived from the active filename, so it cannot contradict reality.
+- **Unapplied edits** appears only once you have changed a slider since the last
+  apply. A freshly opened window shows *Not applied this session* instead, which
+  is a different thing. The **Apply Edits** button gains a `•` marker whenever
+  there is something to apply.
 
 ---
 
@@ -117,7 +350,7 @@ Windows mode: SDR
 
 The application is an HDR editor. SDR is exposed primarily so that the user can compare modes and so that profile associations can be handled safely during an SDR/HDR transition.
 
-## Refresh Displays
+## Refresh
 
 Rescans the active Windows display topology.
 
@@ -129,25 +362,26 @@ Use this after:
 - waking a display that was unavailable;
 - Windows fails to show the expected monitor.
 
-## Compare SDR / HDR
+## HDR switch
 
-Sends the standard Windows HDR toggle shortcut:
+Turns Windows HDR on or off for the display selected in the same row.
 
-```text
-Win + Alt + B
-```
+This targets that specific display, unlike `Win + Alt + B`, which only ever
+toggles whichever display Windows currently considers the active one — on a
+multi-monitor system the shortcut frequently switches the wrong panel. Flipping
+this switch is also the quickest way to compare the HDR result against SDR.
 
-This provides a convenient way to compare the current HDR appearance with SDR.
+Virtual HDR OSD does **not** create an SDR profile. On an HDR → SDR transition it
+only restores the SDR profile you pinned in row 2, or the one Windows already had,
+and does nothing at all when SDR is set to *Leave unmanaged*.
 
-Virtual HDR OSD does **not** create a SDR profile. When its automatic mode handling is enabled, it only attempts to restore the SDR profile that Windows already had associated with that display.
-
-## Windows Display Settings
+## Display Settings
 
 Opens the main Windows display settings page.
 
 Use it for Windows-level display configuration that is intentionally outside the scope of Virtual HDR OSD.
 
-## Windows Color Profile Folder
+## Profile Folder
 
 Opens the Windows system color-profile directory, normally:
 
@@ -170,13 +404,14 @@ Virtual_HDR_OSD_<display>_On.icm
 
 The names are stable and reused. Slider changes, Live Apply, gamma-correction changes, and SDR/HDR transitions replace these working copies instead of creating timestamped profiles. The original HDR profile remains the source and safe fallback.
 
-# HDR Profile Application
+# Apply to Windows
 
 This section controls when the edited HDR profile is generated, associated, and reapplied.
 
-## Reapply Profile
+## Reapply
 
-Immediately regenerates and reapplies the current edited HDR profile.
+Forces a full reinstall of the current settings, bypassing the change detection
+described below.
 
 This is useful when:
 
@@ -186,6 +421,26 @@ This is useful when:
 - you want to explicitly force the current settings back onto Windows.
 
 It does not reset any sliders.
+
+### Change detection
+
+Applying does not blindly reinstall. Before touching Windows, the application
+compares the profile it just generated against the copy already installed in the
+Windows colour directory, ignoring the ICC creation timestamp so that identical
+settings compare equal at any time of day.
+
+If they match, nothing is uninstalled, rewritten, or reinstalled — only the
+default association is set. The practical consequences:
+
+- Toggling the SDR-in-HDR correction with **Alt+1** / **Alt+2** is a single
+  association call, because the *Correction Off* and *Correction On* profiles are
+  both already installed. Neither is regenerated.
+- Pressing **Apply Edits** with nothing changed is close to free.
+- Live Apply only pays the reinstall cost for edits that genuinely alter the
+  profile.
+
+**Reapply** exists precisely for the case where the installed bytes are correct
+but the *association* has been lost, which change detection cannot see.
 
 ## Live Apply
 
@@ -215,17 +470,45 @@ After Windows completes the transition back to HDR, Virtual HDR OSD reapplies th
 
 This is intended to reduce profile-association problems around repeated `Win + Alt + B` transitions.
 
+## Restore Windows Profile
+
+Puts the selected display back on the profiles Windows had before this app first
+changed them, and keeps it there.
+
+It asks first, naming exactly what it will restore. Then it:
+
+- makes Windows' own HDR profile the default again, or leaves the display with no HDR
+  profile if that is what Windows had;
+- sets the SDR default back, unless SDR is set to *Leave unmanaged*;
+- uninstalls this app's two working profiles, so nothing can put them back;
+- tells the watchdog to hold Windows' profile rather than the calibration. This works
+  with any installed watchdog, including one installed before this button existed.
+
+Your sliders and measurements are kept. Until you press **Apply Edits**, **Reapply** or
+**Calibrate Display**, nothing changes the display: Live Apply, Automatic Mode
+Switching, the Alt+1 / Alt+2 hotkeys and the correction dropdown are refused with a
+message saying why, measuring and the test patterns are refused, and an SDR ↔ HDR switch
+leaves Windows' profile where it is. The restore survives a restart.
+
+What Windows had is recorded in `original_profiles.json`, beside the settings file, the
+first time the app sees a display and before it changes anything. That record is never
+overwritten. If the display already carried one of this app's profiles when the record
+was first taken — an upgrade from a build before this button existed — the app falls back
+to the profile it was editing from and says so in the confirmation. With nothing to go
+on, it removes its own profile and lets Windows choose.
+
 ---
 
-# HDR Calibration Profile
+# Profiles for this Display
 
-## Profile path
+## SDR and HDR pickers
 
-Shows the path of the HDR ICC/ICM profile currently loaded as the editable base.
+Two dropdowns listing every colour profile installed on the PC. See
+[Pinning the SDR and HDR profiles](#pinning-the-sdr-and-hdr-profiles) above for
+what each setting does. Hover the HDR picker to see the full path of the profile
+currently loaded as the editable base.
 
-The field is informational and read-only.
-
-## Import HDR Profile
+## Import…
 
 Loads an `.icm` or `.icc` HDR profile.
 
@@ -237,17 +520,50 @@ When a profile generated by Virtual HDR OSD is imported again, the application c
 
 Importing a profile does not mean that every arbitrary third-party ICC parameter can be losslessly translated into the application's slider model. The controls represent Virtual HDR OSD's correction layer.
 
-## Export Edited HDR Profile
+## Export Copy…
 
-Writes the current edited HDR profile to an `.icm` or `.icc` file.
+Writes the current edited HDR profile to an `.icm` or `.icc` file. It does not
+install anything or change any association.
 
-Use this once the desired appearance has been reached.
+Use this once the desired appearance has been reached. Because the exported file
+embeds your exact slider positions, re-importing it restores them precisely,
+which makes an export a reliable backup before experimenting further.
 
-## Apply HDR Profile Now
+## Revert
+
+Discards your slider edits and reloads the base profile you imported, exactly as
+it is on disk. Asks for confirmation first, and cannot be undone.
+
+Use it when a session of adjustments has drifted somewhere you do not want, and
+you would rather restart from the Windows HDR Calibration result than try to
+reverse each control.
+
+## Reset Sliders
+
+Returns every control to its neutral default, keeping the loaded base profile.
+Asks for confirmation first, and cannot be undone.
+
+The difference from **Revert**: this neutralises your correction layer
+while leaving the base profile selected, whereas Revert re-reads the file and
+restores whatever slider state that file implies.
+
+Neither button changes anything in Windows on its own — apply afterwards if you
+want the result installed.
+
+## Apply Edits
 
 Generates the current HDR profile, installs/associates it for the selected display, and applies it immediately.
 
 Use this when **Live Apply** is disabled or whenever an explicit final application is desired.
+
+> [!NOTE]
+> **Apply Edits** applies the sliders exactly as they currently stand. It does not
+> re-read the profile selected in the HDR picker, so clicking it can never
+> silently discard adjustments you have just made. To deliberately go back to the
+> file on disk, use **Revert**.
+
+If Windows is not in HDR mode for the selected display, applying is refused with
+an explanatory message rather than silently doing nothing.
 
 ---
 
@@ -291,10 +607,17 @@ The dropdown contains:
 - **200 nits / Brightness 30** — upstream published mapping for Windows SDR Content Brightness 30.
 - **300 nits / Brightness 55** — upstream published mapping for Windows SDR Content Brightness 55.
 - **400 nits / Brightness 80** — upstream published mapping for Windows SDR Content Brightness 80.
-- **Unspecified** — compatibility entry matching the upstream download list; when an explicit Windows white level is unavailable, Virtual HDR OSD uses the upstream generator's 200-nit default basis.
-- **SDR** — compatibility entry matching the upstream download list, using the traditional 80-nit SDR reference basis.
 
 `Auto` is the recommended choice because it avoids manually duplicating the Windows setting and can use the actual current reference-white value while the GUI is running.
+
+Two entries from the upstream download list, `Unspecified` and `SDR`, are no longer offered.
+They were filenames rather than settings anyone would choose. A saved profile or state file
+naming one still resolves to the same basis it was built with — 200 and 80 nits
+respectively — so nothing already generated changes behaviour.
+
+The correction's target gamma comes from the **Gamma / Midtone Response** slider rather
+than being fixed at 2.2. Above diffuse SDR white the correction is exact identity at every
+setting.
 
 ## Important limitation: native HDR content
 
@@ -309,9 +632,375 @@ Alt + 2    Re-enable the selected correction
 
 While Virtual HDR OSD is open, the GUI registers these hotkeys when they are free. If the standalone watchdog is already running, it owns the same global hotkeys and the GUI synchronizes its dropdown/state through the shared runtime state instead of competing for duplicate registrations. The watchdog keeps the hotkeys available after the GUI closes.
 
+Because a hotkey chord can only belong to one process at a time, registration
+legitimately fails in that situation. The activity bar therefore reports which
+side owns them:
+
+```text
+Hotkeys: Alt+1 / Alt+2 active          this window handles them
+Hotkeys: not owned by this window      the watchdog, or another app, handles them
+```
+
+Hover the indicator for the specific reason. If registration failed for a reason
+other than the watchdog — another application claimed `Alt+1` first, for example —
+the status bar says so explicitly rather than leaving the keys silently dead.
+
 **Off is authoritative:** choosing `Off` (or pressing `Alt + 1`) immediately applies an uncorrected companion profile. The internal mode watchdog and the standalone watchdog are forbidden from restoring a previously corrected profile while the shared correction state is Off. `Alt + 2` is the only hotkey that re-enables the selected correction.
 
+### Which side wins
+
+Two processes can change the correction: this app, and the standalone watchdog. Both
+record when they last acted — the app in `gamma_hotkeys.json`, the watchdog in its own
+`State.json` — and **the more recent decision wins**.
+
+That comparison is what makes the guarantee above real. The watchdog re-asserts the HDR
+association every few seconds, and it used to decide purely from the state it captured when
+it was installed. A correction change made in the GUI was therefore undone within about five
+seconds, permanently and with no explanation, while the dropdown still showed the user's
+choice. The watchdog now honours whichever intent is newer, and prefers the profile
+filenames the app most recently published, so a pair regenerated under new names (which
+happens when the adapter LUID changes) is still followed.
+
+If the app is closed, or its runtime file is missing or unreadable, the watchdog falls back
+to its own captured state exactly as before.
+
 While the GUI is open, **Auto** reads the current Windows SDR white level and regenerates the correction from that value. The app maintains only two fixed per-display working profiles: **Correction Off** and **Correction On**. Their filenames are reused rather than timestamped, so repeated Live Apply operations or SDR/HDR transitions do not accumulate new profiles in Windows. After the GUI closes, the standalone watchdog switches between those last prepared Off/On working profiles with Alt+1 and Alt+2.
+
+---
+
+# Measuring with a colorimeter
+
+Everything the app can work out on its own is *declared* rather than measured: the EDID
+carries the luminance and the primaries the panel's model was specified at. That is not
+your individual unit measured, and it does not notice that a panel drifts. A colorimeter
+closes part of that gap -- luminance, white balance and greyscale tracking, but not
+the gamut; see below.
+
+## What you need
+
+**ArgyllCMS**, from [argyllcms.com/downloadwin.html](https://www.argyllcms.com/downloadwin.html).
+Download the **executable** distribution, not the source, and unzip it somewhere without
+spaces in the path -- Argyll's own documentation warns against Program Files for that
+reason. `D:\Argyll` is a good choice. Point the app at the `bin` directory inside it, or
+put that directory on your PATH.
+
+Argyll is run as a separate program, never copied into this project. That keeps its
+licence at arm's length, and means its maintained instrument code does the colour
+matching rather than a reimplementation of it here.
+
+## Drivers
+
+Most likely none. Instruments in the i1Display 3 family -- i1Display Pro, ColorMunki
+Display, and the Calibrite ColorChecker Display range -- enumerate as USB HID devices and
+work on the driver Windows already has. Argyll's warning about installing its libusb
+driver, and about that driver replacing the manufacturer's, applies only to non-HID
+instruments.
+
+Where no driver change is needed, other calibration software keeps working exactly as
+before. Only one program can hold the instrument open at a time, so close the other one
+before measuring.
+
+## Running a measurement
+
+**Measure…** in row 3. The display must be in HDR, because the patches are
+shown in absolute luminance. The first time, you will be asked where ArgyllCMS is; the
+answer is remembered per machine.
+
+Before anything happens you are told how many patches there are, roughly how long it
+takes, and that Esc stops it. That is deliberate: once the run starts the screen is black
+with a single patch on it and nothing else, because any text on the frame is light the
+meter would read along with the patch. Esc cancels at any point -- a cancelled run
+changes nothing at all.
+
+A green target appears first, exactly where the patches will be. Put the meter flat on
+the glass inside it; the app reads the target until it sees green at a plausible
+brightness, so it can tell you the meter is in place rather than leaving you to guess.
+Press Enter to start once it is.
+
+The run is a Calman-style sweep: the six patches the profile is built from, then a
+33-point greyscale ramp spaced evenly in PQ, then five saturations of each of the six
+hues. About four minutes in total. The ramp is dense at the bottom on purpose -- in HDR
+the bottom two stops are where a 5% step in signal is an enormous step in luminance, and
+where most displays go wrong.
+
+**Peak is measured on a 3% window, everything else on 10%**, because peak is a
+small-highlight figure: the limiter responds to total output, so the largest number a
+panel reaches is one it only has to hold over a few percent of the screen. That is what
+the EDID reports. Asking a PG32UCDM for full drive at every size gives 969, 974 and 978
+nits at 1%, 2% and 3% -- within 1% of each other, because the limiter does not engage
+down there -- then 760 at 5%, 464 at 10%, and 243 full screen. So 3% is the *largest*
+window that still reaches peak, which makes it the one to use: the most light for the
+instrument, and no limiting. 978 against a declared 1015 is 96%, and the rest is about
+what an uncorrected colorimeter gives up on quantum-dot primaries.
+
+The same drive is measured on the 10% window too and reported beside it, because a
+display with a brightness limiter has two peaks and quoting one invites the other to look
+like a fault. The green target is drawn at the *smallest* window in the run rather than
+the common one -- a meter centred well enough for the 10% box can still overhang a box a
+third of its size, and a patch edge under the aperture reads part black.
+
+When it finishes, the measured peak, black and white balance replace what the profile
+had, and the greyscale ramp is turned into the three per-channel curves the profile
+carries. Those do two things a single set of RGB trims cannot: they make a code deliver
+the luminance ST.2084 says it means, all the way up the range, and they hold grey to the
+reference white at every level rather than only at the one the trims were solved at.
+Above the measured peak nothing is corrected -- the display is rolling off there by rules
+that were not measured, and replacing that with a hard clip would be worse than leaving
+it alone -- so the correction fades out between the measured peak and the top of the
+range. The primaries are deliberately left alone. Every patch is clamped to non-negative
+scRGB, which keeps it inside BT.709, so a measured "red" is BT.709 red as the display
+renders it rather than the display's own primary. On a QD-OLED whose EDID declares its green
+at (0.2698, 0.6859), the green patch read (0.3141, 0.5892) -- 0.0141 from BT.709 green and
+0.0967 from the declared one. Those readings are exactly right for white balance, which acts
+on the signal this app sends, and useless as a description of the gamut. The clamp is the
+limit, not scRGB: BT.2020 green, sent with the negative components it needs, read
+(0.2524, 0.6983) on the same panel, wider than its EDID claims. Press **Apply Edits** to
+write the result out.
+
+## Sustained luminance
+
+**Measure Sustained…**, in the Panel Luminance card. Everything else in the profile is
+measured; this was the one figure still taken on trust, from the EDID's declared
+frame-average. On the panel this was built against that reads 265.05 against the 243 the
+display actually holds.
+
+The whole screen goes white and is read until two consecutive readings agree, which is
+what *sustained* means -- a fixed timer is either long enough for the worst panel or too
+short for some, and a figure read before it settles is not a peak, it is a number on the
+way down. There is a hard ceiling of eight readings, about half a minute, whatever the
+readings do: this is the only patch in the app that lights every pixel at once, which is
+the stress case for an emissive panel, so "keep going until it settles" needs an end even
+when it never comes. A run that hits the ceiling is reported as an upper bound rather
+than as a measurement.
+
+It is kept out of the main run deliberately -- it is slow, it does not change between
+runs the way the greyscale does, and it is not something to repeat every time somebody
+checks their work. There is no placement target for it either: every pixel is lit, so it
+is the one measurement where aim does not matter.
+
+## Displays whose channels do not add up
+
+The white balance used to be solved from red plus green plus blue equalling the white
+measured beside them, and refused when they did not. Some displays never satisfy that. A
+QD-OLED measured here reads its saturated primaries far brighter than their share of
+white -- 2.30x, 2.26x and 2.04x for red, green and blue -- so the three sum to 2.11 times
+the white patch. It is repeatable to within 1% across consecutive readings, identical on
+both of the instrument's calibration tables, and not a brightness limiter: a yellow patch
+at 213 nits is unaffected while cyan at a predicted 176 is not. It weakens as level rises
+-- 111% additivity error at 100 nits, 82% at 200, 17% at 300 -- but on this panel there is
+no level where it comes inside the 8% the old check allowed.
+
+That is now solved rather than refused. The primaries' *chromaticities* are steady and
+close to the BT.709 the patches ask for, so the direction of each channel survives even
+though its magnitude does not. Only the magnitudes are rebuilt, from the one patch a
+saturated-colour boost cannot touch: white. Solving for the three luminances that make
+the measured white out of the measured primary directions gives contributions that add up
+to it by construction, and a white balance solved through those needs no additivity
+assumption at all.
+
+On the panel above that recovers **R -20.9%, G 0.0%, B -0.4%** -- within half a percent of
+what the same display returned on the rare runs that did satisfy the old check. On a
+display whose channels do add up, the solve returns exactly the luminances that were
+measured, so nothing changes. The run reports the departure, because a display doing this
+is worth knowing about; it no longer refuses over it.
+
+What is still refused is a set where the three channels are the same colour, or where the
+white sits outside the triangle its own primaries make. Neither is a display being
+unusual -- both mean a patch was misread, and no amount of solving recovers three
+directions from one.
+
+## When the display gets dimmer as you ask for more
+
+A curve corrects a display by reversing its response, and a response that goes backwards
+cannot be reversed -- there is no single drive that produces a level the display reaches
+twice. Measured on a PG32UCDM in one of its HDR presets: asked for 47.5 nits it emitted
+106.6, and asked for 58.5 it emitted 61.9. Everything below about 50 nits came out at
+roughly 2.2x what was asked for, then dropped back to correct.
+
+That was the monitor, not the profile and not the instrument. The LUT in the applied
+profile is smooth and near-identity across the whole region; three of the instrument's
+integration modes give the same numbers to three significant figures; and 10% and 25%
+windows put the step in the same place, so it is not driven by average picture level
+either. **It is a property of the monitor's HDR mode**, and changing that mode removed it
+completely -- the ramp became monotonic and the additivity error fell from 111% to
+around 1-3%. Two different presets on the same panel both measured clean afterwards, so
+this is not about finding one blessed mode: it is about the run being able to tell you
+that the one you are on is not calibratable.
+
+So the app measures the reversal, refuses to build a curve from it, and says which
+setting to go and change. An inverse built from a running maximum does not fail on a
+ramp like that; it flattens the reversal and produces a curve that is wrong across
+exactly the range the ramp puts most of its points in. That is worth refusing loudly.
+
+**EOTF tracking is unaffected by a refused white balance.** The ramp is neutral patches whose luminance is
+read directly. Per-level grey *balance* is approximate on a display that boosts saturated
+colour, because it is apportioned through those same primaries: the drift it reports is
+real, but the target it is held to inherits the spread between those factors.
+
+## Measuring more than once
+
+The white balance trims are folded into the correction already applied rather than
+replacing it, because a measurement describes the display *as currently corrected*. That
+makes a second run a check on white: a white balance that worked re-measures as neutral,
+leaves the trims untouched and reports "White balance verified", while one that fell
+short tightens and converges. The word covers white alone. The same run re-measures the
+greyscale and replaces its curves whatever white does, as the next paragraph explains.
+
+The greyscale curves work the other way round, and deliberately. Each ramp point is
+paired with the code that was actually sent for it -- after whatever curve was already in
+force -- so what is stored describes the panel itself rather than the correction sitting
+on top of it. A later run therefore *replaces* it instead of stacking on it, which is
+what stops two passes doubling a correction that only needed applying once. Measured
+against a simulated display, one pass takes a 17% luminance error to 0.1%, and three
+further passes leave it there.
+
+**Do not clear the calibration before measuring again.** It is the right habit with
+software that writes into the display, and the wrong one here. Each run is folded into
+what is already applied, so a second run refines rather than repeats -- and Reset Sliders
+clears the measured greyscale correction along with the trims, because the two are
+paired. The correction records what each channel delivered for the code the trims sent
+it; keeping one without the other describes a display that no longer exists. Measured on
+a PG32UCDM as a 15% shortfall through the midrange after a reset that zeroed
+(-16.59, 0, -5.01) and kept the correction solved under it.
+
+It also means the correction in force has to still be valid. **If you change anything on
+the monitor -- picture mode, colour temperature, brightness, HDR mode -- press Reset
+Sliders before measuring again.** Reset Sliders asks separately about the measured
+greyscale correction, and keeps it unless you say otherwise; after a change to the
+monitor itself, discard it. The old correction was solved for a display that no
+longer exists, and folding a new measurement into it gives a result that describes
+neither. Reset, rebuild from the panel, apply, then measure.
+
+## What gets measured
+
+Six patches, each shown in the same centred window covering a tenth of the screen, on
+black. Holding the window size constant matters on an emissive panel, where the
+brightness limiter responds to total output and a full-screen patch would not measure the
+same thing as a small one.
+
+| Patch | What it establishes |
+|---|---|
+| Black | The panel's real black floor, and with peak white its contrast |
+| Peak white | Actual peak luminance, at the window size stated beside it |
+| Reference white, red, green, blue | The white balance correction, shown at 100 nits so the brightness limiter is not engaged |
+
+Black is measured first, while the panel is still cool: a long bright sequence warms an
+emissive display, and the black floor is the reading most disturbed by that.
+
+## When a reading is refused
+
+A meter that is unplugged, aimed at the wrong part of the screen, or reading through a
+closed diffuser does not fail -- it returns numbers. Those numbers would reach the profile
+as peak luminance and display primaries, where nothing afterwards could tell them from
+real measurements.
+
+So a set of readings is checked for things that are physically impossible rather than
+merely surprising, and refused outright if any of them hold: a peak outside 40-10,000
+nits, a black that is more than 2% of white, a chromaticity outside the xy plane, or three
+primaries spanning a gamut larger than BT.2020 or narrower than a tenth of sRGB. A
+surprising reading may well be the panel; an impossible one is not.
+
+A failed patch ends the run rather than being skipped. Primaries measured without their
+matching white are not comparable with each other, and a peak carried over from an earlier
+attempt is not a measurement of anything.
+
+## The first failure you are likely to see
+
+> The meter's sensor is in the wrong position. Slide the ambient filter off the lens.
+
+i1d3-family instruments have a rotating ambient diffuser that has to be moved off the lens
+before they can read a screen. With it closed, `spotread` retries forever rather than
+giving up -- 46 MB of the same complaint in 200 seconds during development -- so the app
+stops at the first occurrence and says what to do about it.
+
+---
+
+# Calibration patterns
+
+**Test Patterns…** in row 3 fills the display with calibration patterns. The screen becomes
+a measuring instrument while it is open: black everywhere except a window covering a tenth
+of the screen area, with guidance held at 12 nits against one edge.
+
+The window matters. On an emissive panel a full-screen pattern engages the brightness
+limiter in proportion to how bright the pattern is, so a dark pattern and a bright one are
+measured under different conditions and two readings minutes apart are not comparable.
+Every pattern is confined to the same window area to hold that still. Maximum full-frame
+luminance is the sole exception, because filling the screen is what that figure means.
+
+Patterns are rendered in scRGB through a Direct3D 11 flip-model swapchain and specified in
+absolute nits. On an HDR output scRGB 1.0 is 80 nits, so a level maps directly and patterns
+reach the full ST.2084 range. On an SDR output 1.0 is that display's reference white,
+absolute luminance is not addressable, and levels are shown as a ratio instead — the view
+says which of the two applies rather than implying precision it does not have.
+
+Frames are built in device pixels. Qt reports logical units, so on a 125% display a
+fullscreen widget reports 3206x1803 for a 3840x2160 client area; presenting at the smaller
+figure makes the compositor stretch every frame, which resamples the gamma-match lines and
+destroys the property that pattern depends on.
+
+## The guided run
+
+The view opens on a 3-step sequence and states which step it is on.
+
+| step | what it measures | how |
+| --- | --- | --- |
+| Black level | minimum luminance | lower a shape until it disappears |
+| Peak white | peak luminance | raise a shape until it stops separating from its surround |
+| Tone tracking | nothing — sets Gamma, Midtone Brightness and Contrast | |
+
+The first two move the *pattern* rather than the display. Nobody can say what luminance a
+patch is, but anybody can say whether a shape is visible, so the level at which it
+disappears is the reading. This is how Windows HDR Calibration works, and it means the same
+patterns can later be driven by a meter.
+
+`Enter` records a reading and advances. On the last step it opens the results, where `Enter`
+writes both readings into the profile's MHC2 header. Leaving without applying does not lose
+them: each is written into the editor as it is taken, and the next Apply Edits writes them
+out.
+
+Full-frame white is not a step, though its pattern is still there on its number key. It
+records nothing: with the whole screen lit, the shape and its surround dim together, so it
+finds the same clipping point as Peak white rather than what the panel sustains. The
+sustained figure in the profile's `lumi` tag comes from the panel's own data or from a
+meter.
+
+## Reading a clipping point
+
+Peak and full-frame both find the level at which the display stops separating two adjacent
+values. That is a clipping point, not a photometric measurement, and on a display with
+fixed tone mapping the two land close together — the curve that clips does not move with
+window size. An emissive panel sustains far less than its peak across a whole screen, so
+readings that match indicate signal handling rather than brightness. A meter reads lower.
+An HGIG or tone-mapping-off mode in the monitor's own menu separates the two.
+
+## Controls
+
+| key | action |
+| --- | --- |
+| `1`–`9`, `0` | select a pattern directly |
+| `Tab` | next control |
+| `←` `→` | adjust the selected control, or move the level on a threshold pattern |
+| `↑` `↓` | walk the levels of a stepped pattern |
+| `E` | type an exact value |
+| `Enter` | record, advance, or apply on the results screen |
+| `S` | return to the results after browsing |
+| `H` | move the guidance panel to the other edge |
+| `Esc` | leave |
+
+Each control also draws a track showing where its value sits in range, draggable with the
+mouse. The probe track is positioned in PQ, not nits: a linear bar would spend almost its
+entire length on highlights and show no movement through the range where thresholds are
+found. The cursor is black with a grey outline so it adds no meaningful light to the screen.
+
+Live Apply is switched on for as long as the view is open and restored as it was on exit.
+Without it the tone controls would move sliders that rebuilt nothing.
+
+## The other patterns
+
+Grey staircase, shadow ladder, neutral ramp, colour patches and solid patch are reached by
+number key. Each states what correct looks like. Gamma match reads the transfer function
+directly by comparing a solid patch against interleaved single-pixel lines, but needs about
+two metres of viewing distance before the lines blend, so it is not part of the guided run.
 
 ---
 
@@ -325,15 +1014,27 @@ The controls operate on the generated HDR profile.
 
 **Default:** `2.200`  
 **Range:** `1.600 – 3.000`  
-**Step:** `0.005`
+**Step:** `0.005`  
+**Pattern:** Tone tracking, or Gamma match from a distance
 
-Adjusts the traditional power-law midtone response.
+Adjusts the power-law midtone response.
 
 - `2.200` is the neutral reference used by the editor.
 - Lower values brighten the midtone response.
 - Higher values darken the midtone response.
 
 Because the step is only `0.005`, subtle changes such as `2.200 → 2.205` are possible.
+
+**With the SDR-in-HDR correction on, this sets the correction's target gamma** rather than
+applying a second curve on top of it. That distinction is not cosmetic. The correction's
+defining property is that everything above diffuse SDR white is left at exact identity,
+because native HDR content lives there and does not want the correction; a separate power
+applied afterwards lifts that range too. At `2.000` it put diffuse white 32% high and
+1000-nit highlights 20% high, so moving one slider silently rebrightened HDR content the
+correction never touches. Folded in, identity holds at every slider position.
+
+With the correction off there is nothing to fold a target into, and it behaves as a plain
+independent power.
 
 ## Midtone Brightness
 
@@ -525,7 +1226,8 @@ This is the recommended method for very fine visual matching.
 
 Returns only that individual control to its neutral/default value.
 
-It does not reset the other controls or replace the imported base profile.
+It does not reset the other controls or replace the imported base profile. To
+neutralise every control at once, use **Reset Sliders** in the top bar.
 
 ---
 
@@ -536,7 +1238,7 @@ A useful subjective matching sequence is:
 1. Start from a Windows HDR Calibration profile.
 2. Enable **Live Apply**.
 3. Display neutral gray or familiar real-world content.
-4. Use **Compare SDR / HDR** to establish the SDR appearance you want to approach.
+4. Flip the **HDR** switch off and on to establish the SDR appearance you want to approach.
 5. Adjust **White Balance Temperature** until the broad warm/cool difference is minimized.
 6. Adjust **Green–Magenta Tint**.
 7. Use the individual RGB controls only for small remaining errors.
@@ -589,9 +1291,18 @@ Win + Alt + B
 
 The watchdog exists specifically to make those mode transitions more deterministic.
 
-## Watchdog Settings in the GUI
+## The watchdog in the GUI
 
-The main window exposes a dedicated **Watchdog Settings…** button. It opens a small explanatory dialog with **Install Watchdog** and **Uninstall Watchdog** actions. The same underlying BAT files remain independently shareable; the GUI is only a convenient front end for them.
+The main window exposes the watchdog two ways. **Lock Profile** in row 3 is a switch that
+installs or removes it directly; **Watchdog…** opens a dialog with the same **Install
+Watchdog** and **Uninstall Watchdog** actions and a fuller explanation.
+
+The switch is driven by the watchdog's own singleton mutex, so it reflects whether the process is
+running right now. The installed script being present on disk, and the scheduled task existing, both
+stay true after the watchdog has exited or been killed, and neither is evidence that anything is
+holding the associations in place.
+
+The same underlying BAT files remain independently shareable; the GUI is only a convenient front end.
 
 ## The watchdog is independent of Virtual HDR OSD
 
@@ -715,6 +1426,10 @@ The uninstaller:
 - does **not** delete ICC/ICM profiles;
 - does **not** intentionally change the user's selected color profiles.
 
+Removing the watchdog stops it re-asserting profiles; it does not put back what Windows
+had before this app. **Restore Windows Profile** in the app does that, with or without
+the watchdog installed.
+
 ---
 
 # Watchdog safety model
@@ -741,6 +1456,8 @@ This makes it suitable as a standalone workaround for users whose existing SDR a
 
 Both Virtual HDR OSD and the standalone watchdog identify displays through the Windows display configuration APIs.
 
+The app remembers the display you chose by the monitor itself, so the choice survives a reboot or a graphics driver restart. If that display disconnects, the app changes nothing on any other display while it is gone and says so in the status line; a mode switch that happened while it was away is treated like any other when it returns. Press **Refresh** to choose another display instead.
+
 For best results:
 
 - install/capture the watchdog while the displays you normally use are connected;
@@ -761,7 +1478,7 @@ Confirm:
 1. the correct **Target Display** is selected;
 2. Windows is actually in HDR mode;
 3. the imported file is the intended HDR profile;
-4. **Live Apply** is enabled, or press **Apply HDR Profile Now**;
+4. **Live Apply** is enabled, or press **Apply Edits**;
 5. the application status area does not report an API error.
 
 ## SDR looks wrong after Win + Alt + B
@@ -788,7 +1505,7 @@ Uninstall-Watchdog.bat
 
 ## I want to inspect the installed color profiles manually
 
-Use **Windows Color Profile Folder** in the application or open:
+Use **Profile Folder** in the application or open:
 
 ```text
 C:\Windows\System32\spool\drivers\color
@@ -840,31 +1557,42 @@ Virtual HDR OSD is intentionally narrow in scope.
 
 It is:
 
-- an HDR profile fine-adjustment tool;
-- a virtual replacement for some OSD adjustments unavailable in HDR;
-- a subjective SDR/HDR visual matching aid;
-- a convenient live ICC/ICM editor;
+- a by-eye HDR calibration tool with its own pattern generator;
+- a way to measure black level, peak and full-frame luminance and record them in a profile;
+- optionally, a front end for a colorimeter driven through ArgyllCMS, which measures
+  luminance, white balance and greyscale tracking and corrects the last two;
+- a virtual replacement for OSD adjustments unavailable in HDR;
+- a live ICC/ICM editor for the MHC2 block Windows applies;
 - a Windows 11 profile-association helper.
 
 It is not:
 
-- a hardware calibration instrument;
-- a replacement for Windows HDR Calibration;
-- a colorimeter/spectrophotometer workflow;
-- a display characterization laboratory;
-- a guarantee of reference-grade color accuracy;
-- a substitute for proper mastering/reference equipment.
+- a measurement instrument in its own right. Without a colorimeter every reading depends
+  on the observer, and with one the accuracy is the instrument's, not this app's;
+- a colour characterisation. Primaries and gamut are read from the panel, never measured
+  -- every patch is clamped to colours inside BT.709, so no reading describes the panel's
+  own primaries. The limit is this app's, not scRGB's, which reaches wider colours
+  through negative components;
+- a gamut correction. The colour sweeps are diagnostic: MHC2 carries a matrix and three
+  per-channel curves, and that cannot express an error depending on hue and saturation
+  together;
+- a guarantee of reference-grade accuracy;
+- a substitute for mastering or reference equipment.
 
-The most reliable workflow remains:
+Its measurements overlap with Windows HDR Calibration rather than replacing it: the same
+three luminance figures, found the same way. What it adds is that the readings feed a
+profile you can keep adjusting, instead of one that has to be regenerated from scratch.
+
+A reasonable workflow:
 
 ```text
-Measurement / Windows HDR Calibration
+Windows HDR Calibration, a meter, or this tool's guided measurements
                 ↓
-        valid HDR base profile
+        an HDR base profile with real luminance data
                 ↓
-       Virtual HDR OSD fine trim
+   tone and white-balance adjustment against the patterns
                 ↓
-         subjective final result
+                result
 ```
 
 ---

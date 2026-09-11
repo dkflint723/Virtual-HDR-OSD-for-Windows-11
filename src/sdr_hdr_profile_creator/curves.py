@@ -3,8 +3,9 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from . import greyscale
 from .model import ModeState
-from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma22
+from .gamma_correction import resolve_white_level, transform_piecewise_srgb_to_gamma
 
 
 @dataclass(slots=True)
@@ -19,45 +20,8 @@ def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
     return low if value < low else high if value > high else value
 
 
-def srgb_to_linear(value: float) -> float:
-    if value <= 0.04045:
-        return value / 12.92
-    return ((value + 0.055) / 1.055) ** 2.4
-
-
-def linear_to_srgb(value: float) -> float:
-    value = max(0.0, value)
-    if value <= 0.0031308:
-        return 12.92 * value
-    return 1.055 * (value ** (1.0 / 2.4)) - 0.055
-
-
-def pq_eotf(code: float) -> float:
-    """ST.2084 code value to absolute luminance in nits."""
-    m1 = 2610.0 / 16384.0
-    m2 = 2523.0 / 32.0
-    c1 = 3424.0 / 4096.0
-    c2 = 2413.0 / 128.0
-    c3 = 2392.0 / 128.0
-    p = max(code, 0.0) ** (1.0 / m2)
-    numerator = max(p - c1, 0.0)
-    denominator = c2 - c3 * p
-    if denominator <= 0.0:
-        return 10000.0
-    return 10000.0 * (numerator / denominator) ** (1.0 / m1)
-
-
-def pq_oetf(nits: float) -> float:
-    """Absolute luminance in nits to ST.2084 code value."""
-    m1 = 2610.0 / 16384.0
-    m2 = 2523.0 / 32.0
-    c1 = 3424.0 / 4096.0
-    c2 = 2413.0 / 128.0
-    c3 = 2392.0 / 128.0
-    y = clamp(nits / 10000.0)
-    p = y**m1
-    return ((c1 + c2 * p) / (1.0 + c3 * p)) ** m2
-
+# PQ transfer functions live in gamma_correction.py, which owns the SDR-in-HDR
+# correction. Duplicating them here previously invited the two copies to drift.
 
 # Rec.2020 / D65 matrix, appropriate for Windows HDR's BT.2020-oriented pipeline.
 _REC2020_TO_XYZ = (
@@ -269,29 +233,49 @@ def _contrast_curve(value: float, amount_percent: float) -> float:
     return 1.0 - 0.5 * (2.0 * (1.0 - x)) ** exponent
 
 
+def _brightness_lift(value: float, amount: float) -> float:
+    """A restrained midtone lift or cut that holds both endpoints."""
+    return value + amount * value * (1.0 - value)
+
+
 def _shape_curve(value: float, state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> float:
     x = clamp(value)
     if not hdr:
         # SDR is comparison-only; Virtual HDR OSD never modifies its profile path.
         return x
 
+    contrast = float(state.contrast)
+    # The wider UI range remains endpoint-preserving; fine steps make small trims easy.
+    brightness = max(-0.35, min(0.35, float(state.brightness_trim) / 100.0))
+
     # Optional SDR-in-HDR correction follows dylanraga's documented direction.
     white_level = resolve_white_level(state.sdr_gamma_correction, sdr_white_nits)
     if white_level is not None:
-        x = transform_piecewise_srgb_to_gamma22(x, white_level)
+        # The slider sets the correction's *target* rather than applying a second power on
+        # top of it. Stacking the two is not equivalent and is not harmless: a power
+        # applied to PQ code afterwards lifts everything, including the highlights above
+        # diffuse white that the correction deliberately leaves at identity. At 2.0 that
+        # put diffuse white 32% high and 1000-nit highlights 20% high, so moving one
+        # slider silently rebrightened native HDR content the correction never touches.
+        #
+        # Contrast and Midtone Brightness fold in the same way and for the same reason.
+        # Applied to PQ code afterwards, +10 contrast lifted a 1000-nit highlight by 17%,
+        # so native HDR the correction leaves alone moved with every trim. Inside, they
+        # shape the SDR range the correction owns and identity above diffuse white holds
+        # at every setting. With the correction off they stay whole-range HDR controls,
+        # which is how the README documents them.
+        return clamp(transform_piecewise_srgb_to_gamma(
+            x, white_level, float(state.gamma),
+            shape=lambda signal: _brightness_lift(_contrast_curve(signal, contrast), brightness),
+        ))
 
-    # Traditional gamma remains an independent control. 2.20 is mathematically neutral.
+    # With no correction there is nothing to fold into, so each control acts on the
+    # whole PQ range. Gamma 2.20 is mathematically neutral; contrast is a smooth
+    # symmetric S-curve anchored at 0, 0.5 and 1.
     gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
     y = x**gamma_ratio
-
-    # Contrast uses a smooth symmetric S-curve with fixed 0, 0.5 and 1 anchors.
-    y = _contrast_curve(y, float(state.contrast))
-
-    # Brightness is a restrained midtone lift/cut that preserves black and white.
-    # The wider UI range remains endpoint-preserving; fine steps make small trims easy.
-    brightness = max(-0.35, min(0.35, float(state.brightness_trim) / 100.0))
-    y = y + brightness * y * (1.0 - y)
-    return clamp(y)
+    y = _contrast_curve(y, contrast)
+    return clamp(_brightness_lift(y, brightness))
 
 
 def build_transform(state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> CalibrationTransform:
@@ -309,13 +293,30 @@ def build_transform(state: ModeState, hdr: bool, sdr_white_nits: float | None = 
         curve[index] = previous
     curve[-1] = 1.0
 
-    # Chromatic corrections live in the MHC2 XYZ matrix. Keeping one common LUT
-    # for R/G/B prevents channel-specific clipping and makes blends much smoother.
+    # The curve so far is intent: what the controls asked for, with the display not
+    # yet considered. A measured response layers the display on top of it, which is the
+    # only thing here that knows what a code actually produces.
+    #
+    # Without one the three channels stay identical, and deliberately: absolute white
+    # balance belongs to the MHC2 XYZ matrix, and inventing per-channel curves from
+    # controls alone would only add channel-specific clipping and rougher blends for a
+    # correction the matrix already makes better. SDR keeps the common curve either
+    # way -- this app never modifies the SDR path, so there is nothing to correct.
+    response = (
+        greyscale.from_values(state.panel_response, state.panel_response_weights)
+        if hdr
+        else None
+    )
+    if response is None:
+        red, green, blue = list(curve), list(curve), list(curve)
+    else:
+        red, green, blue = greyscale.correct(curve, response)
+
     return CalibrationTransform(
         matrix=_safe_color_matrix(state, hdr),
-        red=list(curve),
-        green=list(curve),
-        blue=list(curve),
+        red=red,
+        green=green,
+        blue=blue,
     )
 
 

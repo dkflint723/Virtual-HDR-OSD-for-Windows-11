@@ -20,11 +20,23 @@ if errorlevel 1 (
     exit /b 1
 )
 
+rem The write is verified by reading it back and comparing, not by trusting an exit code.
+rem A failed Set-Content is a non-terminating error, so powershell.exe still exits 0 and
+rem "if errorlevel 1" never fires. The old check then read the file back and confirmed it
+rem looked like a watchdog -- which a stale copy from a previous install does. The result
+rem was an installer that reported success while leaving the previous version in place,
+rem silently, every time something blocked the write.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$raw = Get-Content -Raw -LiteralPath $env:INSTALL_BAT; $marker=':__WATCHDOG_POWERSHELL_PAYLOAD__'; $i=$raw.LastIndexOf($marker); if($i -lt 0){throw 'Embedded watchdog payload was not found.'}; $payload=$raw.Substring($i+$marker.Length).TrimStart([char]13,[char]10); Set-Content -LiteralPath $env:WATCHDOG_PATH -Value $payload -Encoding UTF8" ^
+  "$ErrorActionPreference='Stop'; try { $raw = Get-Content -Raw -LiteralPath $env:INSTALL_BAT; $marker=':__WATCHDOG_POWERSHELL_PAYLOAD__'; $i=$raw.LastIndexOf($marker); if($i -lt 0){throw 'Embedded watchdog payload was not found.'}; $payload=$raw.Substring($i+$marker.Length).TrimStart([char]13,[char]10); Set-Content -LiteralPath $env:WATCHDOG_PATH -Value $payload -Encoding UTF8; $back = Get-Content -Raw -LiteralPath $env:WATCHDOG_PATH; if($back.Trim() -ne $payload.Trim()){ throw ('Wrote ' + $env:WATCHDOG_PATH + ' but read back different content.') } } catch { Write-Host ''; Write-Host ('  ' + $_.Exception.Message); exit 1 }" ^
   1>nul
 if errorlevel 1 (
-    echo ERROR: Could not extract the standalone watchdog.
+    echo.
+    echo ERROR: Could not write the watchdog to:
+    echo   %WATCHDOG%
+    echo.
+    echo The previous version, if any, has been left untouched.
+    echo A security product blocking writes to AppData is the usual cause:
+    echo check Controlled Folder Access under Windows Security, Ransomware protection.
     pause
     exit /b 1
 )
@@ -69,7 +81,49 @@ $StatePath = Join-Path $AppDir 'State.json'
 $LogPath = Join-Path $AppDir 'Watchdog.log'
 $GammaStatePath = Join-Path $env:LOCALAPPDATA 'Virtual_HDR_OSD_for_Windows\gamma_hotkeys.json'
 $LauncherPath = Join-Path $AppDir 'Launcher.vbs'
+# Written at the very end of a successful -Install and read by the GUI, which cannot
+# see this console. Deleted first, so a stale file from a previous run cannot be
+# mistaken for this one's result.
+$ResultPath = Join-Path $AppDir 'install_result.json'
+$script:InstallWarnings = @()
 $TaskName = 'Virtual HDR OSD - Color Profile Mode Watchdog'
+
+# The parsed gamma state and the file timestamp it came from. Get-GammaEntryForDisplay
+# runs on every reconcile pass and this file changes only when the user switches the
+# correction, so re-reading it 75 times a minute bought nothing and leaked steadily.
+$script:GammaCacheStamp = $null
+$script:GammaCacheValue = $null
+
+# The last line written for each repeating condition, so a state that persists is
+# reported once rather than on every pass. See Write-LogOnce.
+$script:LastLogOnce = @{}
+
+function Write-LogOnce {
+    param([string]$Key, [string]$Message)
+
+    # For conditions that are a *state* rather than an event. The three call sites --
+    # a requested correction whose profiles are not installed, and a failing STANDARD or
+    # EXTENDED write -- all sit on the reconcile path, which runs about 1.3 times a
+    # second per display. At roughly 140 bytes a line that is 500 KB in an hour, and
+    # Write-Log rotates at 512 KB keeping one .old, so a fault that lasted two hours
+    # erased every line from before it happened. The log exists to answer "what took my
+    # profile, and when"; flooding it with the consequence destroys the evidence of the
+    # cause.
+    #
+    # Keyed on display and site, deduped on the message itself rather than on a timer,
+    # so a fault that changes -- a different HRESULT, a different variant -- is reported
+    # again immediately. Clear-LogOnce is called from the matching success branch, so a
+    # condition that comes back is logged afresh rather than silenced forever.
+    if ($script:LastLogOnce[$Key] -eq $Message) { return }
+    $script:LastLogOnce[$Key] = $Message
+    Write-Log $Message
+}
+
+function Clear-LogOnce {
+    param([string]$Key)
+
+    if ($script:LastLogOnce.ContainsKey($Key)) { $script:LastLogOnce.Remove($Key) }
+}
 
 function Write-Log {
     param([string]$Message)
@@ -86,7 +140,42 @@ function Write-Log {
     } catch {}
 }
 
+function Test-WatchdogSingletonHeld {
+    # The only honest liveness check. The script being on disk, and a scheduled task
+    # existing, both stay true after the watchdog has exited; and a process list is no
+    # good either, because Win32_Process returns a null CommandLine for a process at a
+    # higher integrity level than this one -- which is exactly the case that matters.
+    try {
+        $mutex = [System.Threading.Mutex]::OpenExisting('Local\ColorProfileModeWatchdogStandalone')
+        try { $mutex.Dispose() } catch {}
+        return $true
+    } catch [System.Threading.WaitHandleCannotBeOpenedException] {
+        return $false
+    } catch {
+        return $false
+    }
+}
+
 function Stop-ExistingWatchdog {
+    # Two kinds of process, and the order matters. Launcher.vbs runs under
+    # wscript.exe and restarts the watchdog five seconds after it exits, so killing
+    # only the PowerShell -- which is all this used to do, because the filter named
+    # powershell.exe and pwsh.exe and nothing else -- just got it started again. The
+    # supervisor goes first, then its child.
+    try {
+        $launcher = [Regex]::Escape($LauncherPath)
+        Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+            Where-Object {
+                ($_.Name -ieq 'wscript.exe' -or $_.Name -ieq 'cscript.exe') -and
+                $_.CommandLine -and
+                ($_.CommandLine -match $launcher) -and
+                ($_.ProcessId -ne $PID)
+            } |
+            ForEach-Object {
+                Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
+            }
+    } catch {}
+
     try {
         $escaped = [Regex]::Escape((Join-Path $AppDir 'Watchdog.ps1'))
         Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -100,6 +189,21 @@ function Stop-ExistingWatchdog {
                 Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null
             }
     } catch {}
+
+    # Whether any of that worked. Both filters require a readable CommandLine, and
+    # Windows returns null for a process running at a higher integrity level than this
+    # one, so a watchdog started by an elevated install is invisible here and cannot be
+    # terminated either -- Stop-Process answers "Access is denied" for the same reason.
+    # It then keeps the singleton, every replacement exits as surplus, and the install
+    # reports success while the old build goes on running. Observed exactly that.
+    #
+    # Give it a moment to release: termination is not instant, and a false alarm here
+    # would be worse than the problem.
+    for ($wait = 0; $wait -lt 12; $wait++) {
+        if (-not (Test-WatchdogSingletonHeld)) { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
 }
 
 $nativeSource = @'
@@ -122,6 +226,7 @@ namespace ColorProfileWatchdog
         public const int CPST_EXTENDED_DISPLAY_COLOR_MODE = 8;
 
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
+        public const int DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11;
 
@@ -206,6 +311,28 @@ namespace ColorProfileWatchdog
             public string viewGdiDeviceName;
         }
 
+        // The monitor's own device path, derived from its EDID, which is what the GUI
+        // anchors per-display settings on. GdiName is not an identity: \.\DISPLAY1 is a
+        // slot, reassigned between sessions, so a saved entry could be applied to a
+        // different panel after a hotplug. Marshalled sizes are fixed by the API: 64
+        // characters of friendly name, 128 of path, 420 bytes in total.
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct DISPLAYCONFIG_TARGET_DEVICE_NAME
+        {
+            public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
+            public UInt32 flags;
+            public UInt32 outputTechnology;
+            public UInt16 edidManufactureId;
+            public UInt16 edidProductCodeId;
+            public UInt32 connectorInstance;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 64)]
+            public string monitorFriendlyDeviceName;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 128)]
+            public string monitorDevicePath;
+        }
+
         [StructLayout(LayoutKind.Sequential)]
         public struct DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO
         {
@@ -243,6 +370,9 @@ namespace ColorProfileWatchdog
         public sealed class DisplayInfo
         {
             public string GdiName { get; set; }
+            // The monitor's EDID-derived device path. Empty when Windows will not
+            // supply one, in which case matching falls back to GdiName.
+            public string DevicePath { get; set; }
             public UInt32 AdapterLow { get; set; }
             public Int32 AdapterHigh { get; set; }
             public UInt32 SourceId { get; set; }
@@ -279,6 +409,10 @@ namespace ColorProfileWatchdog
         [DllImport("user32.dll")]
         private static extern int DisplayConfigGetDeviceInfo(
             ref DISPLAYCONFIG_SOURCE_DEVICE_NAME requestPacket);
+
+        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
+        private static extern int DisplayConfigGetTargetName(
+            ref DISPLAYCONFIG_TARGET_DEVICE_NAME requestPacket);
 
         [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
         private static extern int DisplayConfigGetAdvancedColorInfo(
@@ -367,6 +501,71 @@ namespace ColorProfileWatchdog
             return gammaHotkeysRegistered;
         }
 
+        // Startup guard. The watchdog has been observed acquiring the singleton
+        // mutex and then blocking before its main loop ever begins, which leaves a
+        // process that enforces nothing while preventing any healthy instance from
+        // starting. If startup does not complete in time, say so in the log and exit
+        // so the next instance can take over. Implemented here rather than as a
+        // PowerShell timer because a scriptblock delegate invoked on a threadpool
+        // thread has no runspace and would not run.
+        private static volatile bool _startupComplete = false;
+        private static long _lastAliveTicks = 0;
+
+        public static void MarkStartupComplete()
+        {
+            _startupComplete = true;
+            MarkAlive();
+        }
+
+        // Called once per reconcile pass. The loop has been seen to stop making
+        // progress after a reboot without throwing, logging, or exiting, which
+        // leaves a process that holds the singleton and enforces nothing.
+        public static void MarkAlive()
+        {
+            System.Threading.Interlocked.Exchange(ref _lastAliveTicks, DateTime.UtcNow.Ticks);
+        }
+
+        public static void ArmStartupGuard(string logPath, int seconds, int stallSeconds)
+        {
+            System.Threading.Thread guard = new System.Threading.Thread(delegate()
+            {
+                DateTime deadline = DateTime.UtcNow.AddSeconds(seconds);
+                string reason = null;
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(200);
+                    if (!_startupComplete)
+                    {
+                        if (DateTime.UtcNow >= deadline)
+                        {
+                            reason = "Startup did not finish within " + seconds + "s";
+                            break;
+                        }
+                        continue;
+                    }
+                    long last = System.Threading.Interlocked.Read(ref _lastAliveTicks);
+                    double stalled = (DateTime.UtcNow - new DateTime(last, DateTimeKind.Utc)).TotalSeconds;
+                    if (stalled > stallSeconds)
+                    {
+                        reason = "Reconcile loop stalled for " + ((int)stalled) + "s";
+                        break;
+                    }
+                }
+                try
+                {
+                    System.IO.File.AppendAllText(
+                        logPath,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff")
+                            + "  " + reason + "; exiting so a fresh instance can start."
+                            + Environment.NewLine);
+                }
+                catch { }
+                Environment.Exit(9);
+            });
+            guard.IsBackground = true;
+            guard.Start();
+        }
+
         public static int PollGammaHotkey()
         {
             int id;
@@ -449,6 +648,35 @@ namespace ColorProfileWatchdog
             return packet.viewGdiDeviceName;
         }
 
+        private static string GetDevicePath(DISPLAYCONFIG_PATH_TARGET_INFO target)
+        {
+            // Best effort. A display that will not name itself still gets watched; it
+            // simply falls back to matching on GdiName, as every version before this did.
+            try
+            {
+                DISPLAYCONFIG_TARGET_DEVICE_NAME packet = new DISPLAYCONFIG_TARGET_DEVICE_NAME();
+                packet.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
+                packet.header.size = (UInt32)Marshal.SizeOf(typeof(DISPLAYCONFIG_TARGET_DEVICE_NAME));
+                packet.header.adapterId = target.adapterId;
+                packet.header.id = target.id;
+                packet.monitorFriendlyDeviceName = String.Empty;
+                packet.monitorDevicePath = String.Empty;
+
+                if (DisplayConfigGetDeviceInfo_Target(ref packet) != ERROR_SUCCESS)
+                    return String.Empty;
+                return packet.monitorDevicePath == null ? String.Empty : packet.monitorDevicePath;
+            }
+            catch
+            {
+                return String.Empty;
+            }
+        }
+
+        private static int DisplayConfigGetDeviceInfo_Target(ref DISPLAYCONFIG_TARGET_DEVICE_NAME packet)
+        {
+            return DisplayConfigGetTargetName(ref packet);
+        }
+
         private static bool GetAdvancedColorEnabled(DISPLAYCONFIG_PATH_TARGET_INFO target)
         {
             DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO packet = new DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO();
@@ -511,6 +739,7 @@ namespace ColorProfileWatchdog
 
                         DisplayInfo info = new DisplayInfo();
                         info.GdiName = gdiName;
+                        info.DevicePath = GetDevicePath(path.targetInfo);
                         info.AdapterLow = path.targetInfo.adapterId.LowPart;
                         info.AdapterHigh = path.targetInfo.adapterId.HighPart;
                         info.SourceId = path.sourceInfo.id;
@@ -623,6 +852,52 @@ function Get-ActiveDisplays {
     return [ColorProfileWatchdog.Native]::GetActiveDisplays()
 }
 
+function Find-SavedDisplay {
+    param($State, $CurrentDisplay)
+
+    # The monitor's own device path first. GdiName is a slot, not an identity:
+    # \.\DISPLAY1 is reassigned between sessions, so after a hotplug a saved entry
+    # could be applied to a different panel than the one it was captured from -- and
+    # the two obvious alternatives are worse. The adapter LUID is reissued on every
+    # reboot, and SourceId is the field GdiName is derived from.
+    #
+    # Falls back to GdiName when either side lacks a path: state written by an earlier
+    # version has no DevicePath, and Windows does not always supply one.
+    # foreach rather than Where-Object piped into Select-Object -First 1. The two are
+    # equivalent here and the pipeline form leaks: Select-Object -First stops the
+    # upstream command by throwing, and in Windows PowerShell 5.1 that path retains
+    # memory no forced GC reclaims. Where-Object on its own is clean, and so is the
+    # property test inside it -- it is specifically the early termination.
+    #
+    # Measured by running the whole watchdog twice under an identical probe, differing
+    # only in these loops. With the pipelines, committed bytes rose monotonically, about
+    # 2.3 KB a poll pass, 108.2 MB to 113.0 MB over 2,168 passes. Without them, 3,806
+    # passes ended at 108.1 MB, below where they started. Reading state with ReadAllText
+    # and caching the gamma file were both already in place for the leaking run, so
+    # neither of those was the cause. The cost lands on the reconcile path, so the rate
+    # follows how often profiles are being applied rather than the clock -- which is why
+    # it reads as 1 MB a minute sitting idle and 16 MB a minute during repeated applies.
+    if (-not $State -or -not $State.Displays) { return $null }
+    $path = [string]$CurrentDisplay.DevicePath
+    if ($path) {
+        $anyPaths = $false
+        foreach ($entry in $State.Displays) {
+            $entryPath = [string]$entry.DevicePath
+            if (-not $entryPath) { continue }
+            $anyPaths = $true
+            if ($entryPath -eq $path) { return $entry }
+        }
+
+        # A path on both sides that does not match is a different monitor, not a miss.
+        # Falling through to GdiName there is exactly the confusion this exists to stop.
+        if ($anyPaths) { return $null }
+    }
+    foreach ($entry in $State.Displays) {
+        if ($entry.GdiName -eq $CurrentDisplay.GdiName) { return $entry }
+    }
+    return $null
+}
+
 function Format-HResult {
     param([int]$Value)
     try {
@@ -706,6 +981,41 @@ function Resolve-StableWorkingPair {
     }
 }
 
+function Resolve-BaseExtendedProfile {
+    param($GammaEntry, [string]$CurrentExtended)
+
+    # The captured HDR fallback must be the user's own profile, never one of Virtual
+    # HDR OSD's generated working profiles: adopting one makes the watchdog restore
+    # already-edited data as though it were the source.
+    #
+    # The GUI publishes both a name and a full path. Older builds wrote the ICC
+    # description into the name field, which is not a filename at all -- Windows HDR
+    # Calibration describes a profile with slashes in it -- so the path is tried as
+    # well before giving up.
+    $candidates = @()
+    if ($GammaEntry) {
+        if ($GammaEntry.PSObject.Properties.Name -contains 'base_profile') {
+            $candidates += [string]$GammaEntry.base_profile
+        }
+        if ($GammaEntry.PSObject.Properties.Name -contains 'base_profile_path') {
+            $raw = [string]$GammaEntry.base_profile_path
+            if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                try { $candidates += [System.IO.Path]::GetFileName($raw) } catch {}
+            }
+        }
+    }
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($candidate -match '^Virtual_HDR_OSD_') { continue }
+        if (Test-InstalledColorProfile $candidate) { return $candidate }
+    }
+
+    # Nothing usable. Keep the current association only when it is not ours; an
+    # app-managed name here would be a circular fallback, so report none instead.
+    if ($CurrentExtended -match '^Virtual_HDR_OSD_') { return '' }
+    return $CurrentExtended
+}
+
 function Get-SavedProfileState {
     param($Display)
 
@@ -724,6 +1034,9 @@ function Get-SavedProfileState {
 
     [PSCustomObject]@{
         GdiName         = $Display.GdiName
+        # The monitor itself, not the slot it happens to occupy. Entries written before
+        # this field existed simply do not carry it, and matching falls back to GdiName.
+        DevicePath      = $Display.DevicePath
         AdapterLow      = $Display.AdapterLow
         AdapterHigh     = $Display.AdapterHigh
         SourceId        = $Display.SourceId
@@ -733,6 +1046,10 @@ function Get-SavedProfileState {
         WorkingOff      = $pair.Off
         WorkingOn       = $pair.On
         GammaEnabled    = [bool]$pair.Enabled
+        # Install captures the associations as they are right now, so this capture is by
+        # definition the most recent decision. Anything the GUI does afterwards is newer
+        # and takes over; see Get-DesiredExtendedProfile.
+        GammaUpdatedAt  = (Get-Date).ToString('o')
     }
 }
 
@@ -741,36 +1058,208 @@ function Get-GammaEntryForDisplay {
 
     if (-not (Test-Path -LiteralPath $GammaStatePath)) { return $null }
     try {
-        $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+        # The GUI publishes this file by writing a temporary copy and renaming over
+        # the original, so a read landing in that window fails. Returning $null then
+        # makes the caller fall back to the state captured at install time, which can
+        # assert the OPPOSITE correction variant -- the user's choice appears to
+        # revert seconds after they make it, with nothing logged. Retry briefly.
+        # Read only when the file has actually changed. This runs on every reconcile
+        # pass -- about 75 times a minute -- against a file the GUI rewrites rarely,
+        # and both halves of doing it every time leak in Windows PowerShell 5.1:
+        # Get-Content -Raw keeps about 144 KB per call and ConvertFrom-Json about
+        # 14 KB, neither of which a forced GC reclaims. Measured on this machine at
+        # 5.4 MB per 30 seconds, which is 650 MB an hour, and the reason a watchdog
+        # left running all day reached 95 GB of commit charge and took the system's
+        # allocation limit with it.
+        $stampNow = $null
+        try { $stampNow = [System.IO.File]::GetLastWriteTimeUtc($GammaStatePath).Ticks } catch {}
+
+        $gamma = $null
+        if ($null -ne $stampNow -and $stampNow -eq $script:GammaCacheStamp) {
+            # Unchanged since the last read. Fall through to the selection below with
+            # the parse already in hand, so the cache changes only how $gamma is
+            # obtained and never which record is chosen.
+            $gamma = $script:GammaCacheValue
+        }
+        for ($attempt = 1; $attempt -le 4 -and -not $gamma; $attempt++) {
+            try {
+                # [IO.File]::ReadAllText rather than Get-Content -Raw: same bytes, same
+                # BOM handling, 96 bytes per call retained against 144,821. Measured.
+                $raw = [System.IO.File]::ReadAllText($GammaStatePath)
+                if (-not [string]::IsNullOrWhiteSpace($raw)) {
+                    $gamma = $raw | ConvertFrom-Json
+                    break
+                }
+            } catch {}
+            Start-Sleep -Milliseconds (40 * $attempt)
+        }
+        if ($gamma -and $null -ne $stampNow) {
+            $script:GammaCacheStamp = $stampNow
+            $script:GammaCacheValue = $gamma
+        }
+        if (-not $gamma) { return $null }
         if (-not $gamma.displays) { return $null }
+
+        # Records are keyed by an id derived from the adapter LUID, which Windows
+        # reissues on reboots and driver restarts, so one monitor accumulates several
+        # records carrying the same gdi_name. Returning the first match handed the
+        # caller a stale record naming profiles that no longer exist, defeating the
+        # intent comparison in Get-DesiredExtendedProfile. Take the newest record.
+        # Match on the monitor's EDID device path whenever both sides carry one, the
+        # way Find-SavedDisplay already does for State.json. gdi_name is \\.\DISPLAY1 --
+        # a slot Windows reassigns between sessions -- so after a hotplug this handed one
+        # monitor the profile pair belonging to another, while the State.json lookup
+        # beside it, already fixed, disagreed. Records written before the GUI published a
+        # path have none, and still match by slot.
+        $wantPath = [string]$CurrentDisplay.DevicePath
+        $candidates = @()
         foreach ($property in $gamma.displays.PSObject.Properties) {
-            if ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
-                return $property.Value
+            $entryPath = [string]$property.Value.device_path
+            if ($wantPath -and $entryPath) {
+                if ($entryPath -eq $wantPath) { $candidates += $property.Value }
+            } elseif ($property.Value.gdi_name -eq $CurrentDisplay.GdiName) {
+                $candidates += $property.Value
             }
         }
+        if ($candidates.Count -eq 0) { return $null }
+        if ($candidates.Count -eq 1) { return $candidates[0] }
+
+        # When no timestamp is usable, fall back to the last record written.
+        $best = $candidates[$candidates.Count - 1]
+        $bestAt = $null
+        foreach ($candidate in $candidates) {
+            $at = ConvertTo-GammaTimestamp ([string]$candidate.updated_at)
+            if ($null -eq $at) { continue }
+            if (($null -eq $bestAt) -or ($at -gt $bestAt)) {
+                $best = $candidate
+                $bestAt = $at
+            }
+        }
+        return $best
     } catch {}
+    return $null
+}
+
+function ConvertTo-GammaTimestamp {
+    param([string]$Value)
+
+    # Both sides have written slightly different ISO-8601 shapes: the GUI wrote a naive
+    # local time for a long while, this script writes a round-trip value with an offset.
+    # AssumeLocal makes the naive form comparable. A malformed or empty value must return
+    # $null rather than throw, because $ErrorActionPreference is 'Stop' here.
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $parsed = [datetimeoffset]::MinValue
+    if ([datetimeoffset]::TryParse(
+            $Value,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeLocal,
+            [ref]$parsed)) {
+        return $parsed
+    }
     return $null
 }
 
 function Get-DesiredExtendedProfile {
     param($CurrentDisplay, $SavedDisplay)
 
-    # The standalone watchdog owns a persistent copy of the prepared Off/On names.
-    # This works even when Virtual HDR OSD is closed and its runtime JSON is stale.
-    if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaEnabled') {
-        if ([bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOn) {
-            return [string]$SavedDisplay.WorkingOn
+    $entry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
+
+    # Whichever side acted most recently wins.
+    #
+    # Virtual HDR OSD records its own correction changes in gamma_hotkeys.json; this
+    # script records the switches it performs itself in State.json. Previously only the
+    # captured GammaEnabled below was consulted, so a correction change made in the GUI
+    # was re-associated back to the opposite variant by the next forced restore, roughly
+    # every five seconds, with no way for the user to make it stick.
+    if ($entry -and ($entry.PSObject.Properties.Name -contains 'enabled')) {
+        $guiAt = ConvertTo-GammaTimestamp ([string]$entry.updated_at)
+        $ownAt = $null
+        if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaUpdatedAt') {
+            $ownAt = ConvertTo-GammaTimestamp ([string]$SavedDisplay.GammaUpdatedAt)
         }
-        if (-not [bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOff) {
-            return [string]$SavedDisplay.WorkingOff
+
+        if ($guiAt -and ((-not $ownAt) -or ($guiAt -gt $ownAt))) {
+            $wanted = $(if ([bool]$entry.enabled) { 'On' } else { 'Off' })
+
+            # Prefer the filenames the GUI last published. It regenerates the working pair
+            # under new names whenever the adapter LUID changes, which State.json captured
+            # at install time cannot know about.
+            $name = $null
+            if (($entry.PSObject.Properties.Name -contains 'profiles') -and $entry.profiles) {
+                if ($entry.profiles.PSObject.Properties.Name -contains $wanted) {
+                    $name = [string]$entry.profiles.$wanted
+                }
+            }
+            if ([string]::IsNullOrWhiteSpace($name)) {
+                $name = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
+            }
+
+            # Never hand Windows a profile that is not installed.
+            if ((-not [string]::IsNullOrWhiteSpace($name)) -and (Test-InstalledColorProfile -ProfileName $name)) {
+                # Recovered: forget the "not installed" line so the next occurrence is
+                # reported rather than deduped against a fault that has since been fixed.
+                Clear-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName)
+                return $name
+            }
+
+            # The requested variant is unusable. Falling through to the captured state
+            # here would answer with the OPPOSITE variant whenever GammaEnabled still
+            # disagrees -- turning the correction back ON moments after the user chose
+            # Off, which is precisely the guarantee this block exists to keep. Try the
+            # captured name for the SAME direction, and otherwise change nothing.
+            $sameDirection = [string]$(if ($wanted -eq 'On') { $SavedDisplay.WorkingOn } else { $SavedDisplay.WorkingOff })
+            if ((-not [string]::IsNullOrWhiteSpace($sameDirection)) -and
+                (Test-InstalledColorProfile -ProfileName $sameDirection)) {
+                Clear-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName)
+                return $sameDirection
+            }
+            # Once per distinct message: this branch's precondition -- the GUI asking for
+            # a variant whose profile is not installed -- is a state that persists until
+            # someone reinstalls it, and it is reached on every reconcile pass.
+            Write-LogOnce ('{0}|GAMMA-UNAVAILABLE' -f $CurrentDisplay.GdiName) (
+                'Gamma correction {0} was requested for {1} but no installed profile provides it; leaving the association unchanged.' -f $wanted.ToUpper(), $CurrentDisplay.GdiName)
+            return ''
         }
     }
 
-    $entry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
-    if ($entry -and $entry.active_profile) {
+    # The standalone watchdog owns a persistent copy of the prepared Off/On names.
+    # This works even when Virtual HDR OSD is closed and its runtime JSON is stale.
+    #
+    # "Never hand Windows a profile that is not installed" applied only to the branch
+    # above, and these names need it more, not less: they are captured at install time
+    # and the working pair embeds the adapter LUID, which Windows reissues across
+    # reboots, so they go stale by design rather than by accident.
+    #
+    # A missing name here returns '' -- change nothing -- rather than falling through to
+    # the next candidate. Falling through would answer with the OPPOSITE variant
+    # whenever the pair is half-installed, turning the correction back on moments after
+    # the user chose Off, which is the same guarantee the block above exists to keep.
+    if ($SavedDisplay.PSObject.Properties.Name -contains 'GammaEnabled') {
+        if ([bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOn) {
+            if (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.WorkingOn)) {
+                return [string]$SavedDisplay.WorkingOn
+            }
+            return ''
+        }
+        if (-not [bool]$SavedDisplay.GammaEnabled -and $SavedDisplay.WorkingOff) {
+            if (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.WorkingOff)) {
+                return [string]$SavedDisplay.WorkingOff
+            }
+            return ''
+        }
+    }
+
+    # No pair captured for this display, so there is no variant to get wrong and the
+    # remaining candidates can be tried in turn.
+    if ($entry -and $entry.active_profile -and
+        (Test-InstalledColorProfile -ProfileName ([string]$entry.active_profile))) {
         return [string]$entry.active_profile
     }
-    return [string]$SavedDisplay.ExtendedProfile
+    if ($SavedDisplay.ExtendedProfile -and
+        (Test-InstalledColorProfile -ProfileName ([string]$SavedDisplay.ExtendedProfile))) {
+        return [string]$SavedDisplay.ExtendedProfile
+    }
+    return ''
 }
 
 function Restore-SavedProfiles {
@@ -780,23 +1269,62 @@ function Restore-SavedProfiles {
         [switch]$Force
     )
 
-    if ($SavedDisplay.StandardProfile) {
+    # This runs on every pass, so leaving SDR alone has to be decided here. Virtual
+    # HDR OSD offers "third-party calibration owns SDR" for exactly this -- Calman and
+    # friends reload the STANDARD association themselves, and pulling it back from
+    # under them is what fights them. The GUI publishes the choice; honour it.
+    $sdrUnmanaged = $false
+    # What to reassert, in order of authority: a profile the user pinned in the GUI,
+    # otherwise whatever was associated when this watchdog was installed.
+    #
+    # Only the boolean used to be published, so the force-write below always used the
+    # install-time capture. A pin the GUI had just reported as "restored" was reverted
+    # within five seconds, and the log said so in the user's own words -- "Restored
+    # STANDARD profile" -- naming the profile they had just replaced. Re-running the
+    # installer did not help either: it re-captures the live association, which by then
+    # is the reverted one.
+    $sdrDesired = [string]$SavedDisplay.StandardProfile
+    $sdrEntry = Get-GammaEntryForDisplay -CurrentDisplay $CurrentDisplay
+    if ($sdrEntry) {
+        if ($sdrEntry.PSObject.Properties.Name -contains 'sdr_unmanaged') {
+            $sdrUnmanaged = [bool]$sdrEntry.sdr_unmanaged
+        }
+        if ($sdrEntry.PSObject.Properties.Name -contains 'sdr_profile') {
+            $sdrPinned = [string]$sdrEntry.sdr_profile
+            if ($sdrPinned) { $sdrDesired = $sdrPinned }
+        }
+    }
+
+    if ($sdrDesired -and (-not $sdrUnmanaged)) {
         $current = [ColorProfileWatchdog.Native]::GetDefaultProfile(
             $CurrentDisplay,
             [ColorProfileWatchdog.Native]::WCS_PROFILE_MANAGEMENT_SCOPE_CURRENT_USER,
             [ColorProfileWatchdog.Native]::CPST_STANDARD_DISPLAY_COLOR_MODE
         )
 
-        if ($Force -or $current -ne $SavedDisplay.StandardProfile) {
+        if ($Force -or $current -ne $sdrDesired) {
             $hr = [ColorProfileWatchdog.Native]::SetCurrentUserDefault(
                 $CurrentDisplay,
                 [ColorProfileWatchdog.Native]::CPST_STANDARD_DISPLAY_COLOR_MODE,
-                [string]$SavedDisplay.StandardProfile
+                $sdrDesired
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
-            } else {
-                Write-Log ('Restored STANDARD profile on {0}: {1}' -f $CurrentDisplay.GdiName, $SavedDisplay.StandardProfile)
+                # A write that fails leaves the association unchanged, so the gate above
+                # is true again next pass and this repeats for as long as the cause
+                # lasts. The HRESULT is in the message, so a different failure still
+                # gets its own line.
+                Write-LogOnce ('{0}|STANDARD' -f $CurrentDisplay.GdiName) (
+                    'Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
+            } elseif ($current -ne $sdrDesired) {
+                Clear-LogOnce ('{0}|STANDARD' -f $CurrentDisplay.GdiName)
+                # Only a real correction. The forced pass rewrites this every five
+                # seconds whether anything drifted or not, and logging that made 614 of
+                # 618 lines identical: 37 bytes a second, the 512 KB cap reached in
+                # about four hours, and one .old kept, so eight hours of history at
+                # most -- for a log whose whole purpose is answering "did something
+                # take my profile, and when". The value Windows had is named, because
+                # what replaced it is the interesting half.
+                Write-Log ('Corrected STANDARD profile on {0}: was {1}, restored {2}' -f $CurrentDisplay.GdiName, $(if ($current) { $current } else { '<none>' }), $sdrDesired)
             }
         }
     }
@@ -816,9 +1344,11 @@ function Restore-SavedProfiles {
                 [string]$desiredExtended
             )
             if ($hr -lt 0) {
-                Write-Log ('Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
-            } else {
-                Write-Log ('Restored EXTENDED profile on {0}: {1}' -f $CurrentDisplay.GdiName, $desiredExtended)
+                Write-LogOnce ('{0}|EXTENDED' -f $CurrentDisplay.GdiName) (
+                    'Failed to restore EXTENDED profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
+            } elseif ($current -ne $desiredExtended) {
+                Clear-LogOnce ('{0}|EXTENDED' -f $CurrentDisplay.GdiName)
+                Write-Log ('Corrected EXTENDED profile on {0}: was {1}, restored {2}' -f $CurrentDisplay.GdiName, $(if ($current) { $current } else { '<none>' }), $desiredExtended)
             }
         }
     }
@@ -830,7 +1360,7 @@ function Invoke-GammaHotkey {
     try {
         $currentDisplays = @(Get-ActiveDisplays)
         foreach ($current in $currentDisplays) {
-            $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+            $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
             if (-not $saved) { continue }
 
             $profile = $(if ($Enable) { $saved.WorkingOn } else { $saved.WorkingOff })
@@ -858,20 +1388,46 @@ function Invoke-GammaHotkey {
             }
 
             $saved.GammaEnabled = [bool]$Enable
-            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+            # ONE stamp, written to both files. Two Get-Date calls left the runtime file
+            # microseconds newer than State.json, so the comparison in
+            # Get-DesiredExtendedProfile always favoured the runtime copy and this
+            # script's own captured state could never win a tie.
+            $switchedAt = [DateTimeOffset]::Now.ToString('o', [System.Globalization.CultureInfo]::InvariantCulture)
+            # Add-Member -Force also creates the property on State.json files written
+            # before this field existed; a plain assignment throws on those.
+            $saved | Add-Member -NotePropertyName GammaUpdatedAt -NotePropertyValue $switchedAt -Force
+            # Through a temporary file. Set-Content truncates in place, so a kill in
+            # that window leaves a half-written State.json -- and the watchdog then
+            # cannot start at all, which is a far worse failure than losing one switch.
+            $stateTmp = $StatePath + '.tmp'
+            $state | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+            Move-Item -LiteralPath $stateTmp -Destination $StatePath -Force
 
             # Keep the GUI runtime file synchronized when it exists, but do not depend on it.
             try {
                 if (Test-Path -LiteralPath $GammaStatePath) {
-                    $gamma = Get-Content -Raw -LiteralPath $GammaStatePath | ConvertFrom-Json
+                    $gamma = [System.IO.File]::ReadAllText($GammaStatePath) | ConvertFrom-Json
+                    $wantPath = [string]$current.DevicePath
                     foreach ($property in $gamma.displays.PSObject.Properties) {
-                        if ($property.Value.gdi_name -eq $current.GdiName) {
+                        $entryPath = [string]$property.Value.device_path
+                        $isThisMonitor = if ($wantPath -and $entryPath) {
+                            $entryPath -eq $wantPath
+                        } else {
+                            $property.Value.gdi_name -eq $current.GdiName
+                        }
+                        if ($isThisMonitor) {
                             $property.Value.enabled = [bool]$Enable
                             $property.Value.active_profile = [string]$profile
-                            $property.Value.updated_at = (Get-Date).ToString('o')
+                            $property.Value.updated_at = $switchedAt
                         }
                     }
-                    $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $GammaStatePath -Encoding UTF8
+                    # The GUI reads this file with no retry, and answers a torn read
+                    # by starting from an empty payload -- which then loses every other
+                    # display's record on its next publish. Rename instead of truncate,
+                    # matching _write_json_atomic on the Python side.
+                    $gammaTmp = $GammaStatePath + '.wd.tmp'
+                    $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $gammaTmp -Encoding UTF8
+                    Move-Item -LiteralPath $gammaTmp -Destination $GammaStatePath -Force
                 }
             } catch {}
 
@@ -887,9 +1443,42 @@ function Invoke-GammaHotkey {
 }
 
 if ($Install) {
-    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
-    Stop-ExistingWatchdog
+    # A result file left by a previous run must never be mistaken for this one's.
+    Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
 
+    # Every throw below used to leave nothing behind: no watchdog, because the old one is
+    # stopped on the way in, and no result file, because the only writer is at the very
+    # end. The GUI then fell back to Watchdog.ps1's mtime -- which the .bat stamps before
+    # any of this runs -- and reported a green "Watchdog installed" for an install that
+    # had thrown. Record the failure instead.
+    #
+    # trap rather than try/catch so the body below keeps its indentation and its diff.
+    # Checked on this machine: a trap declared inside this block does not fire when
+    # -Install was not passed, so the watchdog's own loop is unaffected by it.
+    trap {
+        $failure = $_.Exception.Message
+        try {
+            [PSCustomObject]@{
+                action   = 'install'
+                ok       = $false
+                startup  = 'not installed'
+                fallback = $false
+                warnings = @(@($script:InstallWarnings) + $failure)
+                at       = (Get-Date).ToString('o')
+            } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+        } catch {}
+        Write-Host ''
+        Write-Host ('  Installation failed: ' + $failure) -ForegroundColor Red
+        exit 1
+    }
+
+    New-Item -ItemType Directory -Force -Path $AppDir | Out-Null
+
+    # Both checks run before the running watchdog is stopped. Neither needs it stopped,
+    # and failing either used to take a working watchdog down on the way out -- the
+    # machine ended up with no watchdog, no task, and a green success message. The
+    # capture further down genuinely does need it stopped, because a running watchdog
+    # re-asserts the very associations that capture is trying to read, so it stays put.
     $build = [Environment]::OSVersion.Version.Build
     if ($build -lt 20348) {
         throw 'This standalone watchdog requires Windows build 20348 or newer.'
@@ -900,20 +1489,24 @@ if ($Install) {
         throw 'No active displays were found.'
     }
 
+    $clearedTheWay = Stop-ExistingWatchdog
+    if (-not $clearedTheWay) {
+        # An install that cannot stop the old watchdog cannot replace it. Every file
+        # below gets written correctly and the running process keeps the singleton, so
+        # the new build never loads and the installer used to report success anyway.
+        # The cause is always the same: that watchdog was started by an elevated run,
+        # so this account cannot see its command line or terminate it.
+        $script:InstallWarnings += 'A watchdog is already running that this account cannot stop, because it was started with administrator rights. The new files were written but the running one will keep the old behaviour until it is stopped. Re-run this installer as administrator, or sign out and back in.'
+        Write-Warning 'A watchdog started with administrator rights is already running and cannot be stopped from here.'
+        Write-Warning 'The files below are updated, but that process keeps running the previous version until it is stopped.'
+        Write-Warning 'Re-run this installer as administrator, or sign out and back in.'
+    }
+
     $saved = @()
     foreach ($display in $displays) {
         $item = Get-SavedProfileState -Display $display
-        # If the GUI has recorded the real HDR base profile, preserve that as the
-        # watchdog fallback instead of capturing an app-managed working profile.
         $gammaEntry = Get-GammaEntryForDisplay -CurrentDisplay $display
-        if ($gammaEntry -and $gammaEntry.base_profile) {
-            $baseCandidate = [string]$gammaEntry.base_profile
-            if ($baseCandidate -and
-                $baseCandidate -notmatch '^Virtual_HDR_OSD_' -and
-                (Test-InstalledColorProfile $baseCandidate)) {
-                $item.ExtendedProfile = $baseCandidate
-            }
-        }
+        $item.ExtendedProfile = Resolve-BaseExtendedProfile -GammaEntry $gammaEntry -CurrentExtended $item.ExtendedProfile
         $saved += $item
     }
 
@@ -930,12 +1523,49 @@ if ($Install) {
         Displays    = $saved
     }
 
-    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $StatePath -Encoding UTF8
+    $stateTmp = $StatePath + '.tmp'
+    $state | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $stateTmp -Encoding UTF8
+    Move-Item -LiteralPath $stateTmp -Destination $StatePath -Force
 
     $escapedPs1 = $PSCommandPath.Replace('"', '""')
+    # The launcher supervises rather than fire-and-forget. The watchdog exits itself
+    # when its guard sees startup or the reconcile loop stall, and without a
+    # supervisor that would simply leave no watchdog running until the next logon.
+    # Run with bWaitOnReturn = True so this script blocks until the process ends,
+    # then restart it after a short pause.
+    # bWaitOnReturn = True makes Run return the watchdog's exit code, which is the
+    # only way this loop can tell "restart me" from "you are surplus". Without that
+    # distinction a second supervisor -- one arrives whenever both the scheduled task
+    # and the Run key are armed -- respawned a PowerShell that lost the singleton and
+    # exited immediately, every five seconds, for as long as the session lasted.
+    #   4  another instance already holds the singleton  -> stand down, but not at once
+    #   2  no saved state    3  no saved displays        -> will not fix itself
+    #   9  the startup guard asked for a fresh instance  -> restart, that is the point
+    #
+    # Four consecutive 4s, not one. Standing down immediately loses the race the
+    # installer creates: it stops the old watchdog and starts a new supervisor, and if
+    # the old process has not released the singleton yet the replacement reads as
+    # surplus and quits for good -- leaving nothing running once the old one does exit.
+    # Twenty seconds is far longer than a handover and still bounded, so a genuinely
+    # surplus supervisor stops rather than spinning for the session.
     $vbs = @"
 Set shell = CreateObject("WScript.Shell")
-shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, False
+surplus = 0
+Do
+  code = shell.Run("powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File ""$escapedPs1""", 0, True)
+  If code = 2 Or code = 3 Then
+    WScript.Quit 0
+  End If
+  If code = 4 Then
+    surplus = surplus + 1
+    If surplus >= 4 Then
+      WScript.Quit 0
+    End If
+  Else
+    surplus = 0
+  End If
+  WScript.Sleep 5000
+Loop
 "@
     Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding ASCII
 
@@ -949,6 +1579,10 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
     $currentSid = $currentIdentity.User.Value
     $wscriptPath = Join-Path $env:WINDIR 'System32\wscript.exe'
     $taskArguments = '//B //Nologo "{0}"' -f $LauncherPath
+    # Set on a successful registration, and the thing the watchdog is then started
+    # through. Left $null, the start below falls back to launching the supervisor
+    # directly, which is right for the paths where no task of ours is in place.
+    $registeredTask = $null
 
     try {
         $taskService = New-Object -ComObject 'Schedule.Service'
@@ -966,6 +1600,19 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
         $taskDefinition.Settings.DisallowStartIfOnBatteries = $false
         $taskDefinition.Settings.StopIfGoingOnBatteries = $false
         $taskDefinition.Settings.MultipleInstances = 2  # TASK_INSTANCES_IGNORE_NEW
+        # PT0S means no limit. Left unset, the task inherits Task Scheduler's default of
+        # PT72H -- read back from the registered task on the development machine to check,
+        # since the XML carries no ExecutionTimeLimit element at all. At that limit Task
+        # Scheduler terminates the task's job object, which takes the wscript.exe
+        # supervisor and its PowerShell child together, and with only a logon trigger
+        # nothing re-fires until the next sign-in. Any session signed in for three days --
+        # sleep and hibernate included -- silently loses profile protection, with no log
+        # line, because the watchdog's own finally block never runs on an abrupt kill.
+        #
+        # Giving up the 72-hour reap costs nothing: ArmStartupGuard already kills a hung
+        # instance far sooner and far more precisely (25s startup, 60s reconcile,
+        # Environment.Exit(9)), and the launcher restarts it afterwards.
+        $taskDefinition.Settings.ExecutionTimeLimit = 'PT0S'
 
         # TASK_LOGON_INTERACTIVE_TOKEN = 3, TASK_RUNLEVEL_LUA = 0.
         $taskDefinition.Principal.UserId = $currentSid
@@ -977,6 +1624,22 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
         $logonTrigger.UserId = $currentSid
         $logonTrigger.Delay = 'PT10S'
         $logonTrigger.Enabled = $true
+        # Repeat indefinitely, so a watchdog that dies between sign-ins comes back.
+        # With only the logon trigger, anything that ended the supervisor -- a crash, a
+        # security product, Task Manager -- left the display unprotected until the next
+        # sign-in, and said nothing about it.
+        #
+        # This is only affordable because the post-install start below is the task's OWN
+        # instance. MultipleInstances = IgnoreNew then suppresses every repeat while the
+        # watchdog is alive, so the repetition costs nothing until something has actually
+        # gone wrong. Started outside the task -- as it used to be -- Task Scheduler would
+        # see no instance running and launch a spare supervisor every five minutes, about
+        # 1,150 a day, each spawning a PowerShell that reads exit 4 and stands down. That
+        # is the respawn churn the launcher's four-consecutive-4s counter exists to stop,
+        # so the two changes have to land together.
+        $logonTrigger.Repetition.Interval = 'PT5M'
+        $logonTrigger.Repetition.Duration = ''
+        $logonTrigger.Repetition.StopAtDurationEnd = $false
 
         # TASK_ACTION_EXEC = 0.
         $execAction = $taskDefinition.Actions.Create(0)
@@ -984,7 +1647,10 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
         $execAction.Arguments = $taskArguments
 
         # TASK_CREATE_OR_UPDATE = 6; TASK_LOGON_INTERACTIVE_TOKEN = 3.
-        $taskRoot.RegisterTaskDefinition(
+        # Kept rather than discarded: the watchdog is started through this below, so that
+        # the running supervisor is an instance of the task and the repetition above can
+        # tell "already protected" from "needs reviving".
+        $registeredTask = $taskRoot.RegisterTaskDefinition(
             $TaskName,
             $taskDefinition,
             6,
@@ -992,37 +1658,116 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
             $null,
             3,
             $null
-        ) | Out-Null
+        )
 
         # Remove an old fallback entry if a previous installation needed it.
         Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
     }
     catch {
-        $startupMethod = 'HKCU Run fallback'
-        Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $_.Exception.Message)
-        $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
-        New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
-        New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+        $registrationError = $_.Exception.Message
+
+        # Arming the Run key without checking is what left both mechanisms live at
+        # once. The DeleteTask above is usually what failed -- an earlier elevated
+        # install owns the task and this account cannot remove it -- so the old task
+        # survived and the Run key was added beside it. Two supervisors then start at
+        # every sign-in, one loses the singleton, and it respawns forever.
+        $taskSurvives = $false
+        try {
+            $probe = New-Object -ComObject 'Schedule.Service'
+            $probe.Connect()
+            $probeRoot = $probe.GetFolder('\')
+            try { $probeRoot.DeleteTask($TaskName, 0) } catch {}
+            try { $probeRoot.GetTask($TaskName) | Out-Null; $taskSurvives = $true } catch { $taskSurvives = $false }
+        } catch { $taskSurvives = $false }
+
+        if ($taskSurvives) {
+            $startupMethod = 'existing scheduled task (kept; Run key deliberately not added)'
+            $script:InstallWarnings += 'The scheduled task from an earlier elevated install could not be replaced by this account. It was left running and the startup entry was not duplicated. To replace it, press Run as Admin and install again.'
+            Write-Warning ('Task Scheduler registration failed ({0}).' -f $registrationError)
+            Write-Warning 'The existing task could not be removed either, so it was created by an elevated install and this account cannot replace it.'
+            Write-Warning 'It is left in place and the Run key is NOT being added: arming both starts two watchdogs at every sign-in, and the surplus one spins.'
+            Write-Warning 'To replace the task, press Run as Admin in Virtual HDR OSD, or right-click this installer and choose Run as administrator.'
+            Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Force -ErrorAction SilentlyContinue
+        } else {
+            $startupMethod = 'HKCU Run fallback'
+            $script:InstallWarnings += 'Windows refused to register the scheduled task, so a plain startup entry was used instead. The watchdog will start at sign-in without the ten-second delay that lets the display stack settle first.'
+            Write-Warning ('Task Scheduler registration failed ({0}). Falling back to the current-user Run key.' -f $registrationError)
+            $runCommand = '"{0}" //B //Nologo "{1}"' -f $wscriptPath, $LauncherPath
+            New-Item -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Force | Out-Null
+            New-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'ColorProfileModeWatchdog' -Value $runCommand -PropertyType String -Force | Out-Null
+        }
     }
 
     Write-Host ''
-    Write-Host 'Captured display profile associations:' -ForegroundColor Cyan
+    Write-Host 'What the watchdog will keep in place:' -ForegroundColor Cyan
     foreach ($item in $saved) {
         Write-Host ('  {0}' -f $item.GdiName)
         Write-Host ('    SDR / STANDARD : {0}' -f $(if ($item.StandardProfile) { $item.StandardProfile } else { '<none - left untouched>' }))
-        Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<none - left untouched>' }))
+        # An empty ExtendedProfile does NOT mean HDR is unprotected. It means the live
+        # association is this app's own working profile, which Resolve-BaseExtendedProfile
+        # deliberately refuses to adopt as a fallback -- otherwise the watchdog would
+        # restore already-edited output as its own source. The pair below is what it
+        # actually keeps in place, re-checked every five seconds. Reporting that as
+        # "left untouched" said the opposite of what happens, and contradicted the app's
+        # own status bar at the same moment.
+        Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<managed by the Gamma OFF/ON pair below>' }))
         Write-Host ('    Gamma OFF      : {0}' -f $(if ($item.WorkingOff) { $item.WorkingOff } else { '<not prepared by Virtual HDR OSD>' }))
         Write-Host ('    Gamma ON       : {0}' -f $(if ($item.WorkingOn) { $item.WorkingOn } else { '<not prepared by Virtual HDR OSD>' }))
     }
+
+    # Through the task when there is one, so the supervisor now running IS the task's
+    # instance. That is what lets MultipleInstances = IgnoreNew suppress the five-minute
+    # repetition while the watchdog is healthy -- started outside the task, every repeat
+    # would launch a spare.
+    #
+    # Start-Process stays as the fallback for the paths that have no task of ours: the
+    # HKCU Run-key install, and a registration that failed against a task this account
+    # cannot replace. Protection now matters more than tidiness, so a Run() that throws
+    # falls back rather than leaving nothing running.
+    $started = $false
+    if ($registeredTask) {
+        try {
+            $registeredTask.Run($null) | Out-Null
+            $started = $true
+        } catch {
+            $script:InstallWarnings += ('The scheduled task was registered but would not start now ({0}). The watchdog was started directly instead, and the task will start it at the next sign-in.' -f $_.Exception.Message)
+            Write-Warning ('Could not start the task immediately: {0}' -f $_.Exception.Message)
+        }
+    }
+    if (-not $started) {
+        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') `
+            -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
+            -WindowStyle Hidden
+    }
+
+    # The GUI used to decide "installed" from Watchdog.ps1's mtime, which the .bat
+    # writes before the integrity check, before -Install, before the display capture
+    # and before Task Scheduler registration. So every later failure -- including an
+    # outright throw -- was still reported as a green "Watchdog installed."
+    # Write down what actually happened instead, for the GUI to read.
+    #
+    # Written after the start above, so a task that registers but will not start now is
+    # a warning the GUI can show rather than one nobody ever sees.
+    $result = [PSCustomObject]@{
+        action   = 'install'
+        # Not ok when the previous watchdog is still running: the files are right but
+        # the behaviour is not, and reporting that as success is what let an old build
+        # keep running for a whole evening while every reinstall looked like it worked.
+        ok       = [bool]$clearedTheWay
+        startup  = $startupMethod
+        fallback = ($startupMethod -notlike 'Task Scheduler*')
+        warnings = @($script:InstallWarnings)
+        at       = (Get-Date).ToString('o')
+    }
+    try {
+        $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
+    } catch {}
 
     Write-Host ''
     Write-Host ('Startup mode: {0} / hidden / 10-second Task Scheduler delay when supported' -f $startupMethod) -ForegroundColor Green
     Write-Host ('State: {0}' -f $StatePath)
     Write-Host ('Log  : {0}' -f $LogPath)
 
-    Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') `
-        -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
-        -WindowStyle Hidden
 
     exit 0
 }
@@ -1030,20 +1775,39 @@ shell.Run "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden
 $createdNew = $false
 $mutex = New-Object System.Threading.Mutex($true, 'Local\ColorProfileModeWatchdogStandalone', [ref]$createdNew)
 if (-not $createdNew) {
-    exit 0
+    # 4, not 0: Launcher.vbs reads this to decide whether it is the surplus supervisor
+    # and should stand down. 0 is indistinguishable from an ordinary exit, and the
+    # loop treated it as "restart me".
+    exit 4
 }
 
 try {
+    # Each step is logged so that a hang names its own location; previously the
+    # first log line came after all of this, so a stuck instance was silent.
+    Write-Log 'Startup: singleton acquired.'
+    [ColorProfileWatchdog.Native]::ArmStartupGuard($LogPath, 25, 60)
+
     if (-not (Test-Path -LiteralPath $StatePath)) {
         Write-Log 'State.json is missing; watchdog stopped.'
         exit 2
     }
 
-    $state = Get-Content -Raw -LiteralPath $StatePath | ConvertFrom-Json
+    # A truncated State.json is a terminating error under $ErrorActionPreference =
+    # 'Stop', so PowerShell exited 1 -- which Launcher.vbs reads as "restart me". One
+    # torn write therefore became a silent respawn loop for the rest of the session,
+    # every five seconds, logging nothing. 2 is the launcher's stop code, and it is the
+    # honest answer: retrying cannot fix a corrupt file.
+    try {
+        $state = [System.IO.File]::ReadAllText($StatePath) | ConvertFrom-Json
+    } catch {
+        Write-Log ('State.json could not be parsed (' + $_.Exception.Message + '); watchdog stopped. Re-run the installer to rebuild it.')
+        exit 2
+    }
     if (-not $state.Displays) {
         Write-Log 'No saved display associations; watchdog stopped.'
         exit 3
     }
+    Write-Log 'Startup: saved state loaded.'
 
     Write-Log 'Watchdog started.'
 
@@ -1053,7 +1817,16 @@ try {
     $lastHotkeyRetry = Get-Date
     Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
 
+    # Past every step that has been seen to block; disarm the guard.
+    [ColorProfileWatchdog.Native]::MarkStartupComplete()
+
     $pollCounter = 0
+    # A log that only speaks up when something drifted is unreadable in the other
+    # direction: silence then means either "nothing has gone wrong" or "this stopped
+    # running an hour ago", and those are the two answers a user most needs to tell
+    # apart. One line an hour separates them, and costs about 800 bytes a day against
+    # the 512 KB cap -- against the ~3.2 MB a day the every-write trace produced.
+    $lastHeartbeat = Get-Date
     while ($true) {
         if (-not $hotkeysRegistered -and ((Get-Date) - $lastHotkeyRetry).TotalSeconds -ge 2.0) {
             $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
@@ -1068,6 +1841,13 @@ try {
                 elseif ($hotkey -eq [ColorProfileWatchdog.Native]::HOTKEY_ON) { Invoke-GammaHotkey -Enable $true }
             }
         }
+        [ColorProfileWatchdog.Native]::MarkAlive()
+
+        if (((Get-Date) - $lastHeartbeat).TotalMinutes -ge 60) {
+            $lastHeartbeat = Get-Date
+            Write-Log 'Watchdog alive; no profile drift since the last entry.'
+        }
+
         $pollCounter++
         if (($pollCounter % 8) -ne 0) {
             Start-Sleep -Milliseconds 100
@@ -1078,7 +1858,7 @@ try {
             $currentDisplays = @(Get-ActiveDisplays)
 
             foreach ($current in $currentDisplays) {
-                $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+                $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
                 if (-not $saved) {
                     continue
                 }
@@ -1092,7 +1872,10 @@ try {
                     # Give Windows a moment to finish the Win+Alt+B transition,
                     # then explicitly reassert both independent associations.
                     Start-Sleep -Milliseconds 700
-                    $refreshed = @(Get-ActiveDisplays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1)
+                    $refreshed = @()
+                    foreach ($candidate in (Get-ActiveDisplays)) {
+                        if ($candidate.GdiName -eq $current.GdiName) { $refreshed = @($candidate); break }
+                    }
                     if ($refreshed.Count -gt 0) {
                         Restore-SavedProfiles -CurrentDisplay $refreshed[0] -SavedDisplay $saved -Force
                     }
@@ -1103,11 +1886,27 @@ try {
 
             # Fallback reassertion. This also covers systems where SDR/WCG and HDR
             # can both report Advanced Color enabled through the legacy query.
+            # Re-check every five seconds, but write only when the association has
+            # actually drifted. This used to pass -Force, which rewrites both
+            # associations whether or not anything changed -- measured at two writes
+            # every 5.3 seconds, forever, about seventeen thousand a day, each one
+            # asking Windows to re-apply a profile that was already in place.
+            #
+            # No visible symptom is claimed for this. It was chased as the cause of a
+            # flickering screen and is not: with the watchdog running and stopped, the
+            # association value and the GPU gamma ramp were both unchanged across 221
+            # samples at 10 Hz, and the flicker tracked a GPU-composited terminal under
+            # HDR instead. What is left is a real waste on a hot path.
+            #
+            # The read is the same API family as the write, so trusting it costs
+            # nothing: genuine drift is still restored within 800 ms by the pass above.
+            # -Force stays on the mode-change path, where the association can be right
+            # while the applied state is not.
             if (((Get-Date) - $lastForced).TotalSeconds -ge 5.0) {
                 foreach ($current in $currentDisplays) {
-                    $saved = $state.Displays | Where-Object { $_.GdiName -eq $current.GdiName } | Select-Object -First 1
+                    $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
                     if ($saved) {
-                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved -Force
+                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
                     }
                 }
                 $lastForced = Get-Date

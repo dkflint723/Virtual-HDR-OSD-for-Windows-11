@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Final
+from typing import Callable, Final
 
 CORRECTION_OPTIONS: Final[tuple[str, ...]] = (
     "Off",
@@ -10,8 +10,6 @@ CORRECTION_OPTIONS: Final[tuple[str, ...]] = (
     "200 nits / Brightness 30",
     "300 nits / Brightness 55",
     "400 nits / Brightness 80",
-    "Unspecified",
-    "SDR",
 )
 
 # Manual presets published by dylanraga. Auto is an app extension that reads the
@@ -21,9 +19,13 @@ _PRESET_WHITE_NITS: Final[dict[str, float]] = {
     "200 nits / Brightness 30": 200.0,
     "300 nits / Brightness 55": 300.0,
     "400 nits / Brightness 80": 400.0,
-    # Compatibility entries from the upstream download list. The SDR profile is
-    # based on the traditional 80-nit SDR reference. "Unspecified" uses the web
-    # generator's 200-nit default when Windows readback is unavailable.
+}
+
+# Retired names. "Unspecified" and "SDR" were filenames in the upstream download list
+# rather than settings anyone would choose, and meant nothing in a dropdown. They are still
+# resolved so a saved profile or state file naming one keeps working instead of silently
+# falling back to a different correction than it was built with.
+_RETIRED_WHITE_NITS: Final[dict[str, float]] = {
     "SDR": 80.0,
     "Unspecified": 200.0,
 }
@@ -62,15 +64,33 @@ def resolve_white_level(option: str, windows_white_nits: float | None) -> float 
         if windows_white_nits is not None and math.isfinite(windows_white_nits):
             return max(80.0, min(480.0, float(windows_white_nits)))
         return 200.0
-    return _PRESET_WHITE_NITS.get(option, 200.0)
+    if option in _PRESET_WHITE_NITS:
+        return _PRESET_WHITE_NITS[option]
+    return _RETIRED_WHITE_NITS.get(option, 200.0)
 
 
-def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float) -> float:
+def transform_piecewise_srgb_to_gamma(
+    pq_input: float,
+    white_level_nits: float,
+    target_gamma: float = 2.2,
+    shape: Callable[[float], float] | None = None,
+) -> float:
     """Port of dylanraga's current NVIDIA LUT generator direction.
 
     PQ input -> absolute luminance -> piecewise-sRGB signal relative to SDR white
-    -> reinterpret that signal through pure gamma 2.2 -> absolute luminance -> PQ.
+    -> reinterpret that signal through a pure power curve -> absolute luminance -> PQ.
     Values above diffuse SDR white are left untouched.
+
+    ``target_gamma`` is the curve the SDR range is reinterpreted through. dylanraga's web
+    generator exposes it for the same reason it is exposed here: it is the one parameter
+    of the correction a user might genuinely want to move, and moving it *inside* the
+    correction keeps everything above diffuse white at exact identity. Applying a separate
+    power afterwards does not -- see :func:`~.curves._shape_curve`.
+
+    ``shape`` is the same idea for any other tone control: a function on the relative SDR
+    signal, applied before the power curve. It must hold 0 at 0 and 1 at 1, which is what
+    keeps diffuse white where it is and the curve continuous where the SDR range meets the
+    identity above it.
     """
     x = max(0.0, min(1.0, float(pq_input)))
     if x <= 0.0:
@@ -80,5 +100,12 @@ def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float
     if luminance > white:
         return x
     srgb_signal = srgb_inverse_eotf(luminance / white)
-    gamma_luminance = white * srgb_signal**2.2
+    if shape is not None:
+        srgb_signal = max(0.0, min(1.0, shape(srgb_signal)))
+    gamma_luminance = white * srgb_signal ** max(0.1, float(target_gamma))
     return max(0.0, min(1.0, pq_inverse_eotf(gamma_luminance)))
+
+
+def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float) -> float:
+    """The correction at its default 2.2 target."""
+    return transform_piecewise_srgb_to_gamma(pq_input, white_level_nits, 2.2)

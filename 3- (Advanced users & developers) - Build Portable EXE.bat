@@ -78,7 +78,13 @@ if not exist "build-portable\Virtual HDR OSD for Windows.exe" (
 )
 
 copy /y "build-portable\Virtual HDR OSD for Windows.exe" "release\Virtual HDR OSD for Windows.exe" >nul
-powershell.exe -NoProfile -Command "$p='%~dp0release\Virtual HDR OSD for Windows.exe'; $h=(Get-FileHash -Algorithm SHA256 -LiteralPath $p).Hash.ToLowerInvariant(); Set-Content -Encoding ASCII -LiteralPath '%~dp0release\Virtual HDR OSD for Windows.sha256.txt' -Value ($h + '  Virtual HDR OSD for Windows.exe')"
+rem The hash is computed with .NET, not Get-FileHash, which Windows PowerShell cannot find
+rem when this is run from a PowerShell 7 terminal -- the file was then written without one.
+powershell.exe -NoProfile -Command "$p='%~dp0release\Virtual HDR OSD for Windows.exe'; $s=[IO.File]::OpenRead($p); try { $h=([BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($s)) -replace '-','').ToLowerInvariant() } finally { $s.Dispose() }; Set-Content -Encoding ASCII -LiteralPath '%~dp0release\Virtual HDR OSD for Windows.sha256.txt' -Value ($h + '  Virtual HDR OSD for Windows.exe')"
+if errorlevel 1 (
+    echo ERROR: the EXE was built, but its SHA-256 could not be written.
+    goto :fail
+)
 
 echo.
 echo BUILD COMPLETE
