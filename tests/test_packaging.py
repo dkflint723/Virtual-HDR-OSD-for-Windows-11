@@ -738,36 +738,64 @@ class UvBootstrapTests(unittest.TestCase):
             with self.subTest(arch=arch):
                 self.assertRegex(digest, r"^[0-9a-f]{64}$")
 
+    @staticmethod
+    def launches():
+        """The environments Install & Run is started from, as Windows PowerShell sees them.
+
+        Started from a PowerShell 7 terminal, it inherits PowerShell 7's module path, and
+        commands from the script half of a module -- Get-FileHash among them -- are then
+        reported as not recognised. That is also what GitHub's runners do, whose steps run
+        in PowerShell 7, and it is how this was found."""
+        inherited = os.environ.get("PSModulePath", "")
+        own = [p for p in inherited.split(os.pathsep) if p and "\\powershell\\7" not in p.lower()]
+        yield "from Explorer or cmd", dict(os.environ, PSModulePath=os.pathsep.join(own))
+        pwsh = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "PowerShell" / "7" / "Modules"
+        if pwsh.is_dir():
+            yield "from a PowerShell 7 terminal", dict(
+                os.environ, PSModulePath=os.pathsep.join([str(pwsh), *own])
+            )
+
     @unittest.skipUnless(shutil.which("powershell"), "Windows PowerShell is unavailable")
     def test_the_download_is_refused_unless_it_matches_the_pin(self):
         """The real function, run in Windows PowerShell -- the shell Install & Run uses --
         with the download stubbed."""
         import subprocess
-        import tempfile
 
         sys.path.insert(0, str(ROOT / "tests"))
         from test_watchdog import extract_function
 
         text = self.text()
         functions = "\n\n".join(
-            extract_function(text, name) for name in ("Get-UvArchitecture", "Install-PinnedUv")
+            extract_function(text, name)
+            for name in ("Get-UvArchitecture", "Get-Sha256Hex", "Install-PinnedUv")
         )
-        with tempfile.TemporaryDirectory() as directory:
-            functions_path = Path(directory) / "funcs.ps1"
-            functions_path.write_text(functions, encoding="utf-8")
-            work = Path(directory) / "work"
-            work.mkdir()
-            completed = subprocess.run(
-                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                 "-File", str(ROOT / "tests" / "install_uv_pin.ps1"),
-                 "-FunctionsPath", str(functions_path), "-Work", str(work)],
-                capture_output=True, text=True, timeout=180,
+        for label, environment in self.launches():
+            with self.subTest(started=label), tempfile.TemporaryDirectory() as directory:
+                functions_path = Path(directory) / "funcs.ps1"
+                functions_path.write_text(functions, encoding="utf-8")
+                work = Path(directory) / "work"
+                work.mkdir()
+                completed = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                     "-File", str(ROOT / "tests" / "install_uv_pin.ps1"),
+                     "-FunctionsPath", str(functions_path), "-Work", str(work)],
+                    capture_output=True, text=True, timeout=180, env=environment,
+                )
+                self.assertEqual(
+                    0, completed.returncode,
+                    f"uv bootstrap harness failed:\n{completed.stdout}\n{completed.stderr}",
+                )
+                self.assertIn("ALL PASS", completed.stdout)
+
+    def test_the_installer_does_not_depend_on_get_filehash(self):
+        """Neither does the portable build, which wrote its .sha256 file without a hash."""
+        for script in (self.SCRIPT, ROOT / "3- (Advanced users & developers) - Build Portable EXE.bat"):
+            code = "\n".join(
+                line for line in script.read_text(encoding="utf-8", errors="replace").splitlines()
+                if not line.lstrip().lower().startswith(("#", "rem "))
             )
-        self.assertEqual(
-            0, completed.returncode,
-            f"uv bootstrap harness failed:\n{completed.stdout}\n{completed.stderr}",
-        )
-        self.assertIn("ALL PASS", completed.stdout)
+            with self.subTest(script=script.name):
+                self.assertNotIn("get-filehash", code.lower())
 
 
 class EntryPointTests(unittest.TestCase):

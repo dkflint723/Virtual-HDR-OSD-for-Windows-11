@@ -23,7 +23,11 @@ foreach ($name in 'uv.exe', 'uvx.exe', 'uvw.exe') {
 }
 $script:asset = Join-Path $Work 'asset.zip'
 Compress-Archive -Path (Join-Path $payload '*') -DestinationPath $script:asset
-$good = (Get-FileHash -LiteralPath $script:asset -Algorithm SHA256).Hash
+# Hashed here independently of the function under test, and in upper case, so the pin
+# comparison's handling of case is exercised. Not with Get-FileHash, for the reason the
+# installer gives: this harness runs in the same Windows PowerShell.
+$bytes = [System.IO.File]::ReadAllBytes($script:asset)
+$good = ([System.BitConverter]::ToString([System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)) -replace '-', '').ToUpperInvariant()
 
 # Functions outrank cmdlets, so this is what Install-PinnedUv reaches.
 $script:requested = @()
@@ -47,7 +51,14 @@ Check 'fetched from the pinned release' `
     ($script:requested[-1] -eq 'https://github.com/astral-sh/uv/releases/download/9.9.9/uv-x86_64-pc-windows-msvc.zip') `
     $script:requested[-1]
 
-# The pin is case-insensitive: Get-FileHash answers in upper case, the pin is lower.
+# The hash helper itself, against the published test vector for "abc".
+$vector = Join-Path $Work 'abc.txt'
+[System.IO.File]::WriteAllBytes($vector, [byte[]](0x61, 0x62, 0x63))
+Check 'the SHA-256 helper matches the published vector' `
+    ((Get-Sha256Hex -Path $vector) -ceq 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') `
+    (Get-Sha256Hex -Path $vector)
+
+# The pin is case-insensitive: the hash above is upper case, this pin is lower.
 $dest = Join-Path $Work 'lowercase'
 Install-PinnedUv -Destination $dest -Version '9.9.9' -Checksums @{ x86_64 = $good.ToLowerInvariant() } -Architecture 'x86_64'
 Check 'a lower-case pin still matches' (Test-Path -LiteralPath (Join-Path $dest 'uv.exe'))

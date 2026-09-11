@@ -41,6 +41,28 @@ function Get-UvArchitecture {
     }
 }
 
+function Get-Sha256Hex {
+    # Get-FileHash is not used, because Windows PowerShell cannot always find it. It lives in
+    # the script half of Microsoft.PowerShell.Utility, and a Windows PowerShell that inherits
+    # PowerShell 7's module path -- which is what Install & Run gets when it is started from
+    # a PowerShell 7 terminal -- loads the wrong edition's copy and reports the command as
+    # not recognised. .NET needs no module.
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [System.IO.File]::OpenRead($Path)
+    try {
+        $sha = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant()
+        }
+        finally {
+            $sha.Dispose()
+        }
+    }
+    finally {
+        $stream.Dispose()
+    }
+}
+
 function Install-PinnedUv {
     # Fetches uv's own release zip and refuses it unless its SHA-256 matches the pin. This
     # replaces running Astral's install script straight from the network with
@@ -65,7 +87,7 @@ function Install-PinnedUv {
         $ProgressPreference = "SilentlyContinue"
         Invoke-WebRequest -Uri "https://github.com/astral-sh/uv/releases/download/$Version/$asset" -OutFile $zip -UseBasicParsing
         $expected = ([string]$Checksums[$Architecture]).ToLowerInvariant()
-        $actual = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+        $actual = Get-Sha256Hex -Path $zip
         # Both normalised, then compared exactly. PowerShell's -ne ignores case, which
         # would make the normalising above look necessary while doing nothing.
         if ($actual -cne $expected) {
