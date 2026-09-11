@@ -8,6 +8,7 @@ downstream able to tell them from real measurements.
 
 from __future__ import annotations
 
+import struct
 import unittest
 
 from sdr_hdr_profile_creator.measure import (
@@ -44,6 +45,7 @@ from sdr_hdr_profile_creator.measure import (
 )
 from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf
 from sdr_hdr_profile_creator.meter import MeterError, Reading
+from sdr_hdr_profile_creator.patterns import PatternContext, measurement_frame
 
 
 def reading(Y: float, x: float, y: float) -> Reading:
@@ -282,23 +284,26 @@ class DeriveTests(unittest.TestCase):
 class GamutIsNotMeasuredTests(unittest.TestCase):
     """Why these readings never reach the profile's colorant tags.
 
-    Measured on a P3 panel whose native green is (0.2698, 0.6859), the green
-    patch read (0.3141, 0.5892) -- 0.0141 from BT.709 green and 0.0967 from the
-    panel's own. scRGB is defined on BT.709, so the patch asks for BT.709 green
-    and the display renders it; the reading describes the encoding, not the panel.
+    On a QD-OLED whose EDID declares green at (0.2698, 0.6859), the green patch
+    read (0.3141, 0.5892) -- 0.0141 from BT.709 green and 0.0967 from the declared
+    one. The patch asked for BT.709 green and the display rendered it, so the
+    reading describes the request, not the panel.
+
+    That is this app's limit, not scRGB's. scRGB reaches wider colours through
+    negative components, and on that panel Windows passed them through: BT.2020
+    green sent that way read (0.2524, 0.6983). What keeps every patch inside BT.709
+    is measurement_frame clamping each channel at zero.
     """
 
-    MEASURED_GREEN = (0.3141, 0.5892)
-    BT709_GREEN = (0.300, 0.600)
-    PANEL_GREEN = (0.269814, 0.685949)
-
-    def distance(self, a, b):
-        return max(abs(a[0] - b[0]), abs(a[1] - b[1]))
-
-    def test_the_reading_was_far_closer_to_bt709_than_to_the_panel(self):
-        to_709 = self.distance(self.MEASURED_GREEN, self.BT709_GREEN)
-        to_panel = self.distance(self.MEASURED_GREEN, self.PANEL_GREEN)
-        self.assertLess(to_709, to_panel / 5)
+    def test_every_patch_is_clamped_inside_bt709(self):
+        """This replaces a test that compared three recorded chromaticities with one
+        another, which passed whatever the code did. This one checks the mechanism."""
+        width, height = 40, 20
+        frame = measurement_frame(
+            width, height, (1.0, -0.1, -0.05), 80.0, PatternContext(is_hdr=True)
+        )
+        centre = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)
+        self.assertEqual((1.0, 0.0, 0.0), centre[:3])
 
     def test_a_calibration_offers_no_primaries_to_write(self):
         self.assertFalse(hasattr(derive(NEUTRAL), "primaries"))

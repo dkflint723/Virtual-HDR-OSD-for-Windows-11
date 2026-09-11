@@ -650,7 +650,7 @@ PATTERNS: tuple[Pattern, ...] = (
 # declared sustained figure of 265. Sustained full-screen luminance needs a meter.
 MEASUREMENT_SEQUENCE: tuple[str, ...] = ("black-level", "peak-white")
 
-# The whole guided run. The three measurements establish what the panel does; tone tracking
+# The whole guided run. The two measurements establish what the panel does; tone tracking
 # is where the user then sets the curve, so leaving it out ended the run halfway through
 # the job with the tone controls never touched.
 GUIDED_SEQUENCE: tuple[str, ...] = MEASUREMENT_SEQUENCE + ("tone-tracking",)

@@ -177,10 +177,11 @@ GUIDE_STEPS: tuple[GuideStep, ...] = (
     ),
     GuideStep(
         "2 · Press Calibrate Display",
-        "This is the whole calibration. It reads what the panel declares about itself -- peak "
-        "brightness, the brightness it can sustain across the whole screen, its black level and "
-        "its primaries -- builds an HDR profile from those, and makes it the Windows default.\n\n"
-        "Nothing is guessed and nothing needs judging by eye. It is also more accurate than "
+        "It reads what the panel declares about itself -- peak brightness, the brightness it "
+        "can sustain across the whole screen, its black level and its primaries -- builds an "
+        "HDR profile from those, and makes it the Windows default.\n\n"
+        "Those are the figures the model declares rather than your unit measured, which is "
+        "what a colorimeter adds, and nothing needs judging by eye. It is also more accurate than "
         "Microsoft's HDR Calibration app in one specific way: that app writes the panel's peak "
         "into the sustained-brightness field, which on an emissive display is several times too "
         "high, and tells Windows to tone-map for a display that cannot exist.",

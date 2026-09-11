@@ -4453,9 +4453,11 @@ class MeasurementCompositionTests(WindowTestCase):
         self.assertAlmostEqual(green, -1.67, places=1)
 
     def test_a_verified_run_says_so(self):
+        """And says what was verified. White balance is all the check covers: every run
+        replaces the greyscale curves whatever white does."""
         self.set_trims(-21.323, -1.576, 0.0)
         self.window._measure_finished(self.calibration(), "")
-        self.assertIn("verified", self.window.status_label.text().lower())
+        self.assertIn("White balance verified.", self.window.status_label.text())
 
     def test_an_unverified_run_reports_how_far_off_it_still_is(self):
         self.set_trims(-21.323, -1.576, 0.0)

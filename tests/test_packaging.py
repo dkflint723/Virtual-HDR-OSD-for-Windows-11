@@ -821,6 +821,22 @@ class ReadmeAccuracyTests(unittest.TestCase):
             with self.subTest(step=key):
                 self.assertIn(pattern_by_key(key).title, self.text())
 
+    def test_the_guided_run_table_lists_exactly_the_guided_steps(self):
+        """The table went on listing Full-frame white as a step after the code dropped
+        it, and every real step was still named, so the check above kept passing. This
+        reads the table itself, and the counts written around it."""
+        from sdr_hdr_profile_creator.patterns import (
+            GUIDED_SEQUENCE, MEASUREMENT_SEQUENCE, pattern_by_key,
+        )
+
+        section = self.text().split("## The guided run", 1)[1].split("\n## ", 1)[0]
+        cells = [line.split("|")[1].strip() for line in section.splitlines() if line.startswith("|")]
+        steps = [cell for cell in cells if cell not in ("step", "---")]
+        self.assertEqual([pattern_by_key(key).title for key in GUIDED_SEQUENCE], steps)
+        self.assertIn(f"{len(GUIDED_SEQUENCE)}-step sequence", section)
+        words = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
+        self.assertIn(f"The first {words[len(MEASUREMENT_SEQUENCE)]} move", section)
+
     def test_the_documented_pattern_keys_match_the_pattern_count(self):
         from sdr_hdr_profile_creator.patterns import PATTERNS
 
@@ -850,12 +866,35 @@ class ReadmeAccuracyTests(unittest.TestCase):
         self.assertIn("spectral correction", text)
 
     def test_the_gamut_is_not_claimed_as_measured(self):
-        """The colorimeter path cannot characterise a gamut: the patches are
-        presented in scRGB, so they report the encoding rather than the panel.
+        """The colorimeter path does not characterise a gamut: every patch is clamped
+        inside BT.709, so a reading describes the request rather than the panel.
         Claiming otherwise sent a wrong gamut into a profile once already."""
         text = self.text()
         self.assertNotIn("The real primaries, replacing the ones DXGI reports", text)
         self.assertNotIn("primaries through DXGI", text)
+
+    def test_the_reason_given_for_the_unmeasured_gamut_is_the_real_one(self):
+        """The README once said the gamut could not be measured because scRGB is
+        defined on BT.709. scRGB reaches wider colours through negative components,
+        and Windows passed them through on the one panel tried; what keeps every
+        patch inside BT.709 is measurement_frame clamping them at zero. The README
+        names the clamp now, so removing the clamp fails this until it is updated."""
+        import struct
+
+        from sdr_hdr_profile_creator.patterns import PatternContext, measurement_frame
+
+        width, height = 40, 20
+        frame = measurement_frame(
+            width, height, (1.0, -0.5, 0.0), 80.0, PatternContext(is_hdr=True)
+        )
+        green = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)[1]
+        text = self.text()
+        self.assertNotIn("cannot describe", text)
+        self.assertNotIn("report the encoding", text)
+        self.assertEqual(
+            green == 0.0, "clamped to colours inside" in text,
+            "the README and measurement_frame disagree about the clamp",
+        )
 
 
 class InstallerWriteVerificationTests(unittest.TestCase):

@@ -674,10 +674,11 @@ class Calibration:
 
     @property
     def verified(self) -> bool:
-        """Whether the display was already neutral when this was measured.
+        """Whether white was already neutral when this was measured.
 
-        True means the run found nothing left to correct, which for a second pass
-        over an applied calibration is the confirmation that it worked.
+        White only. True means the run found no white balance left to correct, which
+        for a second pass over an applied calibration confirms the trims worked. It
+        says nothing about the greyscale, which every run re-measures and replaces.
         """
         return self.white_delta_uv <= VERIFIED_DELTA_UV
 

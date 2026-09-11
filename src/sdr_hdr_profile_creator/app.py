@@ -500,8 +500,9 @@ class MainWindow(FluentWidget):
             "Turns HDR on if it is off, reads the panel's peak, sustained and black luminance "
             "and its primaries from its EDID, builds an HDR profile from them, and makes it "
             "the Windows default.\n\n"
-            "Nothing here is guessed and nothing needs judging by eye. Use the sliders "
-            "afterwards only if you want to depart from what the panel reports."
+            "These are the figures the model declares, not your unit measured -- a "
+            "colorimeter is what changes that. Nothing needs judging by eye. Use the "
+            "sliders afterwards only if you want to depart from what the panel reports."
         )
         self.calibrate_button.clicked.connect(self._calibrate_display)
         heading.addWidget(self.calibrate_button)
@@ -3631,7 +3632,10 @@ class MainWindow(FluentWidget):
                 f"{measure.VERIFIED_DELTA_UV} a calibrated display is held to"
             )
             if was_corrected:
-                white_note = "Verified. " + white_note + ", so the correction is working"
+                # White balance only. Every run replaces the greyscale curves and the
+                # luminance figures whatever white does, so "Verified." on its own
+                # claimed a check of the whole calibration that nothing had made.
+                white_note = "White balance verified. " + white_note
         else:
             direction = "warm" if result.white_error[0] > 0 else "cool"
             white_note = (

@@ -1,6 +1,6 @@
 # Virtual HDR OSD for Windows
 
-**Virtual HDR OSD for Windows** is an HDR calibration tool for Windows 11. It measures what a display actually does, adjusts the tone response by eye against calibration patterns, and writes the result into the MHC2 profile Windows applies to that display.
+**Virtual HDR OSD for Windows** is an HDR calibration tool for Windows 11. It corrects a display's white balance, greyscale and tone through the MHC2 profile Windows applies to that display, the mechanism Windows HDR Calibration also uses. It starts from the figures the panel declares about itself; you can then adjust by eye against calibration patterns, or measure luminance, white balance and greyscale tracking with an optional colorimeter. It does not measure the panel's gamut, and it does not convert SDR into HDR: the name refers to the monitor menu, the OSD, that it stands in for.
 
 <img src="assets/tab1.png">
 
@@ -28,13 +28,16 @@ It now also generates its own calibration patterns. A guided sequence measures b
 >
 > **Measured with an instrument.** The optional colorimeter path measures luminance,
 > white balance, and how the display tracks the PQ curve across a 33-point greyscale
-> ramp -- the last of which it also corrects. It does not characterise the gamut and
-> cannot: the patches are presented in scRGB, so they report the encoding rather than
-> the panel. The colour sweeps it measures are reported and never applied, because the
-> profile carries a matrix and three per-channel curves, and no such thing can express
-> an error that depends on both hue and saturation. A colorimeter also needs a
-> spectral correction matched to the panel type, and without one its chromaticity readings
-> can be several hundred kelvin out on a quantum-dot display.
+> ramp -- and corrects the last two. It does not characterise the gamut. That is a
+> limit of this app rather than of the method: every patch is clamped to colours inside
+> BT.709, so a reading describes what was asked for, not the panel's own primaries.
+> scRGB reaches wider colours through negative components, and on the one panel tried,
+> a QD-OLED, Windows passed them through: BT.2020's primaries sent that way read wider
+> than DCI-P3. The colour sweeps it measures are written to the meter log and never
+> applied, because the profile carries a matrix and three per-channel curves, and no such
+> thing can express an error that depends on both hue and saturation. A colorimeter also
+> needs a spectral correction matched to the panel type, and without one its chromaticity
+> readings can be several hundred kelvin out on a quantum-dot display.
 
 ---
 
@@ -744,12 +747,15 @@ reference white at every level rather than only at the one the trims were solved
 Above the measured peak nothing is corrected -- the display is rolling off there by rules
 that were not measured, and replacing that with a hard clip would be worse than leaving
 it alone -- so the correction fades out between the measured peak and the top of the
-range. The primaries are deliberately left alone: the patches are presented in scRGB, which is
-defined on BT.709, so a measured "red" is BT.709 red as the display renders it rather than
-the display's own primary. On a P3 panel whose native green is (0.2698, 0.6859) the green
-patch read (0.3141, 0.5892) -- 0.0141 from BT.709 and 0.0967 from the panel. Those readings
-are exactly right for white balance, which acts on the signal this app sends, and useless
-as a description of the gamut. Press **Apply Edits** to write the result out.
+range. The primaries are deliberately left alone. Every patch is clamped to non-negative
+scRGB, which keeps it inside BT.709, so a measured "red" is BT.709 red as the display
+renders it rather than the display's own primary. On a QD-OLED whose EDID declares its green
+at (0.2698, 0.6859), the green patch read (0.3141, 0.5892) -- 0.0141 from BT.709 green and
+0.0967 from the declared one. Those readings are exactly right for white balance, which acts
+on the signal this app sends, and useless as a description of the gamut. The clamp is the
+limit, not scRGB: BT.2020 green, sent with the negative components it needs, read
+(0.2524, 0.6983) on the same panel, wider than its EDID claims. Press **Apply Edits** to
+write the result out.
 
 ## Sustained luminance
 
@@ -835,9 +841,10 @@ real, but the target it is held to inherits the spread between those factors.
 
 The white balance trims are folded into the correction already applied rather than
 replacing it, because a measurement describes the display *as currently corrected*. That
-makes a second run a verification: a calibration that worked re-measures as neutral,
-leaves the correction untouched and reports "verified", while one that fell short
-tightens and converges.
+makes a second run a check on white: a white balance that worked re-measures as neutral,
+leaves the trims untouched and reports "White balance verified", while one that fell
+short tightens and converges. The word covers white alone. The same run re-measures the
+greyscale and replaces its curves whatever white does, as the next paragraph explains.
 
 The greyscale curves work the other way round, and deliberately. Each ramp point is
 paired with the code that was actually sent for it -- after whatever curve was already in
@@ -939,18 +946,23 @@ The view opens on a 3-step sequence and states which step it is on.
 | --- | --- | --- |
 | Black level | minimum luminance | lower a shape until it disappears |
 | Peak white | peak luminance | raise a shape until it stops separating from its surround |
-| Full-frame white | maximum full-frame luminance | the same, with the whole screen lit |
 | Tone tracking | nothing — sets Gamma, Midtone Brightness and Contrast | |
 
-The first three move the *pattern* rather than the display. Nobody can say what luminance a
+The first two move the *pattern* rather than the display. Nobody can say what luminance a
 patch is, but anybody can say whether a shape is visible, so the level at which it
 disappears is the reading. This is how Windows HDR Calibration works, and it means the same
 patterns can later be driven by a meter.
 
 `Enter` records a reading and advances. On the last step it opens the results, where `Enter`
-writes all three into the profile's MHC2 header and `lumi` tag. Leaving without applying
-does not lose them: each is written into the editor as it is taken, and the next Apply Edits
-writes them out.
+writes both readings into the profile's MHC2 header. Leaving without applying does not lose
+them: each is written into the editor as it is taken, and the next Apply Edits writes them
+out.
+
+Full-frame white is not a step, though its pattern is still there on its number key. It
+records nothing: with the whole screen lit, the shape and its surround dim together, so it
+finds the same clipping point as Peak white rather than what the panel sustains. The
+sustained figure in the profile's `lumi` tag comes from the panel's own data or from a
+meter.
 
 ## Reading a clipping point
 
@@ -1556,8 +1568,9 @@ It is not:
 - a measurement instrument in its own right. Without a colorimeter every reading depends
   on the observer, and with one the accuracy is the instrument's, not this app's;
 - a colour characterisation. Primaries and gamut are read from the panel, never measured
-  -- the patches are scRGB, which is defined on BT.709, so they cannot describe the
-  panel's own primaries however carefully they are read;
+  -- every patch is clamped to colours inside BT.709, so no reading describes the panel's
+  own primaries. The limit is this app's, not scRGB's, which reaches wider colours
+  through negative components;
 - a gamut correction. The colour sweeps are diagnostic: MHC2 carries a matrix and three
   per-channel curves, and that cannot express an error depending on hue and saturation
   together;

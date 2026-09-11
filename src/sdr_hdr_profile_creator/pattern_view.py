@@ -909,8 +909,8 @@ class PatternWindow(QWidget):
 
         Finding a threshold and then losing it is the whole calibration wasted, so the
         reading goes straight into the editor state and from there into the MHC2 header
-        and lumi tag of the next generated profile. Nothing is measured that the profile
-        does not then carry.
+        of the next generated profile. Nothing is measured that the profile does not
+        then carry.
         """
         if not self.pattern.level_driven or not self.pattern.records or self._measure is None:
             return False
