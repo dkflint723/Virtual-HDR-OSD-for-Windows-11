@@ -1,0 +1,9 @@
+# Batch files reach cmd.exe with CRLF line endings on every checkout, whatever
+# core.autocrlf says, and in GitHub's source zip. With LF alone cmd.exe can lose its
+# place jumping to a label, and the standalone watchdog zip is compared byte for byte
+# with the scripts beside it, which only holds if every checkout agrees.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Distributed as built; never converted.
+*.zip binary
