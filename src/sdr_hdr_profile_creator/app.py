@@ -1817,8 +1817,20 @@ class MainWindow(FluentWidget):
     # ----------------------------------------------------------------------------------
     # Display detection and application
 
+    def _is_selected_display(self, display: DisplayInfo) -> bool:
+        """Whether this is the display the user chose.
+
+        Matched on stable_key, the monitor's EDID path, which survives reboots and
+        driver restarts. The selection used to be saved under ``key``, which embeds the
+        adapter LUID that Windows reissues, so it never matched after a restart and the
+        first display was selected instead. A key saved that way by an earlier build is
+        still accepted, once, and replaced on the next save.
+        """
+        chosen = self.state.selected_display_key
+        return bool(chosen) and chosen in (display.stable_key, display.key)
+
     def _refresh_displays(self, _checked: bool = False, initial: bool = False) -> None:
-        selected_key = self.state.selected_display_key
+        remembered = self.state.selected_display_key
         try:
             displays = enumerate_displays()
         except Exception as exc:
@@ -1831,13 +1843,12 @@ class MainWindow(FluentWidget):
             self.display_combo.clear()
             for display in displays:
                 self.display_combo.addItem(display.label, userData=display)
-            selected_index = 0
-            for index, display in enumerate(displays):
-                if display.key == selected_key:
-                    selected_index = index
-                    break
+            found = next(
+                (index for index, display in enumerate(displays) if self._is_selected_display(display)),
+                None,
+            )
             if displays:
-                self.display_combo.setCurrentIndex(selected_index)
+                self.display_combo.setCurrentIndex(found if found is not None else 0)
 
         if not displays:
             self._current_display_snapshot = None
@@ -1846,7 +1857,7 @@ class MainWindow(FluentWidget):
 
         selected = self.display_combo.currentData()
         if isinstance(selected, DisplayInfo):
-            self.state.selected_display_key = selected.key
+            self.state.selected_display_key = selected.stable_key
             self._current_display_snapshot = selected
             self._update_mode_badge(selected)
             if initial:
@@ -1854,7 +1865,15 @@ class MainWindow(FluentWidget):
             self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
             self._record_original_profiles(selected)
-            self._set_status(f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.", "ok")
+            missing = (
+                " The display chosen last time is not connected."
+                if remembered and found is None
+                else ""
+            )
+            self._set_status(
+                f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.{missing}",
+                "warning" if missing else "ok",
+            )
             if self._prefill_luminance_from_panel(selected):
                 state = self.state.hdr
                 self._set_status(
@@ -1870,7 +1889,7 @@ class MainWindow(FluentWidget):
         selected = self.display_combo.currentData()
         if not isinstance(selected, DisplayInfo):
             return
-        self.state.selected_display_key = selected.key
+        self.state.selected_display_key = selected.stable_key
         self._current_display_snapshot = selected
         self._last_detected_mode = None
         # Re-read the panel, because the editor holds one HDR ModeState for every
@@ -1905,8 +1924,14 @@ class MainWindow(FluentWidget):
     def _selected_display(self) -> DisplayInfo | None:
         selected = self.display_combo.currentData()
         if isinstance(selected, DisplayInfo):
-            if self._current_display_snapshot and self._current_display_snapshot.key == selected.key:
-                return self._current_display_snapshot
+            # The combo holds the objects from the last refresh; the poll keeps a fresher
+            # one. After a driver restart or a wake the adapter LUID in it has changed
+            # while the monitor has not, so this matches on the monitor. Matching on key
+            # handed back the stale object, and every Win32 call then addressed an
+            # adapter that no longer existed.
+            snapshot = self._current_display_snapshot
+            if snapshot is not None and snapshot.stable_key == selected.stable_key:
+                return snapshot
             return selected
         return None
 
@@ -1965,13 +1990,25 @@ class MainWindow(FluentWidget):
             return
         if self.display_combo.count() == 0:
             return
-        key = self.state.selected_display_key
         try:
             displays = enumerate_displays()
         except Exception:
             return
-        selected = next((display for display in displays if display.key == key), displays[0] if displays else None)
+        selected = next((display for display in displays if self._is_selected_display(display)), None)
         if selected is None:
+            # The display this window is pointed at has gone: unplugged, asleep, or
+            # switched off. This used to fall back to displays[0] -- another monitor --
+            # compare its mode with the old one's, and aim a forced reinstall or an SDR
+            # restore at a display nobody chose, while the picker still named the old one.
+            # Said once, and _last_detected_mode is cleared so the return of the display
+            # is not mistaken for a mode change.
+            if self._last_detected_mode is not None:
+                self._set_status(
+                    "The selected display is no longer connected, so nothing was changed. "
+                    "Reconnect it, or press Refresh to choose another.",
+                    "warning",
+                )
+            self._last_detected_mode = None
             return
         self._current_display_snapshot = selected
         self._update_mode_badge(selected)

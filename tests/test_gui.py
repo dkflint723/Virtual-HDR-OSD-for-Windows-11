@@ -1048,6 +1048,59 @@ class MultiMonitorTests(WindowTestCase):
             self.fail(f"display {display.key} is not in the combo")
         self.assertEqual(self.window._selected_display().key, display.key)
 
+    def test_a_vanished_selection_is_not_replaced_by_another_display(self):
+        """The poll used to fall back to displays[0] -- a different monitor -- compare its
+        mode with the old one's, and aim a reinstall or an SDR restore at it."""
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.second.advanced_color_kind = "SDR"
+        self.second.advanced_color_enabled = False
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        self.assertEqual(self.display.stable_key, self.window._current_display_snapshot.stable_key)
+        self.assertIn("no longer connected", self.window.status_label.text())
+        self.assertIsNone(self.window._last_detected_mode)
+
+    def test_the_selection_follows_the_monitor_through_an_adapter_change(self):
+        """A driver restart or a wake reissues the adapter LUID, and with it `key`. It is
+        still the same monitor, and every Win32 call has to carry the new LUID. Listed
+        second, so falling back to the first display cannot pass by accident."""
+        self.select(self.display)
+        reissued = hdr_display(key="NEWLUID:0:1")
+        self.displays = [self.second, reissued]
+        self.window._poll_windows_mode()
+        self.assertEqual("NEWLUID:0:1", self.window._selected_display().key)
+
+    def test_the_selection_is_remembered_by_monitor_across_a_restart(self):
+        self.select(self.second)
+        self.window._save_state_now()
+        saved = json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
+        self.assertEqual(self.second.stable_key, saved["selected_display_key"])
+
+        # A reboot: the same two monitors under new adapter LUIDs.
+        first, second = hdr_display(key="L2:0:1"), hdr_display(key="L2:0:2")
+        second.friendly_name = "Second Monitor"
+        self.displays = [first, second]
+        window = app_module.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        for timer in (window.mode_timer, window.gamma_runtime_timer, window.live_timer):
+            timer.stop()
+        self.assertEqual("Second Monitor", window._selected_display().friendly_name)
+
+    def test_a_selection_saved_by_an_earlier_build_still_selects_its_display(self):
+        """Earlier builds saved the LUID-bearing key. It still matches, once, and is then
+        replaced by the monitor's stable key."""
+        self.window.state.selected_display_key = self.second.key
+        self.window._refresh_displays()
+        self.assertEqual(self.second.key, self.window._selected_display().key)
+        self.assertEqual(self.second.stable_key, self.window.state.selected_display_key)
+
+    def test_refresh_says_when_the_remembered_display_is_missing(self):
+        self.window.state.selected_display_key = "Gone Monitor|\\\\.\\DISPLAY9"
+        self.window._refresh_displays()
+        self.assertIn("not connected", self.window.status_label.text())
+
     def test_each_display_gets_a_distinct_working_pair(self):
         first = {p.name for p in self.window._working_profile_paths(self.display)}
         second = {p.name for p in self.window._working_profile_paths(self.second)}
