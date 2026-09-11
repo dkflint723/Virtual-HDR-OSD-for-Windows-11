@@ -257,6 +257,9 @@ class MainWindow(FluentWidget):
         # app, and found it off again with nothing to say why.
         self._loading_controls = False
         self._last_detected_mode: DisplayMode | None = None
+        # Set while the chosen display is missing from Windows' list, so that is
+        # said once, and its return is said once, rather than every 900 ms.
+        self._selected_display_missing = False
         self._current_display_snapshot: DisplayInfo | None = None
         self._persisted_live_registry = self._load_live_registry()
         # Set before any measurement so _stop_placement_watch is safe to call from
@@ -1862,8 +1865,13 @@ class MainWindow(FluentWidget):
             self.state.selected_display_key = selected.stable_key
             self._current_display_snapshot = selected
             self._update_mode_badge(selected)
-            if initial:
+            if initial or found is None:
+                # A fresh baseline. After start-up, found is None means the display being
+                # watched has gone and another has taken its place; comparing the
+                # newcomer's mode with the departed one's would read as a switch on a
+                # display nobody switched, and answer it with a reinstall or an SDR restore.
                 self._last_detected_mode = selected.current_mode  # type: ignore[assignment]
+            self._selected_display_missing = False
             self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
             self._record_original_profiles(selected)
@@ -1894,6 +1902,7 @@ class MainWindow(FluentWidget):
         self.state.selected_display_key = selected.stable_key
         self._current_display_snapshot = selected
         self._last_detected_mode = None
+        self._selected_display_missing = False
         # Re-read the panel, because the editor holds one HDR ModeState for every
         # display. Nothing here used to touch the colorimetry at all, so picking a
         # second display wrote the first one's gamut and luminance into its profile.
@@ -1998,20 +2007,27 @@ class MainWindow(FluentWidget):
             return
         selected = next((display for display in displays if self._is_selected_display(display)), None)
         if selected is None:
-            # The display this window is pointed at has gone: unplugged, asleep, or
-            # switched off. This used to fall back to displays[0] -- another monitor --
-            # compare its mode with the old one's, and aim a forced reinstall or an SDR
-            # restore at a display nobody chose, while the picker still named the old one.
-            # Said once, and _last_detected_mode is cleared so the return of the display
-            # is not mistaken for a mode change.
-            if self._last_detected_mode is not None:
+            # The display this window is pointed at has gone: unplugged, asleep, switched
+            # off, or missing for a moment mid-switch. This used to fall back to
+            # displays[0] -- another monitor -- compare its mode with the old one's, and
+            # aim a forced reinstall or an SDR restore at a display nobody chose, while the
+            # picker still named the old one.
+            #
+            # _last_detected_mode is kept, on the rule the run guard above follows:
+            # deferred, not swallowed. A display that comes back in the other mode has
+            # been switched, and forgetting the mode it left in would lose exactly the
+            # transition Automatic Mode Switching exists to answer.
+            if not self._selected_display_missing:
+                self._selected_display_missing = True
                 self._set_status(
                     "The selected display is no longer connected, so nothing was changed. "
                     "Reconnect it, or press Refresh to choose another.",
                     "warning",
                 )
-            self._last_detected_mode = None
             return
+        if self._selected_display_missing:
+            self._selected_display_missing = False
+            self._set_status(f"{selected.friendly_name} is connected again.", "ok")
         self._current_display_snapshot = selected
         self._update_mode_badge(selected)
         if hasattr(self, "hdr_switch"):

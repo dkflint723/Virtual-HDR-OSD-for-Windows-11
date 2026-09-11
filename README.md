@@ -1456,6 +1456,8 @@ This makes it suitable as a standalone workaround for users whose existing SDR a
 
 Both Virtual HDR OSD and the standalone watchdog identify displays through the Windows display configuration APIs.
 
+The app remembers the display you chose by the monitor itself, so the choice survives a reboot or a graphics driver restart. If that display disconnects, the app changes nothing on any other display while it is gone and says so in the status line; a mode switch that happened while it was away is treated like any other when it returns. Press **Refresh** to choose another display instead.
+
 For best results:
 
 - install/capture the watchdog while the displays you normally use are connected;

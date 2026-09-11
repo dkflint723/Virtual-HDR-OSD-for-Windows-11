@@ -1059,7 +1059,71 @@ class MultiMonitorTests(WindowTestCase):
         self.window._poll_windows_mode()
         self.assertEqual(self.display.stable_key, self.window._current_display_snapshot.stable_key)
         self.assertIn("no longer connected", self.window.status_label.text())
-        self.assertIsNone(self.window._last_detected_mode)
+
+    def test_a_vanished_display_is_reported_once(self):
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        self.window._set_status("sentinel", "ok")
+        marked = self.window.status_label.text()
+        self.window._poll_windows_mode()
+        self.assertEqual(marked, self.window.status_label.text())
+
+    def test_a_display_that_returns_in_the_other_mode_is_handled_as_a_switch(self):
+        """A display can drop out of the list for a moment mid-switch. Forgetting the
+        mode it left in lost exactly the transition Automatic Mode Switching answers."""
+        self.window.state.follow_windows_mode = False
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        back = hdr_display()
+        back.advanced_color_kind = "SDR"
+        back.advanced_color_enabled = False
+        self.displays = [back, self.second]
+        self.window._poll_windows_mode()
+        self.assertIn("Windows switched to SDR", self.window.status_label.text())
+
+    def test_a_display_that_returns_unchanged_is_announced_once(self):
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        self.displays = [self.display, self.second]
+        self.window._poll_windows_mode()
+        self.assertIn("connected again", self.window.status_label.text())
+        self.window._set_status("sentinel", "ok")
+        marked = self.window.status_label.text()
+        self.window._poll_windows_mode()
+        self.assertEqual(marked, self.window.status_label.text())
+
+    def test_refresh_onto_another_display_starts_a_fresh_baseline(self):
+        """Refresh picks the first display when the chosen one is gone. Comparing that
+        display's mode with the departed one's read as a switch nobody made."""
+        self.window.state.follow_windows_mode = False
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.second.advanced_color_kind = "SDR"
+        self.second.advanced_color_enabled = False
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        self.window._refresh_displays()
+        self.window._set_status("sentinel", "ok")
+        marked = self.window.status_label.text()
+        self.window._poll_windows_mode()
+        self.assertEqual(marked, self.window.status_label.text())
+
+    def test_choosing_another_display_while_one_is_missing_is_not_a_return(self):
+        self.select(self.display)
+        self.window._last_detected_mode = "HDR"
+        self.displays = [self.second]
+        self.window._poll_windows_mode()
+        self.select(self.second)
+        self.window._set_status("sentinel", "ok")
+        marked = self.window.status_label.text()
+        self.window._poll_windows_mode()
+        self.assertEqual(marked, self.window.status_label.text())
 
     def test_the_selection_follows_the_monitor_through_an_adapter_change(self):
         """A driver restart or a wake reissues the adapter LUID, and with it `key`. It is
