@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Final
+from typing import Callable, Final
 
 CORRECTION_OPTIONS: Final[tuple[str, ...]] = (
     "Off",
@@ -70,7 +70,10 @@ def resolve_white_level(option: str, windows_white_nits: float | None) -> float 
 
 
 def transform_piecewise_srgb_to_gamma(
-    pq_input: float, white_level_nits: float, target_gamma: float = 2.2
+    pq_input: float,
+    white_level_nits: float,
+    target_gamma: float = 2.2,
+    shape: Callable[[float], float] | None = None,
 ) -> float:
     """Port of dylanraga's current NVIDIA LUT generator direction.
 
@@ -83,6 +86,11 @@ def transform_piecewise_srgb_to_gamma(
     of the correction a user might genuinely want to move, and moving it *inside* the
     correction keeps everything above diffuse white at exact identity. Applying a separate
     power afterwards does not -- see :func:`~.curves._shape_curve`.
+
+    ``shape`` is the same idea for any other tone control: a function on the relative SDR
+    signal, applied before the power curve. It must hold 0 at 0 and 1 at 1, which is what
+    keeps diffuse white where it is and the curve continuous where the SDR range meets the
+    identity above it.
     """
     x = max(0.0, min(1.0, float(pq_input)))
     if x <= 0.0:
@@ -92,6 +100,8 @@ def transform_piecewise_srgb_to_gamma(
     if luminance > white:
         return x
     srgb_signal = srgb_inverse_eotf(luminance / white)
+    if shape is not None:
+        srgb_signal = max(0.0, min(1.0, shape(srgb_signal)))
     gamma_luminance = white * srgb_signal ** max(0.1, float(target_gamma))
     return max(0.0, min(1.0, pq_inverse_eotf(gamma_luminance)))
 

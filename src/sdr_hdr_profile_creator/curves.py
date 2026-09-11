@@ -233,11 +233,20 @@ def _contrast_curve(value: float, amount_percent: float) -> float:
     return 1.0 - 0.5 * (2.0 * (1.0 - x)) ** exponent
 
 
+def _brightness_lift(value: float, amount: float) -> float:
+    """A restrained midtone lift or cut that holds both endpoints."""
+    return value + amount * value * (1.0 - value)
+
+
 def _shape_curve(value: float, state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> float:
     x = clamp(value)
     if not hdr:
         # SDR is comparison-only; Virtual HDR OSD never modifies its profile path.
         return x
+
+    contrast = float(state.contrast)
+    # The wider UI range remains endpoint-preserving; fine steps make small trims easy.
+    brightness = max(-0.35, min(0.35, float(state.brightness_trim) / 100.0))
 
     # Optional SDR-in-HDR correction follows dylanraga's documented direction.
     white_level = resolve_white_level(state.sdr_gamma_correction, sdr_white_nits)
@@ -248,21 +257,25 @@ def _shape_curve(value: float, state: ModeState, hdr: bool, sdr_white_nits: floa
         # diffuse white that the correction deliberately leaves at identity. At 2.0 that
         # put diffuse white 32% high and 1000-nit highlights 20% high, so moving one
         # slider silently rebrightened native HDR content the correction never touches.
-        y = transform_piecewise_srgb_to_gamma(x, white_level, float(state.gamma))
-    else:
-        # With no correction there is nothing to fold the target into, so gamma stays an
-        # independent power. 2.20 is mathematically neutral.
-        gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
-        y = x**gamma_ratio
+        #
+        # Contrast and Midtone Brightness fold in the same way and for the same reason.
+        # Applied to PQ code afterwards, +10 contrast lifted a 1000-nit highlight by 17%,
+        # so native HDR the correction leaves alone moved with every trim. Inside, they
+        # shape the SDR range the correction owns and identity above diffuse white holds
+        # at every setting. With the correction off they stay whole-range HDR controls,
+        # which is how the README documents them.
+        return clamp(transform_piecewise_srgb_to_gamma(
+            x, white_level, float(state.gamma),
+            shape=lambda signal: _brightness_lift(_contrast_curve(signal, contrast), brightness),
+        ))
 
-    # Contrast uses a smooth symmetric S-curve with fixed 0, 0.5 and 1 anchors.
-    y = _contrast_curve(y, float(state.contrast))
-
-    # Brightness is a restrained midtone lift/cut that preserves black and white.
-    # The wider UI range remains endpoint-preserving; fine steps make small trims easy.
-    brightness = max(-0.35, min(0.35, float(state.brightness_trim) / 100.0))
-    y = y + brightness * y * (1.0 - y)
-    return clamp(y)
+    # With no correction there is nothing to fold into, so each control acts on the
+    # whole PQ range. Gamma 2.20 is mathematically neutral; contrast is a smooth
+    # symmetric S-curve anchored at 0, 0.5 and 1.
+    gamma_ratio = max(0.65, min(1.45, float(state.gamma) / 2.2))
+    y = x**gamma_ratio
+    y = _contrast_curve(y, contrast)
+    return clamp(_brightness_lift(y, brightness))
 
 
 def build_transform(state: ModeState, hdr: bool, sdr_white_nits: float | None = None) -> CalibrationTransform:

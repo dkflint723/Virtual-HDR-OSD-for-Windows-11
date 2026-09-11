@@ -1150,6 +1150,101 @@ class InPlaceProfileRetryTests(unittest.TestCase):
         )
 
 
+class CorrectionFoldsToneControlsTests(unittest.TestCase):
+    """While the SDR-in-HDR correction is on, Contrast and Midtone Brightness shape the SDR
+    range it owns, as Gamma already did. With it off they stay whole-range HDR controls,
+    which is what the README and the tooltips promise.
+
+    Applied to PQ code after the correction, +10 contrast lifted a 1000-nit highlight by
+    17%: native HDR, which the correction exists to leave alone, moved with every trim."""
+
+    WHITE = 200.0
+    TRIMS = (-30.0, -10.0, 10.0, 30.0)
+
+    @staticmethod
+    def state(correction="200 nits / Brightness 30", contrast=0.0, brightness=0.0):
+        state = ModeState.neutral("HDR")
+        state.sdr_gamma_correction = correction
+        state.contrast = contrast
+        state.brightness_trim = brightness
+        return state
+
+    def shaped_nits(self, state, nits):
+        from sdr_hdr_profile_creator.curves import _shape_curve
+        from sdr_hdr_profile_creator.gamma_correction import pq_eotf
+
+        return pq_eotf(_shape_curve(pq_inverse_eotf(nits), state, True, self.WHITE))
+
+    def test_highlights_are_exact_identity_at_every_trim_while_correcting(self):
+        from sdr_hdr_profile_creator.curves import _shape_curve
+
+        for contrast in self.TRIMS:
+            for brightness in self.TRIMS:
+                state = self.state(contrast=contrast, brightness=brightness)
+                for nits in (201.0, 400.0, 1000.0, 4000.0, 10000.0):
+                    code = pq_inverse_eotf(nits)
+                    with self.subTest(contrast=contrast, brightness=brightness, nits=nits):
+                        self.assertEqual(code, _shape_curve(code, state, True, self.WHITE))
+
+    def test_they_still_move_the_sdr_range_while_correcting(self):
+        """Folded in, they must still do something, or they are controls that do nothing."""
+        neutral = self.state()
+        self.assertGreater(
+            abs(self.shaped_nits(self.state(contrast=20.0), 20.0) - self.shaped_nits(neutral, 20.0)),
+            0.02 * self.shaped_nits(neutral, 20.0),
+        )
+        self.assertGreater(
+            self.shaped_nits(self.state(brightness=20.0), 50.0),
+            1.02 * self.shaped_nits(neutral, 50.0),
+        )
+
+    def test_the_trims_shape_the_sdr_signal_before_the_power_curve(self):
+        """The documented contract, checked against the formula written out by hand.
+        Shaping relative luminance after the power instead keeps every property above
+        and moves the pivot, so only this can tell the two apart."""
+        from sdr_hdr_profile_creator.curves import _brightness_lift, _contrast_curve
+        from sdr_hdr_profile_creator.gamma_correction import srgb_inverse_eotf
+
+        state = self.state(contrast=20.0, brightness=10.0)
+        for nits in (5.0, 50.0, 150.0):
+            signal = srgb_inverse_eotf(nits / self.WHITE)
+            expected = self.WHITE * _brightness_lift(_contrast_curve(signal, 20.0), 0.10) ** 2.2
+            with self.subTest(nits=nits):
+                self.assertAlmostEqual(self.shaped_nits(state, nits), expected, delta=expected * 1e-6)
+
+    def test_diffuse_white_stays_continuous_at_every_trim(self):
+        from sdr_hdr_profile_creator.curves import _shape_curve
+
+        below = pq_inverse_eotf(self.WHITE * (1.0 - 1e-6))
+        above = pq_inverse_eotf(self.WHITE * (1.0 + 1e-6))
+        for contrast in self.TRIMS:
+            for brightness in self.TRIMS:
+                state = self.state(contrast=contrast, brightness=brightness)
+                with self.subTest(contrast=contrast, brightness=brightness):
+                    self.assertAlmostEqual(
+                        _shape_curve(below, state, True, self.WHITE),
+                        _shape_curve(above, state, True, self.WHITE),
+                        delta=1e-4,
+                    )
+
+    def test_the_curve_stays_monotone_at_every_trim_while_correcting(self):
+        from sdr_hdr_profile_creator.curves import _shape_curve
+
+        for contrast in (-30.0, 30.0):
+            for brightness in (-30.0, 30.0):
+                state = self.state(contrast=contrast, brightness=brightness)
+                values = [_shape_curve(i / 4095, state, True, self.WHITE) for i in range(4096)]
+                with self.subTest(contrast=contrast, brightness=brightness):
+                    self.assertTrue(all(b >= a for a, b in zip(values, values[1:])))
+
+    def test_with_the_correction_off_they_act_on_the_whole_range(self):
+        """Documented behaviour, kept: an HDR OSD's contrast moves highlights too."""
+        for trim in ({"contrast": 10.0}, {"brightness": 10.0}):
+            with self.subTest(**trim):
+                moved = self.shaped_nits(self.state(correction="Off", **trim), 1000.0)
+                self.assertGreater(abs(moved - 1000.0), 50.0)
+
+
 class CorruptStateTests(unittest.TestCase):
     """What a damaged or hand-edited state file turns into.
 
