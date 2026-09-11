@@ -3536,8 +3536,8 @@ class MainWindow(FluentWidget):
         if state.full_frame_luminance_nits > state.peak_luminance_nits:
             state.full_frame_luminance_nits = state.peak_luminance_nits
 
-        # panel_primaries is deliberately untouched. The patches are presented in
-        # scRGB, which is defined on BT.709, so a measured "red" is BT.709 red as
+        # panel_primaries is deliberately untouched. The patches are non-negative
+        # scRGB, which keeps them inside BT.709, so a measured "red" is BT.709 red as
         # the display renders it -- not the display's own primary. Writing that to
         # the profile's colorant tags replaced correct DXGI figures with a
         # narrower, wrong gamut. The same readings are exactly right for the

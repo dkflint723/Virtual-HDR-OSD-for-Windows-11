@@ -13,11 +13,16 @@ surprising reading may well be the panel.
 
 **What the red, green and blue patches are, and are not.** They are presented in
 scRGB, which is defined on BT.709 primaries, so asking for ``(1, 0, 0)`` asks for
-BT.709 red and Windows renders it inside whatever the panel can do. Measured on a
-P3 panel whose native green is (0.2698, 0.6859), the reading came back
-(0.3141, 0.5892) -- 0.0141 from BT.709 green and 0.0967 from the panel's own. So
+BT.709 red and Windows renders it inside whatever the panel can do. On a QD-OLED
+whose EDID declares green at (0.2698, 0.6859), the reading came back
+(0.3141, 0.5892) -- 0.0141 from BT.709 green and 0.0967 from the declared one. So
 they are useless as a description of the display's gamut, and writing them to a
 profile's colorant tags replaced correct figures with a narrower, wrong gamut.
+
+That is a choice, not a limit of scRGB. It reaches wider colours through negative
+components, and on that panel Windows passed them through: BT.2020 green sent that
+way read (0.2524, 0.6983), wider than the EDID claims. The patches stay inside
+BT.709 because patterns.measurement_frame clamps each channel at zero.
 
 They are exactly right for the other job. A white-balance correction acts on the
 signal this app sends, so what it needs to know is how the display responds to
