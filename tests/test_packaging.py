@@ -706,6 +706,66 @@ class StandaloneArchiveTests(unittest.TestCase):
                 self.assertIn(needle, body)
 
 
+class UvBootstrapTests(unittest.TestCase):
+    """The installer downloads uv; what it downloads must be what was pinned.
+
+    It used to fetch Astral's install script and run it with Invoke-Expression, so
+    whatever that URL served -- through a TLS-inspecting proxy, or a compromised CDN
+    path -- ran with the user's rights and nothing checked it."""
+
+    SCRIPT = ROOT / "Install.ps1"
+
+    def text(self):
+        return self.SCRIPT.read_text(encoding="utf-8", errors="replace")
+
+    def test_nothing_downloaded_is_executed_as_code(self):
+        # Code only: the comment explaining what was replaced has to be able to name it.
+        code = "\n".join(
+            line for line in self.text().splitlines() if not line.lstrip().startswith("#")
+        ).lower()
+        for needle in ("invoke-expression", "| iex", "iex (", "iex $"):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, code)
+
+    def test_every_architecture_has_a_full_pin(self):
+        pins = dict(re.findall(r'"(x86_64|aarch64|i686)"\s*=\s*"([0-9a-f]+)"', self.text()))
+        self.assertEqual({"x86_64", "aarch64", "i686"}, set(pins))
+        for arch, digest in pins.items():
+            with self.subTest(arch=arch):
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
+
+    @unittest.skipUnless(shutil.which("powershell"), "Windows PowerShell is unavailable")
+    def test_the_download_is_refused_unless_it_matches_the_pin(self):
+        """The real function, run in Windows PowerShell -- the shell Install & Run uses --
+        with the download stubbed."""
+        import subprocess
+        import tempfile
+
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_watchdog import extract_function
+
+        text = self.text()
+        functions = "\n\n".join(
+            extract_function(text, name) for name in ("Get-UvArchitecture", "Install-PinnedUv")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            functions_path = Path(directory) / "funcs.ps1"
+            functions_path.write_text(functions, encoding="utf-8")
+            work = Path(directory) / "work"
+            work.mkdir()
+            completed = subprocess.run(
+                ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", str(ROOT / "tests" / "install_uv_pin.ps1"),
+                 "-FunctionsPath", str(functions_path), "-Work", str(work)],
+                capture_output=True, text=True, timeout=180,
+            )
+        self.assertEqual(
+            0, completed.returncode,
+            f"uv bootstrap harness failed:\n{completed.stdout}\n{completed.stderr}",
+        )
+        self.assertIn("ALL PASS", completed.stdout)
+
+
 class EntryPointTests(unittest.TestCase):
     def test_scripts_reference_files_that_exist(self):
         """Catches instructions pointing at a launcher that was renamed away."""
