@@ -170,6 +170,11 @@ _GET_DESC1 = 27                   # IDXGIOutput6
 _CREATE_TEXTURE2D = 5             # ID3D11Device
 _COPY_RESOURCE = 47               # ID3D11DeviceContext
 _PRESENT, _GET_BUFFER, _RESIZE_BUFFERS = 8, 9, 13   # IDXGISwapChain
+_MAKE_WINDOW_ASSOCIATION = 8      # IDXGIFactory
+_DXGI_MWA_NO_WINDOW_CHANGES = 0x1
+_DXGI_MWA_NO_ALT_ENTER = 0x2
+# Present failures meaning the device is gone, so every later call fails the same way.
+_DEVICE_LOST = {0x887A0005: "removed", 0x887A0006: "hung", 0x887A0007: "reset"}
 
 _D3D_DRIVER_TYPE_HARDWARE = 1
 _D3D11_SDK_VERSION = 7
@@ -390,6 +395,17 @@ class HdrSurface:
                     f"CreateSwapChainForHwnd failed (0x{result & 0xFFFFFFFF:08X})"
                 )
             created_swapchain = True
+            # Alt+Enter would otherwise have DXGI take this window fullscreen by itself: a
+            # display mode change in the middle of a patch, under the meter. Qt already
+            # owns the window's fullscreen state, so DXGI is told to stay out of its
+            # messages altogether. Best effort -- the surface works without it, only
+            # unguarded, and failing a measurement over that would be backwards.
+            try:
+                _vcall(factory, _MAKE_WINDOW_ASSOCIATION, [c_void_p, c_uint],
+                       c_void_p(self._hwnd),
+                       _DXGI_MWA_NO_WINDOW_CHANGES | _DXGI_MWA_NO_ALT_ENTER)
+            except Exception:  # noqa: BLE001
+                pass
         finally:
             _release(factory)
             _release(adapter)
@@ -443,6 +459,12 @@ class HdrSurface:
     def present(self, pixels: bytes, *, vsync: bool = True) -> None:
         """Blit a full frame of scRGB half floats and present it.
 
+        Raises when Present fails. Its answer used to be discarded, so a removed or reset
+        device was noticed only if a later call happened to fail -- and a patch that never
+        reached the screen was measured as though it had. What this cannot catch is the
+        window being covered: Microsoft documents that a flip-model swapchain never
+        returns DXGI_STATUS_OCCLUDED, so there is no answer to check.
+
         A staging texture is created per frame rather than kept alive, because patterns
         change only on user input; the cost is irrelevant next to the clarity of not
         having to invalidate a cache when the size or the pattern changes.
@@ -479,6 +501,15 @@ class HdrSurface:
                 _vcall(self._context, _COPY_RESOURCE, [c_void_p, c_void_p], back, texture)
             finally:
                 _release(back)
-            _vcall(self._swapchain, _PRESENT, [c_uint, c_uint], 1 if vsync else 0, 0)
+            result = _vcall(self._swapchain, _PRESENT, [c_uint, c_uint], 1 if vsync else 0, 0)
         finally:
             _release(texture)
+        if result < 0:
+            code = result & 0xFFFFFFFF
+            lost = _DEVICE_LOST.get(code)
+            if lost is not None:
+                raise HdrDisplayError(
+                    f"The graphics device was {lost} (0x{code:08X}), so nothing more can be "
+                    "shown in this window. Close it and open it again."
+                )
+            raise HdrDisplayError(f"Present failed (0x{code:08X})")

@@ -151,5 +151,88 @@ class IntersectionTests(unittest.TestCase):
                          .area_of_intersection(10, 10, 110, 60), 100 * 50)
 
 
+def _signed(code: int) -> int:
+    """An HRESULT as the c_long a COM call returns."""
+    return code - (1 << 32) if code & 0x80000000 else code
+
+
+class PresentResultTests(unittest.TestCase):
+    """What present() does with Present's answer, which used to be thrown away.
+
+    The COM call layer is faked, so this runs without a GPU: the swapchain answers with
+    a chosen HRESULT and everything else succeeds."""
+
+    def present_answering(self, code):
+        import ctypes
+
+        surface = object.__new__(hdr_display.HdrSurface)
+        surface._device, surface._context = ctypes.c_void_p(1), ctypes.c_void_p(2)
+        surface._swapchain = ctypes.c_void_p(3)
+        surface._width = surface._height = 2
+        surface._hwnd = 0
+
+        def fake_vcall(pointer, index, _argtypes, *_args):
+            if pointer is surface._swapchain and index == hdr_display._PRESENT:
+                return _signed(code)
+            return 0
+
+        with mock.patch.object(hdr_display, "_vcall", fake_vcall), \
+                mock.patch.object(hdr_display, "_release", lambda _pointer: None):
+            surface.present(bytes(surface.stride * surface._height))
+
+    def test_success_is_quiet(self):
+        self.present_answering(0)
+
+    def test_a_lost_device_says_what_happened(self):
+        for code, word in ((0x887A0005, "removed"), (0x887A0006, "hung"), (0x887A0007, "reset")):
+            with self.subTest(word=word):
+                with self.assertRaises(hdr_display.HdrDisplayError) as caught:
+                    self.present_answering(code)
+                self.assertIn(word, str(caught.exception))
+
+    def test_any_other_failure_still_raises(self):
+        with self.assertRaises(hdr_display.HdrDisplayError) as caught:
+            self.present_answering(0x80004005)
+        self.assertIn("0x80004005", str(caught.exception))
+
+
+class WindowAssociationTests(unittest.TestCase):
+    """DXGI must not act on Alt+Enter for the measurement window.
+
+    Left associated, Alt+Enter asks DXGI to take the window fullscreen on its own -- a
+    display mode change in the middle of a patch, under the meter."""
+
+    def test_alt_enter_and_window_changes_are_taken_away_from_dxgi(self):
+        calls = []
+
+        def fake_vcall(pointer, index, _argtypes, *args):
+            if index in (hdr_display._QUERY_INTERFACE, hdr_display._GET_PARENT,
+                         hdr_display._CREATE_SWAPCHAIN_FOR_HWND):
+                args[-1]._obj.value = 100 + len(calls)   # the out-parameter
+            calls.append((pointer.value, index, args))
+            return 0
+
+        class FakeD3D11:
+            def D3D11CreateDevice(self, *args):
+                args[7]._obj.value, args[9]._obj.value = 1, 2   # device, context
+                return 0
+
+        with mock.patch.object(hdr_display.ctypes, "WinDLL", lambda _name: FakeD3D11()), \
+                mock.patch.object(hdr_display, "_vcall", fake_vcall), \
+                mock.patch.object(hdr_display, "_release", lambda _pointer: None), \
+                mock.patch.object(hdr_display, "IS_WINDOWS", True):
+            hdr_display.HdrSurface(0x1234, 4, 4)
+
+        factory = next(value for value, index, args in calls if index == hdr_display._CREATE_SWAPCHAIN_FOR_HWND)
+        associations = [args for value, index, args in calls
+                        if index == hdr_display._MAKE_WINDOW_ASSOCIATION and value == factory]
+        self.assertEqual(1, len(associations), "the factory that made the swapchain was never told")
+        hwnd, flags = associations[0]
+        self.assertEqual(0x1234, hwnd.value)
+        self.assertEqual(
+            hdr_display._DXGI_MWA_NO_ALT_ENTER | hdr_display._DXGI_MWA_NO_WINDOW_CHANGES, flags
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
