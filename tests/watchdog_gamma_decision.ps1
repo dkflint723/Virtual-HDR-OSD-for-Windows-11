@@ -241,6 +241,34 @@ Assert-Profile 'no entry and a managed association reports none' '' `
 Assert-Profile 'an uninstalled base name is rejected' 'Vendor.icm' `
     (Resolve-BaseExtendedProfile -GammaEntry (New-Entry 'Gone.icm' $null) -CurrentExtended 'Vendor.icm')
 
+# --- a restore published by the GUI ------------------------------------------
+# Restore Windows Profile re-associates what Windows had, UNINSTALLS the working pair,
+# and publishes the original as both variants. It relies on this function, unchanged,
+# for every watchdog build already installed -- so these pin that reliance.
+$restored = New-Saved $true $old
+$restored.WorkingOff = 'Uninstalled_Off.icm'
+$restored.WorkingOn  = 'Uninstalled_On.icm'
+Set-Runtime -enabled $true -updatedAt $new -profiles @{ Off = 'RealBase.icm'; On = 'RealBase.icm' } -active 'RealBase.icm'
+Assert-Profile 'restored: the original is asserted, whichever variant is wanted' 'RealBase.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $restored)
+Set-Runtime -enabled $false -updatedAt $new -profiles @{ Off = 'RealBase.icm'; On = 'RealBase.icm' } -active 'RealBase.icm'
+Assert-Profile 'restored, correction off: still the original' 'RealBase.icm' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $restored)
+
+# The watchdog acted after the restore (its own hotkey): its captured pair wins the
+# timestamp comparison, but that pair is uninstalled, so it must assert nothing.
+$restoredOwnNewer = New-Saved $true $new
+$restoredOwnNewer.WorkingOff = 'Uninstalled_Off.icm'
+$restoredOwnNewer.WorkingOn  = 'Uninstalled_On.icm'
+Set-Runtime -enabled $true -updatedAt $old -profiles @{ Off = 'RealBase.icm'; On = 'RealBase.icm' } -active 'RealBase.icm'
+Assert-Profile 'restored, watchdog newer: its uninstalled pair is never re-asserted' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $restoredOwnNewer)
+
+# Windows had no HDR profile at all: nothing to name, so nothing may be asserted.
+Set-Runtime -enabled $true -updatedAt $new -profiles @{ Off = ''; On = '' } -active ''
+Assert-Profile 'restored to no HDR profile: nothing is asserted' '' `
+    (Get-DesiredExtendedProfile -CurrentDisplay $display -SavedDisplay $restored)
+
 Remove-Item -LiteralPath $script:GammaStatePath -Force -ErrorAction SilentlyContinue
 Remove-Item -LiteralPath $colorDir -Recurse -Force -ErrorAction SilentlyContinue
 

@@ -102,9 +102,13 @@ HELP_SECTIONS: tuple[tuple[str, str], ...] = (
         "If something looks wrong",
         "Reset Sliders returns every slider to neutral. Revert reloads the untouched profile you imported, "
         "discarding your edits.\n\n"
-        "To back out completely, open Windows Settings › System › Display › Advanced display, and pick your "
-        "original profile as the default for HDR. The app-generated profiles are the two files named "
-        "Virtual_HDR_OSD_<id>_Off.icm and _On.icm; you can uninstall them from the colour profile folder.\n\n"
+        "To back out completely, press Restore Windows Profile. It puts back the HDR and SDR profiles Windows "
+        "had before this app first changed them and removes the app's two working profiles. Your sliders and "
+        "measurements are kept, and nothing changes the display again — not Live Apply, the hotkeys, mode "
+        "switching or the watchdog — until you press Apply Edits.\n\n"
+        "If the app itself will not start, the same can be done by hand: open Windows Settings › System › "
+        "Display › Advanced display and pick your original profile as the default for HDR, then uninstall "
+        "the two files named Virtual_HDR_OSD_<id>_Off.icm and _On.icm from the colour profile folder.\n\n"
         "If applying fails with an access-denied error, press Run as Admin at the top of the window. "
         "It restarts the app elevated and keeps your edits; nothing has to be redone.",
     ),

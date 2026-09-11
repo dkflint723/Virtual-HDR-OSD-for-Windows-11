@@ -467,6 +467,33 @@ After Windows completes the transition back to HDR, Virtual HDR OSD reapplies th
 
 This is intended to reduce profile-association problems around repeated `Win + Alt + B` transitions.
 
+## Restore Windows Profile
+
+Puts the selected display back on the profiles Windows had before this app first
+changed them, and keeps it there.
+
+It asks first, naming exactly what it will restore. Then it:
+
+- makes Windows' own HDR profile the default again, or leaves the display with no HDR
+  profile if that is what Windows had;
+- sets the SDR default back, unless SDR is set to *Leave unmanaged*;
+- uninstalls this app's two working profiles, so nothing can put them back;
+- tells the watchdog to hold Windows' profile rather than the calibration. This works
+  with any installed watchdog, including one installed before this button existed.
+
+Your sliders and measurements are kept. Until you press **Apply Edits**, **Reapply** or
+**Calibrate Display**, nothing changes the display: Live Apply, Automatic Mode
+Switching, the Alt+1 / Alt+2 hotkeys and the correction dropdown are refused with a
+message saying why, measuring and the test patterns are refused, and an SDR ↔ HDR switch
+leaves Windows' profile where it is. The restore survives a restart.
+
+What Windows had is recorded in `original_profiles.json`, beside the settings file, the
+first time the app sees a display and before it changes anything. That record is never
+overwritten. If the display already carried one of this app's profiles when the record
+was first taken — an upgrade from a build before this button existed — the app falls back
+to the profile it was editing from and says so in the confirmation. With nothing to go
+on, it removes its own profile and lets Windows choose.
+
 ---
 
 # Profiles for this Display
@@ -1386,6 +1413,10 @@ The uninstaller:
 - removes the watchdog's local files;
 - does **not** delete ICC/ICM profiles;
 - does **not** intentionally change the user's selected color profiles.
+
+Removing the watchdog stops it re-asserting profiles; it does not put back what Windows
+had before this app. **Restore Windows Profile** in the app does that, with or without
+the watchdog installed.
 
 ---
 

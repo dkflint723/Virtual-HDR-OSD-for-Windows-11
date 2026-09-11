@@ -140,6 +140,7 @@ class WindowTestCase(unittest.TestCase):
             "LIVE_REGISTRY_PATH": self.temp / "live_registry.json",
             "GAMMA_HOTKEY_STATE_PATH": self.temp / "gamma_hotkeys.json",
             "METER_LOG_PATH": self.temp / "meter_log.jsonl",
+            "ORIGINAL_PROFILES_PATH": self.temp / "original_profiles.json",
             "GAMMA_PROFILE_ROOT": self.temp / "gamma_profiles",
             "enumerate_displays": lambda: [self.display],
             "get_color_directory": lambda: self.color_dir,
@@ -226,6 +227,7 @@ class FixtureSafetyTests(WindowTestCase):
         "GAMMA_HOTKEY_STATE_PATH",
         "METER_LOG_PATH",
         "LIVE_REGISTRY_PATH",
+        "ORIGINAL_PROFILES_PATH",
         "LOCAL_ROOT",
         "LIVE_ROOT",
         "GAMMA_PROFILE_ROOT",
@@ -444,6 +446,238 @@ class UnreadableStateFileTests(WindowTestCase):
             timer.stop()
         self.assertTrue(window.status_label.text().startswith("Attention"))
         self.assertIn("could not be read", window.status_label.text())
+
+
+class RestoreWindowsProfileTests(WindowTestCase):
+    """One control that puts back what Windows had, and keeps it there until Apply.
+
+    Before it, the only way back was a walk through Windows Settings described in the
+    Help dialog, and Alt+1 -- which reads as "off" -- installs a variant that keeps every
+    trim and the measured curve."""
+
+    def originals(self):
+        return json.loads(app_module.ORIGINAL_PROFILES_PATH.read_text(encoding="utf-8"))["displays"]
+
+    def restore(self, answer=QMessageBox.StandardButton.Yes):
+        with mock.patch.object(QMessageBox, "question", return_value=answer):
+            self.window._restore_windows_profiles()
+
+    def working_names(self):
+        return [path.name for path in self.window._working_profile_paths(self.display)]
+
+    def runtime_record(self):
+        return self.read_runtime()["displays"][self.display.key]
+
+    def test_what_windows_had_is_recorded_before_the_first_apply(self):
+        record = self.originals()[self.display.stable_key]
+        self.assertEqual(
+            ("BaseCalibration.icm", "sRGB.icm", "observed"),
+            (record["hdr"], record["sdr"], record["source"]),
+        )
+        self.apply()
+        self.assertIn(self.default_profiles["HDR"], self.working_names())
+        self.assertEqual("BaseCalibration.icm", self.originals()[self.display.stable_key]["hdr"])
+
+    def test_an_observed_record_is_never_replaced(self):
+        self.apply()
+        (self.color_dir / "Other.icm").write_bytes(b"")
+        self.default_profiles["HDR"] = "Other.icm"
+        self.window._record_original_profiles(self.display)
+        self.assertEqual("BaseCalibration.icm", self.originals()[self.display.stable_key]["hdr"])
+
+    def test_a_working_profile_is_never_recorded_as_what_windows_had(self):
+        """Anyone upgrading already has our profile associated. It must not become the
+        thing a restore puts back."""
+        self.window._original_profiles = {}
+        self.default_profiles["HDR"] = self.working_names()[1]
+        self.window.state.hdr.base_profile_name = "BaseCalibration.icm"
+        self.window._record_original_profiles(self.display)
+        record = self.window._original_record(self.display)
+        self.assertEqual(("BaseCalibration.icm", "editing base"), (record["hdr"], record["source"]))
+
+        self.window._original_profiles = {}
+        self.window.state.hdr.base_profile_name = ""
+        self.window._record_original_profiles(self.display)
+        record = self.window._original_record(self.display)
+        self.assertEqual((None, "unknown"), (record["hdr"], record["source"]))
+
+    def removed_by(self, action):
+        """What an action itself removed. Every apply removes both working files before
+        installing them again, so checking the whole list after an apply would pass
+        whether or not the action under test removed anything."""
+        before = len(self.removed)
+        action()
+        return self.removed[before:]
+
+    def test_restore_puts_windows_profile_back_and_removes_ours(self):
+        self.apply()
+        removed = self.removed_by(self.restore)
+        self.assertEqual("BaseCalibration.icm", self.default_profiles["HDR"])
+        self.assertEqual(sorted(self.working_names()), sorted(removed))
+        record = self.runtime_record()
+        self.assertEqual({"Off": "BaseCalibration.icm", "On": "BaseCalibration.icm"}, record["profiles"])
+        self.assertTrue(record["restored"])
+        self.assertIn("enabled", record, "without it the watchdog ignores this record")
+        self.assertTrue(self.window._is_restored(self.display))
+        self.assertTrue(self.originals()[self.display.stable_key]["restored"])
+        self.assertTrue(self.window.status_label.text().startswith("Ready"))
+        self.assertIn("restored", self.window.active_profile_label.text().lower())
+
+    def test_declining_the_question_changes_nothing(self):
+        self.apply()
+        active = self.default_profiles["HDR"]
+        removed = self.removed_by(lambda: self.restore(answer=QMessageBox.StandardButton.No))
+        self.assertEqual(active, self.default_profiles["HDR"])
+        self.assertEqual([], removed)
+        self.assertFalse(self.window._is_restored(self.display))
+
+    def test_nothing_automatic_reapplies_while_restored(self):
+        self.apply()
+        self.restore()
+        installed = list(self.installed)
+        for reason in ("Live update", "Automatic Mode Switching", "Gamma hotkey ON",
+                       "Gamma correction changed", "Watchdog install", "Calibration measurements"):
+            with self.subTest(reason=reason):
+                self.assertFalse(self.window._apply_mode_profile(reason))
+                self.assertIn("is restored on", self.window.status_label.text())
+        self.window._gamma_hotkey_enable()
+        self.window._gamma_hotkey_disable()
+        self.assertEqual(installed, self.installed)
+        self.assertEqual("BaseCalibration.icm", self.default_profiles["HDR"])
+        self.assertTrue(self.window._is_restored(self.display))
+
+    def test_a_mode_change_neither_reimports_nor_reapplies_while_restored(self):
+        """Restored, the Windows default is not ours, and the SDR->HDR path imports the
+        default into the editor. A game flipping the display out of HDR and back would
+        otherwise replace every slider with Windows' profile."""
+        from sdr_hdr_profile_creator.curves import build_transform
+        from sdr_hdr_profile_creator.icc import build_profile
+        from sdr_hdr_profile_creator.model import ModeState
+
+        base = ModeState.neutral("HDR")
+        (self.color_dir / "BaseCalibration.icm").write_bytes(
+            build_profile("HDR", base, build_transform(base, hdr=True))
+        )
+        self.apply()
+        self.restore()
+        self.window.control_widgets["gamma"].set_value(2.45, emit=True)
+        self.window._last_detected_mode = "SDR"
+        self.window._poll_windows_mode()
+        self.assertAlmostEqual(2.45, self.window.state.hdr.gamma)
+        self.assertIn("stays restored", self.window.status_label.text())
+
+    def test_apply_edits_brings_the_calibration_back(self):
+        self.apply()
+        self.restore()
+        self.assertTrue(self.window._apply_mode_profile("Apply Edits"))
+        self.assertFalse(self.window._is_restored(self.display))
+        self.assertFalse(self.originals()[self.display.stable_key]["restored"])
+        self.assertIn(self.default_profiles["HDR"], self.working_names())
+        record = self.runtime_record()
+        self.assertNotIn("restored", record)
+        self.assertEqual(sorted(self.working_names()), sorted(record["profiles"].values()))
+
+    def test_a_failed_apply_leaves_the_display_restored(self):
+        self.apply()
+        self.restore()
+        with mock.patch.object(self.window, "_build_working_payloads", side_effect=RuntimeError("boom")):
+            self.assertFalse(self.window._apply_mode_profile("Apply Edits"))
+        self.assertTrue(self.window._is_restored(self.display))
+
+    def test_the_restore_survives_a_restart(self):
+        self.apply()
+        self.restore()
+        window = app_module.MainWindow()
+        self.addCleanup(window.deleteLater)
+        self.addCleanup(window.close)
+        for timer in (window.mode_timer, window.gamma_runtime_timer, window.live_timer):
+            timer.stop()
+        self.assertTrue(window._is_restored(self.display))
+        installed = list(self.installed)
+        self.assertFalse(window._apply_mode_profile("Live update"))
+        self.assertEqual(installed, self.installed)
+
+    def test_restoring_to_no_hdr_profile(self):
+        def nothing_for_hdr(display, mode):
+            if mode == "HDR":
+                raise app_module.NoDefaultProfile("none")
+            return self.default_profiles[mode]
+
+        self.window._original_profiles = {}
+        with mock.patch.object(app_module, "get_default_profile", nothing_for_hdr):
+            self.window._record_original_profiles(self.display)
+        record = self.window._original_record(self.display)
+        self.assertEqual((None, "observed"), (record["hdr"], record["source"]))
+
+        self.apply()
+        reapplied = list(self.associations)
+        removed = self.removed_by(self.restore)
+        self.assertEqual(sorted(self.working_names()), sorted(removed))
+        self.assertEqual(reapplied, self.associations, "no HDR profile should have been set")
+        self.assertEqual({"Off": "", "On": ""}, self.runtime_record()["profiles"])
+
+    def test_the_sdr_default_is_put_back_too(self):
+        (self.color_dir / "sRGB.icm").write_bytes(b"")
+        self.apply()
+        (self.color_dir / "Calman.icm").write_bytes(b"")
+        self.default_profiles["SDR"] = "Calman.icm"
+        self.restore()
+        self.assertEqual("sRGB.icm", self.default_profiles["SDR"])
+        self.assertEqual("sRGB.icm", self.runtime_record().get("sdr_profile"))
+
+    def test_an_unmanaged_sdr_side_is_left_alone(self):
+        # Installed, so that only the unmanaged choice stands between it and a restore;
+        # without it the test passed whether or not that choice was honoured.
+        (self.color_dir / "sRGB.icm").write_bytes(b"")
+        self.apply()
+        self.window.state.binding(self.display.stable_key).sdr_profile = app_module.SDR_UNMANAGED
+        (self.color_dir / "Calman.icm").write_bytes(b"")
+        self.default_profiles["SDR"] = "Calman.icm"
+        self.restore()
+        self.assertEqual("Calman.icm", self.default_profiles["SDR"])
+        self.assertNotEqual("sRGB.icm", self.runtime_record().get("sdr_profile"))
+
+    def test_measuring_and_patterns_are_refused_while_restored(self):
+        """A sentinel status first: the restore's own message must not satisfy these, and
+        neither the meter lookup nor a real fullscreen window may be reached if the
+        refusal ever goes missing."""
+        self.apply()
+        self.restore()
+        with mock.patch.object(self.window, "_spotread", return_value=None), \
+                mock.patch.object(QMessageBox, "question", return_value=QMessageBox.StandardButton.No):
+            self.window._set_status("sentinel", "ok")
+            self.assertIsNone(self.window._meter_preconditions("measuring"))
+            self.assertIn("is restored on", self.window.status_label.text())
+        with mock.patch.object(app_module, "PatternWindow", mock.MagicMock()):
+            self.window._set_status("sentinel", "ok")
+            self.window._open_pattern_view()
+            self.assertIsNone(self.window._pattern_window)
+            self.assertIn("is restored on", self.window.status_label.text())
+
+    def test_an_sdr_response_armed_before_the_restore_does_nothing(self):
+        """The mode poll arms its SDR response 650 ms ahead, so one can land after a
+        restore that already put SDR back."""
+        self.apply()
+        self.restore()
+        (self.color_dir / "Pinned.icm").write_bytes(b"")
+        self.window.state.binding(self.display.stable_key).sdr_profile = "Pinned.icm"
+        before = list(self.associations)
+        self.window._restore_remembered_sdr_profile(self.display, "Automatic Mode Switching")
+        self.assertEqual(before, self.associations)
+
+    def test_the_watchdog_record_carries_enabled_even_with_no_earlier_apply(self):
+        """The check in the restore test above is satisfied by the apply before it, which
+        already wrote the key; this one starts from no runtime file at all."""
+        app_module.GAMMA_HOTKEY_STATE_PATH.unlink(missing_ok=True)
+        self.restore()
+        self.assertIn("enabled", self.runtime_record())
+
+    def test_the_record_is_taken_at_apply_when_startup_missed_it(self):
+        self.window._original_profiles = {}
+        app_module.ORIGINAL_PROFILES_PATH.unlink(missing_ok=True)
+        self.apply()
+        record = self.originals()[self.display.stable_key]
+        self.assertEqual(("BaseCalibration.icm", "observed"), (record["hdr"], record["source"]))
 
 
 class EditStateTests(WindowTestCase):

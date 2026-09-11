@@ -100,6 +100,17 @@ GAMMA_HOTKEY_STATE_PATH = LOCAL_ROOT / "gamma_hotkeys.json"
 # and never read back by the app.
 METER_LOG_PATH = LOCAL_ROOT / "meter_log.jsonl"
 GAMMA_PROFILE_ROOT = LOCAL_ROOT / "gamma_hotkey_profiles"
+# What Windows had for each display before this app changed anything, and whether the
+# user has asked for it back. Its own file rather than part of the editor state, because
+# that file is rewritten on every save and set aside when unreadable, and neither may
+# cost the one record that says how to undo this app.
+ORIGINAL_PROFILES_PATH = LOCAL_ROOT / "original_profiles.json"
+ORIGINAL_PROFILES_SCHEMA = "vhdr.original-profiles/1"
+# The explicit actions allowed to bring the calibration back after a restore. Every other
+# caller of _apply_mode_profile -- Live Apply, Automatic Mode Switching, the hotkeys, the
+# correction dropdown, the watchdog install -- is automatic, and a restore means nothing
+# automatic touches the display.
+USER_APPLY_REASONS = frozenset({"Apply Edits", "Reapply", "Calibrate Display"})
 # Where the standalone watchdog installs itself. Read only, to confirm that its
 # installer actually ran; this app never writes there.
 WATCHDOG_INSTALL_ROOT = Path(
@@ -253,6 +264,8 @@ class MainWindow(FluentWidget):
         self._placement_watcher = None
         self._remembered_sdr_profiles: dict[str, str | None] = {}
         self._base_hdr_profiles: dict[str, dict[str, str]] = {}
+        # Loaded on first use from ORIGINAL_PROFILES_PATH; see _originals.
+        self._original_profiles: dict[str, dict[str, object]] | None = None
         # name -> (mtime_ns, size, generated). Keyed by stat so a profile that is
         # reinstalled over the top of an old one is re-examined.
         self._generated_profile_cache: dict[str, tuple[int, int, bool]] = {}
@@ -801,6 +814,15 @@ class MainWindow(FluentWidget):
         self.meter_button.clicked.connect(self._measure_with_meter)
         action_row.addWidget(self.meter_button)
         action_row.addStretch(1)
+        self.restore_button = PushButton("Restore Windows Profile", bar)
+        self.restore_button.setToolTip(
+            "Put back the HDR and SDR profiles Windows had before this app changed them, and "
+            "remove this app's working profiles from Windows.\n\n"
+            "Your sliders and measurements are kept. Nothing changes the display again -- not "
+            "Live Apply, the hotkeys, mode switching or the watchdog -- until you press Apply Edits."
+        )
+        self.restore_button.clicked.connect(self._restore_windows_profiles)
+        action_row.addWidget(self.restore_button)
         self.refresh_profile_button = PushButton("Reapply", bar)
         self.refresh_profile_button.setToolTip("Force a full reinstall of the current settings. Use this if Windows has dropped the HDR association, typically after a mode change or resume from sleep.")
         self.refresh_profile_button.clicked.connect(lambda: self._apply_mode_profile("Reapply", force=True))
@@ -999,6 +1021,11 @@ class MainWindow(FluentWidget):
         is read off the active filename whenever that filename is one of ours.
         """
         name = self._active_profile_name
+        if self._is_restored(self._selected_display()):
+            return (
+                f"Active HDR profile: {name or 'none'}  ·  Windows' own, restored  ·  "
+                "Apply Edits brings the calibration back"
+            )
         if not name:
             return "Active HDR profile: none set by this app · Windows is using its own profile"
         if self._is_managed_profile(name):
@@ -1826,6 +1853,7 @@ class MainWindow(FluentWidget):
                 self._last_detected_mode = selected.current_mode  # type: ignore[assignment]
             self._sync_display_widgets(selected)
             self._sync_active_profile_from_windows(selected)
+            self._record_original_profiles(selected)
             self._set_status(f"Detected {len(displays)} active display(s). Selected {selected.friendly_name}.", "ok")
             if self._prefill_luminance_from_panel(selected):
                 state = self.state.hdr
@@ -1854,6 +1882,7 @@ class MainWindow(FluentWidget):
         self._update_mode_badge(selected)
         self._sync_display_widgets(selected)
         self._sync_active_profile_from_windows(selected)
+        self._record_original_profiles(selected)
 
     def _sync_display_widgets(self, display: DisplayInfo) -> None:
         """Refresh the per-display widgets after the target or its mode changes."""
@@ -1956,6 +1985,18 @@ class MainWindow(FluentWidget):
             return
 
         self._set_status(f"Windows mode changed from {previous} to {detected}.", "warning")
+        if self._is_restored(selected):
+            # Both responses below change the display, and the SDR->HDR one first replaces
+            # the whole HDR editing state with whatever the Windows default imports as.
+            # After a restore that default is Windows' own profile, not ours, so letting it
+            # run would throw away every slider and measured correction on the first game
+            # that flips the display out of HDR and back.
+            self._set_status(
+                f"Windows mode changed from {previous} to {detected}. Windows' own profile "
+                "stays restored; nothing was reapplied.",
+                "ok",
+            )
+            return
         if detected == "SDR":
             if self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change:
                 QTimer.singleShot(650, self, lambda d=selected, p=previous: self._deferred_mode_response(
@@ -2128,6 +2169,9 @@ class MainWindow(FluentWidget):
         explicit "unmanaged" binding suppresses the restore entirely so that
         third-party calibration software keeps sole ownership of SDR.
         """
+        if self._is_restored(display):
+            # A response armed just before a restore; the restore already set SDR back.
+            return
         binding = self.state.display_bindings.get(display.stable_key)
         pinned = binding.sdr_profile if binding else ""
 
@@ -2472,6 +2516,14 @@ class MainWindow(FluentWidget):
         if busy:
             self._set_status(busy, "warning")
             return
+        if self._is_restored(display):
+            # Adjusting in the patterns works by Live Apply, which a restore stops.
+            self._set_status(
+                f"Windows' own profile is restored on {display.friendly_name}, so nothing "
+                "adjusted in the patterns could reach the screen. Press Apply Edits first.",
+                "warning",
+            )
+            return
         capability = capability_for_device_name(display.gdi_name)
         try:
             sdr_white = get_sdr_white_level_nits(display)
@@ -2557,6 +2609,17 @@ class MainWindow(FluentWidget):
             self._set_status(
                 f"Turn HDR on for {display.friendly_name} before {what}. The patches are "
                 "shown in absolute luminance, which only means anything in HDR.",
+                "warning",
+            )
+            return None
+        if self._is_restored(display):
+            # The response is solved against the working profile's own shaping. Measured
+            # through Windows' profile instead, it would describe a pipeline that is not
+            # the one it then gets applied on top of.
+            self._set_status(
+                f"Windows' own profile is restored on {display.friendly_name}. Press Apply "
+                f"Edits to bring the calibration back before {what}, so the measurement "
+                "describes the profile it will correct.",
                 "warning",
             )
             return None
@@ -4061,6 +4124,13 @@ class MainWindow(FluentWidget):
         if display is None:
             self._set_status("Select a detected display before applying a profile.", "error")
             return False
+        if self._is_restored(display) and reason not in USER_APPLY_REASONS:
+            self._set_status(
+                f"{reason}: Windows' own profile is restored on {display.friendly_name}, so "
+                "nothing was applied. Press Apply Edits to bring the calibration back.",
+                "warning",
+            )
+            return False
         if display.current_mode != "HDR":
             self._set_status(
                 f"{reason}: Windows is not in HDR mode for {display.friendly_name}, so the HDR profile was not applied. "
@@ -4069,6 +4139,9 @@ class MainWindow(FluentWidget):
             )
             return False
 
+        # Before anything below changes an association: this is the last moment what
+        # Windows has is still Windows' own.
+        self._record_original_profiles(display)
         # Capture the real Windows HDR profile only when it is not one of our two
         # stable working slots. All edits are always derived from this base.
         self._capture_current_hdr_base(display)
@@ -4135,6 +4208,10 @@ class MainWindow(FluentWidget):
         }
         self._save_live_registry()
         self._write_gamma_runtime_state(display, installed, on_option, enabled, active_name, active_path)
+        if self._is_restored(display):
+            # Only after the pair is on the display: a failed apply leaves Windows' own
+            # profile in place, and the display must still count as restored then.
+            self._set_restored(display, False)
         self._save_state_now()
         self._update_activity_bar()
 
@@ -4186,6 +4263,8 @@ class MainWindow(FluentWidget):
         payload, displays_state, record = entry
         base = self._base_hdr_profiles.get(display.key, {})
         binding = self.state.display_bindings.get(display.stable_key)
+        # Set by _publish_restore_to_watchdog; an apply is what ends a restore.
+        record.pop("restored", None)
         off_name, off_path = installed["Off"]
         on_name, on_path = installed["On"]
         record.update(
@@ -4315,6 +4394,262 @@ class MainWindow(FluentWidget):
             displays_state.pop(stale_key, None)
 
         return payload, displays_state, record
+
+    # ----------------------------------------------------------------------------------
+    # Windows' own profiles: what to put back, and the one control that puts it back
+
+    def _originals(self) -> dict[str, dict[str, object]]:
+        """What Windows had, per display, keyed by stable_key. Loaded once."""
+        if self._original_profiles is None:
+            self._original_profiles = self._load_original_profiles()
+        return self._original_profiles
+
+    def _load_original_profiles(self) -> dict[str, dict[str, object]]:
+        if not ORIGINAL_PROFILES_PATH.is_file():
+            return {}
+        try:
+            payload = json.loads(ORIGINAL_PROFILES_PATH.read_text(encoding="utf-8-sig"))
+        except OSError:
+            return {}
+        except ValueError:
+            payload = None
+        displays = payload.get("displays") if isinstance(payload, dict) else None
+        if isinstance(displays, dict):
+            return {
+                key: dict(value)
+                for key, value in displays.items()
+                if isinstance(key, str) and key and isinstance(value, dict)
+            }
+        # The same rule as the settings file: an unreadable record is kept rather than
+        # written over, because it may be the only note of what Windows had.
+        try:
+            ORIGINAL_PROFILES_PATH.replace(
+                ORIGINAL_PROFILES_PATH.with_name("original_profiles.unreadable.json")
+            )
+        except OSError:
+            pass
+        return {}
+
+    def _save_original_profiles(self) -> bool:
+        return self._write_json_atomic(
+            ORIGINAL_PROFILES_PATH,
+            {"schema": ORIGINAL_PROFILES_SCHEMA, "displays": self._originals()},
+        )
+
+    def _original_record(self, display: DisplayInfo) -> dict[str, object] | None:
+        return self._originals().get(display.stable_key)
+
+    def _is_restored(self, display: DisplayInfo | None) -> bool:
+        if display is None:
+            return False
+        record = self._original_record(display)
+        return bool(record and record.get("restored"))
+
+    def _set_restored(self, display: DisplayInfo, restored: bool) -> bool:
+        record = self._originals().setdefault(
+            display.stable_key,
+            {"hdr": None, "sdr": None, "source": "unknown", "display": display.friendly_name},
+        )
+        record["restored"] = restored
+        if restored:
+            record["restored_at"] = datetime.now().astimezone().isoformat()
+        else:
+            record.pop("restored_at", None)
+        return self._save_original_profiles()
+
+    @staticmethod
+    def _profile_is_installed(name: str) -> bool:
+        try:
+            return (get_color_directory() / Path(name).name).is_file()
+        except Exception:
+            return False
+
+    @staticmethod
+    def _read_windows_default(display: DisplayInfo, mode: DisplayMode) -> tuple[str | None, bool]:
+        """(name, known). Windows having no default is an answer; a failed read is not."""
+        try:
+            return Path(get_default_profile(display, mode)).name, True
+        except NoDefaultProfile:
+            return None, True
+        except Exception:
+            return None, False
+
+    def _record_original_profiles(self, display: DisplayInfo) -> None:
+        """Note what Windows has for this display, before this app changes it.
+
+        Written once: an observed record is never replaced. Only what Windows has right
+        now can be observed, so a display already carrying one of this app's working
+        profiles -- anyone upgrading from a build before this record existed -- gets an
+        inferred record instead, labelled as such, and a later observation of a profile
+        that is not ours upgrades it.
+        """
+        records = self._originals()
+        existing = records.get(display.stable_key)
+        if existing is not None and existing.get("source") == "observed":
+            return
+        hdr, hdr_known = self._read_windows_default(display, "HDR")
+        sdr, sdr_known = self._read_windows_default(display, "SDR")
+        sdr = sdr if sdr_known else None
+        if hdr_known and (hdr is None or not self._is_managed_profile(hdr)):
+            record: dict[str, object] = {"hdr": hdr, "sdr": sdr, "source": "observed"}
+        elif existing is not None:
+            return
+        else:
+            base = Path(self.state.hdr.base_profile_name).name if self.state.hdr.base_profile_name else ""
+            if base and not self._is_managed_profile(base) and self._profile_is_installed(base):
+                record = {"hdr": base, "sdr": sdr, "source": "editing base"}
+            else:
+                record = {"hdr": None, "sdr": sdr, "source": "unknown"}
+        record["display"] = display.friendly_name
+        record["recorded_at"] = datetime.now().astimezone().isoformat()
+        record["restored"] = bool(existing.get("restored")) if existing is not None else False
+        records[display.stable_key] = record
+        self._save_original_profiles()
+
+    @staticmethod
+    def _describe_restore(display: DisplayInfo, hdr: str, sdr: str, source: str, sdr_unmanaged: bool) -> str:
+        if hdr and source == "observed":
+            hdr_line = f"HDR: {hdr}, which Windows had before this app first changed it"
+        elif hdr:
+            hdr_line = (
+                f"HDR: {hdr}, the profile this app was editing from. What Windows had before "
+                "was never recorded, so this is the best answer available"
+            )
+        elif source == "observed":
+            hdr_line = "HDR: no profile, which is what Windows had before this app first changed it"
+        else:
+            hdr_line = (
+                "HDR: nothing was recorded, so this app's profile is removed and Windows "
+                "chooses its own default"
+            )
+        if sdr_unmanaged:
+            sdr_line = "SDR: left alone, because third-party calibration owns it"
+        elif sdr:
+            sdr_line = f"SDR: {sdr}"
+        else:
+            sdr_line = "SDR: left as it is"
+        return (
+            f"Put {display.friendly_name} back on Windows' own profiles?\n\n{hdr_line}\n{sdr_line}\n\n"
+            "This app's two working profiles are removed from Windows. Your sliders and "
+            "measurements are kept, and nothing changes the display again until you press "
+            "Apply Edits."
+        )
+
+    def _restore_windows_profiles(self) -> None:
+        """Put back what Windows had, and keep it there until Apply Edits.
+
+        Three things make it stick, each against a different writer. The original is
+        re-associated as the default. The working pair is uninstalled, so nothing can
+        re-assert it: the watchdog has never handed Windows a profile that is not
+        installed, and its hotkey switch fails on one. And the original is published to
+        the watchdog as both correction variants, so every build of it -- including one
+        installed before this control existed -- asserts Windows' profile rather than
+        leaving the display to whatever Windows picks next. This app's own automatic
+        paths are stopped by the restored flag in _apply_mode_profile and the mode poll.
+        """
+        display = self._selected_display()
+        if display is None:
+            self._set_status("Select a display first.", "error")
+            return
+        busy = self._fullscreen_surface_busy()
+        if busy:
+            self._set_status(busy, "warning")
+            return
+        self._record_original_profiles(display)
+        record = self._original_record(display) or {}
+        hdr = str(record.get("hdr") or "")
+        sdr = str(record.get("sdr") or "")
+        source = str(record.get("source") or "unknown")
+        binding = self.state.display_bindings.get(display.stable_key)
+        sdr_unmanaged = binding is not None and binding.sdr_profile == SDR_UNMANAGED
+
+        answer = QMessageBox.question(
+            self, "Restore Windows profile",
+            self._describe_restore(display, hdr, sdr, source, sdr_unmanaged),
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        self.live_timer.stop()
+        notes: list[str] = []
+        if hdr and self._profile_is_installed(hdr):
+            try:
+                # Setting a default does not persist unless the profile is also in the
+                # display's association list; see associate_profile.
+                associate_profile(hdr, display, "HDR")
+                reapply_existing_default_profile(display, "HDR", hdr)
+            except Exception as exc:
+                self._set_status(
+                    f"Restore failed: Windows would not take {hdr} back as the HDR default "
+                    f"({exc}). Nothing else was changed.",
+                    "error",
+                )
+                return
+        elif hdr:
+            notes.append(f"{hdr} is no longer installed, so Windows chooses its own HDR default")
+            hdr = ""
+        for path in self._working_profile_paths(display):
+            try:
+                remove_profile(path.name, display, "HDR")
+            except Exception as exc:
+                notes.append(f"{path.name} could not be removed ({exc})")
+        if sdr and not sdr_unmanaged and self._profile_is_installed(sdr):
+            current_sdr, _known = self._read_windows_default(display, "SDR")
+            if (current_sdr or "").casefold() != sdr.casefold():
+                try:
+                    reapply_existing_default_profile(display, "SDR", sdr)
+                except Exception as exc:
+                    notes.append(f"the SDR default could not be set back to {sdr} ({exc})")
+        self._publish_restore_to_watchdog(display, hdr, "" if sdr_unmanaged else sdr)
+        if not self._set_restored(display, True):
+            notes.append(
+                f"{ORIGINAL_PROFILES_PATH.name} could not be written, so after a restart the "
+                "app will not know the display was restored"
+            )
+        # Nothing of ours is applied now, which is what "not applied this session" says.
+        self._applied_signature = None
+        self._sync_active_profile_from_windows(display)
+        shown = hdr or "no HDR profile, so Windows uses its default"
+        message = (
+            f"Restored Windows' own profile on {display.friendly_name}: {shown}. This app's "
+            "working profiles were removed, and nothing will change the display until you "
+            "press Apply Edits."
+        )
+        if notes:
+            message += " Note: " + "; ".join(notes) + "."
+        self._set_status(message, "warning" if notes else "ok")
+
+    def _publish_restore_to_watchdog(self, display: DisplayInfo, hdr: str, sdr: str) -> None:
+        """Tell the watchdog to assert Windows' profile, in terms every build of it reads."""
+        entry = self._runtime_entry(display)
+        if entry is None:
+            return
+        payload, displays_state, record = entry
+        record.update(
+            {
+                "display_name": display.friendly_name,
+                "gdi_name": display.gdi_name,
+                "device_path": display.device_path,
+                # Get-DesiredExtendedProfile acts on this record only when it carries
+                # "enabled"; without one it falls back to its install-time capture.
+                "enabled": bool(record.get("enabled", self.state.hdr.sdr_gamma_correction != "Off")),
+                "active_profile": hdr,
+                "active_profile_path": "",
+                # Both variants name the original, so whichever one the watchdog wants,
+                # the answer is Windows' profile. Empty when Windows had none: the
+                # watchdog then falls back to its captured pair, which is uninstalled,
+                # and asserts nothing.
+                "profiles": {"Off": hdr, "On": hdr},
+                "paths": {},
+                "restored": True,
+                "updated_at": datetime.now().astimezone().isoformat(),
+            }
+        )
+        if sdr:
+            record["sdr_profile"] = sdr
+        displays_state[display.key] = record
+        payload["schema"] = GAMMA_RUNTIME_SCHEMA
+        self._publish_runtime_payload(payload)
 
     # ----------------------------------------------------------------------------------
     # Import / export
