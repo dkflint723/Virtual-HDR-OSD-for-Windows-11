@@ -63,8 +63,6 @@ class MeasureWindow(QWidget):
         self.shown = False
         #: True while the placement target is up and the run has not started.
         self.placing = False
-        #: Set when the user confirms placement, so the caller can begin.
-        self.placed = False
 
     def paintEngine(self):  # noqa: D102 - Qt must not paint into a D3D surface
         return None
@@ -167,7 +165,6 @@ class MeasureWindow(QWidget):
             Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space
         ):
             self.placing = False
-            self.placed = True
             self.ready.emit()
 
 

@@ -74,7 +74,6 @@ from .windows_api import (
     install_and_associate_profile,
     get_color_directory,
     open_windows_display_settings,
-    open_windows_hdr_calibration_app,
     open_windows_color_profile_directory,
     get_default_profile,
     get_sdr_white_level_nits,
@@ -1401,10 +1400,7 @@ class MainWindow(FluentWidget):
         button in the walkthrough, and nothing else would notice."""
         actions = {
             "enable_hdr": lambda: self.hdr_switch.setChecked(True),
-            "display_settings": open_windows_display_settings,
-            "hdr_calibration_app": open_windows_hdr_calibration_app,
             "focus_profiles": self._highlight_profile_pickers,
-            "import_profile": self._import_profile,
             "enable_live": lambda: self.live_checkbox.setChecked(True),
             "watchdog": self._show_watchdog_settings,
             "calibrate": self._calibrate_display,

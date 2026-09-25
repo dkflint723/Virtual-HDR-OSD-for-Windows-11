@@ -870,17 +870,6 @@ def open_windows_display_settings() -> None:
     os.startfile("ms-settings:display")  # type: ignore[attr-defined]
 
 
-def open_windows_hdr_calibration_app() -> None:
-    """Open the Windows HDR Calibration Store listing.
-
-    The app is a separate Microsoft download rather than a Settings page, so the
-    guided walkthrough sends the user to its Store product page.
-    """
-    if not IS_WINDOWS:
-        return
-    os.startfile("ms-windows-store://pdp/?productid=9N7F2SM5D1LR")  # type: ignore[attr-defined]
-
-
 def open_windows_color_profile_directory() -> None:
     """Open Windows' canonical ICC/ICM profile directory in File Explorer."""
     if not IS_WINDOWS:

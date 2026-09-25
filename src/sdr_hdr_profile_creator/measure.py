@@ -836,14 +836,6 @@ def derive(
     )
 
 
-def _channel_matrix(readings: dict[str, Reading]) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
-    """The channel-to-XYZ matrix and its inverse, or ``None`` if it does not invert."""
-    columns = [_xyz(readings[channel]) for channel in ("red", "green", "blue")]
-    matrix = tuple(columns[column][row] for row in range(3) for column in range(3))
-    inverse = _inverse3(matrix)
-    return None if inverse is None else (matrix, inverse)
-
-
 def _apportion(
     inverse: tuple[float, ...],
     primaries: tuple[tuple[float, float, float], ...],
