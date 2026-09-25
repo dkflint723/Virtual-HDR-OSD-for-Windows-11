@@ -165,11 +165,24 @@ class WindowTestCase(unittest.TestCase):
             # Probing the real watchdog would make the lock switch reflect the
             # developer's machine rather than the fixture.
             "watchdog_is_running": lambda: self.watchdog_running,
+            # The placement watcher polls this from a real QThread. Six measurement
+            # tests reached it with only the setup around it faked, so each one started
+            # a spotread that would have driven a meter had one been on PATH; they got
+            # away with it only because cleanup cancelled the watcher first.
+            "read_emissive": mock.Mock(side_effect=app_module.MeterError("no meter in tests")),
         }
         for name, value in patches.items():
             patcher = mock.patch.object(app_module, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The same tests read the real monitor over DDC/CI. Tests that need a monitor
+        # fake open_link themselves.
+        patcher = mock.patch.object(
+            app_module.ddc, "open_link",
+            lambda _name: app_module.ddc.UnavailableLink("no DDC in tests"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.window = app_module.MainWindow()
         self.addCleanup(self.window.deleteLater)
@@ -279,6 +292,21 @@ class FixtureSafetyTests(WindowTestCase):
             unlisted,
             f"windows_api gained mutating call(s) {sorted(unlisted)} that are not faked in tests",
         )
+
+
+class FixtureHardwareTests(WindowTestCase):
+    """The colorimeter and the monitor's own controls are hardware too."""
+
+    def test_the_meter_is_faked(self):
+        from sdr_hdr_profile_creator import meter
+
+        self.assertIsNot(app_module.read_emissive, meter.read_emissive)
+        with self.assertRaises(app_module.MeterError):
+            app_module.read_emissive(Path("spotread"), port=1)
+
+    def test_the_monitor_is_not_reached_over_ddc(self):
+        link = app_module.ddc.open_link("Test Monitor")
+        self.assertIsInstance(link, app_module.ddc.UnavailableLink)
 
 
 class EditorStructureTests(WindowTestCase):
