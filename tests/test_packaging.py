@@ -566,7 +566,7 @@ class WatchdogIdentityTests(unittest.TestCase):
     def test_the_liveness_check_is_the_singleton_not_a_process_list(self):
         """A process list cannot see what it is not allowed to read; the mutex can."""
         script = self.install()
-        self.assertIn("OpenExisting('Local\ColorProfileModeWatchdogStandalone')", script)
+        self.assertIn(r"OpenExisting('Local\ColorProfileModeWatchdogStandalone')", script)
 
     def test_a_surplus_launcher_waits_before_standing_down(self):
         """Standing down on the first surplus exit loses the install-time handover: the
