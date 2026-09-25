@@ -234,5 +234,45 @@ class WindowAssociationTests(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(struct.calcsize("P") == 8, "layouts are pinned for 64-bit Windows")
+class StructLayoutTests(unittest.TestCase):
+    """The DXGI and D3D11 structs, against their SDK definitions.
+
+    DXGI fills GetDesc1's struct and reads CreateSwapChainForHwnd's without checking the
+    caller's layout. A wrong one is not rejected: the fields after the mistake are read
+    from the wrong offsets. Sizes follow the definitions on Microsoft Learn under x64
+    alignment: 4-byte UINT, BOOL and enums, 8-byte pointers and HMONITOR.
+    """
+
+    def test_struct_sizes_match_the_sdk(self):
+        import ctypes
+
+        expected = {
+            "_GUID": 16,
+            "_RECT": 16,
+            "_DXGI_OUTPUT_DESC1": 152,
+            "_DXGI_SAMPLE_DESC": 8,
+            "_DXGI_SWAP_CHAIN_DESC1": 48,
+            "_D3D11_TEXTURE2D_DESC": 44,
+            "_D3D11_SUBRESOURCE_DATA": 16,
+        }
+        for name, size in expected.items():
+            with self.subTest(struct=name):
+                self.assertEqual(size, ctypes.sizeof(getattr(hdr_display, name)))
+
+    def test_the_output_fields_the_capability_reads_are_where_dxgi_writes_them(self):
+        """HMONITOR is 8-byte aligned, so everything after it moves if it is declared as
+        a 4-byte handle."""
+        desc = hdr_display._DXGI_OUTPUT_DESC1
+        expected = {
+            "DesktopCoordinates": 64, "Monitor": 88, "BitsPerColor": 96, "ColorSpace": 100,
+            "RedPrimary": 104, "GreenPrimary": 112, "BluePrimary": 120, "WhitePoint": 128,
+            "MinLuminance": 136, "MaxLuminance": 140, "MaxFullFrameLuminance": 144,
+        }
+        for field, offset in expected.items():
+            with self.subTest(field=field):
+                self.assertEqual(offset, getattr(desc, field).offset)
+
+
 if __name__ == "__main__":
     unittest.main()
