@@ -1249,6 +1249,68 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
                 self.assertGreater(abs(moved - 1000.0), 50.0)
 
 
+class MHC2LayoutTests(unittest.TestCase):
+    """The MHC2 tag against Microsoft's published layout, read without icc.py.
+
+    ProfileStructureTests parse the tag with _parse_mhc2, the writer's own counterpart,
+    so a field both got wrong would pass there and be rejected by Windows. The layout
+    here is transcribed from "Windows hardware display color calibration pipeline" on
+    Microsoft Learn: signature, reserved, LUT count (4096 or fewer), min and peak
+    luminance as s15Fixed16, then offsets to the matrix and the red, green and blue
+    1DLUTs, relative to the start of the structure. The matrix is 3x4 s15Fixed16, row
+    major; each 1DLUT is 'sf32', four reserved bytes, then s15Fixed16 values in [0, 1].
+    """
+
+    @staticmethod
+    def fixed(raw: bytes) -> float:
+        return struct.unpack(">i", raw)[0] / 65536.0
+
+    def tag(self, profile: bytes, signature: bytes) -> bytes:
+        count = struct.unpack(">I", profile[128:132])[0]
+        for index in range(count):
+            sig, offset, size = struct.unpack(">4sII", profile[132 + 12 * index:144 + 12 * index])
+            if sig == signature:
+                return profile[offset:offset + size]
+        self.fail(f"no {signature!r} tag")
+
+    def test_the_tag_matches_the_published_layout(self):
+        state = ModeState.neutral("HDR")
+        state.minimum_luminance_nits, state.peak_luminance_nits = 0.05, 950.0
+        tag = self.tag(build_profile("HDR", state, build_transform(state, hdr=True)), b"MHC2")
+
+        self.assertEqual(b"MHC2", tag[0:4])
+        self.assertEqual(0, struct.unpack(">I", tag[4:8])[0])
+        entries = struct.unpack(">I", tag[8:12])[0]
+        self.assertTrue(2 <= entries <= 4096, entries)
+        self.assertAlmostEqual(0.05, self.fixed(tag[12:16]), places=4)
+        self.assertAlmostEqual(950.0, self.fixed(tag[16:20]), places=4)
+
+        matrix, red, green, blue = struct.unpack(">4I", tag[20:36])
+        self.assertGreaterEqual(matrix, 36)
+        rows = [self.fixed(tag[matrix + 4 * i:matrix + 4 * i + 4]) for i in range(12)]
+        # Neutral controls: the adjustment is identity in the three columns Windows reads.
+        for row in range(3):
+            for column in range(3):
+                self.assertAlmostEqual(float(row == column), rows[4 * row + column], places=4)
+
+        ends = []
+        for offset in (red, green, blue):
+            with self.subTest(offset=offset):
+                self.assertEqual(0, offset % 4)
+                self.assertEqual(b"sf32", tag[offset:offset + 4])
+                self.assertEqual(0, struct.unpack(">I", tag[offset + 4:offset + 8])[0])
+                values = [self.fixed(tag[offset + 8 + 4 * i:offset + 12 + 4 * i]) for i in range(entries)]
+                self.assertEqual(entries, len(values))
+                self.assertTrue(all(0.0 <= v <= 1.0 for v in values))
+                self.assertAlmostEqual(0.0, values[0], places=4)
+                self.assertAlmostEqual(1.0, values[-1], places=4)
+                ends.append(offset + 8 + 4 * entries)
+        self.assertGreaterEqual(red, matrix + 48, "the red LUT overlaps the matrix")
+        self.assertGreaterEqual(green, ends[0])
+        self.assertGreaterEqual(blue, ends[1])
+        self.assertLessEqual(ends[2], len(tag))
+
+
 class CorruptStateTests(unittest.TestCase):
     """What a damaged or hand-edited state file turns into.
 
