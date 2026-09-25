@@ -373,13 +373,20 @@ class MainWindow(FluentWidget):
 
     def _load_last_state(self) -> ApplicationState:
         self._state_load_problem = ""
+        self._state_unopened = False
         if not STATE_PATH.is_file():
             return ApplicationState.neutral()
         try:
             payload = json.loads(STATE_PATH.read_text(encoding="utf-8-sig"))
         except OSError:
             # Unreadable right now is not the same as corrupt -- another process can
-            # simply have it open -- so the file is left exactly where it is.
+            # simply have it open -- so the file is left exactly where it is. That
+            # includes not saving the defaults over it later in this session.
+            self._state_unopened = True
+            self._state_load_problem = (
+                f"{STATE_PATH.name} could not be opened, so the app started from defaults "
+                "and will not save over it. Close whatever has it open, then restart the app."
+            )
             return ApplicationState.neutral()
         except ValueError:
             # Not UTF-8, or not JSON. JSONDecodeError is a ValueError.
@@ -470,6 +477,8 @@ class MainWindow(FluentWidget):
         The usual cause is a security product holding the file open; the same one the
         watchdog installer already warns about.
         """
+        if self._state_unopened:
+            return
         if self._write_json_atomic(STATE_PATH, self.state.to_dict()):
             return
         # Guarded: closeEvent calls this after the status bar may already be gone,
@@ -4480,18 +4489,24 @@ class MainWindow(FluentWidget):
     # Windows' own profiles: what to put back, and the one control that puts it back
 
     def _originals(self) -> dict[str, dict[str, object]]:
-        """What Windows had, per display, keyed by stable_key. Loaded once."""
+        """What Windows had, per display, keyed by stable_key. Loaded once it can be read."""
         if self._original_profiles is None:
-            self._original_profiles = self._load_original_profiles()
+            loaded = self._load_original_profiles()
+            if loaded is None:
+                # There but not openable right now. Not cached, so the next call reads
+                # it again, and _save_original_profiles will not write over it.
+                return {}
+            self._original_profiles = loaded
         return self._original_profiles
 
-    def _load_original_profiles(self) -> dict[str, dict[str, object]]:
+    def _load_original_profiles(self) -> dict[str, dict[str, object]] | None:
+        """None when the file is there but cannot be opened right now."""
         if not ORIGINAL_PROFILES_PATH.is_file():
             return {}
         try:
             payload = json.loads(ORIGINAL_PROFILES_PATH.read_text(encoding="utf-8-sig"))
         except OSError:
-            return {}
+            return None
         except ValueError:
             payload = None
         displays = payload.get("displays") if isinstance(payload, dict) else None
@@ -4512,6 +4527,11 @@ class MainWindow(FluentWidget):
         return {}
 
     def _save_original_profiles(self) -> bool:
+        if self._original_profiles is None and ORIGINAL_PROFILES_PATH.is_file():
+            # Never read, because it could not be opened. Writing now would replace the
+            # only record of what Windows had -- and whether it was restored -- with
+            # whatever this session has seen.
+            return False
         return self._write_json_atomic(
             ORIGINAL_PROFILES_PATH,
             {"schema": ORIGINAL_PROFILES_SCHEMA, "displays": self._originals()},

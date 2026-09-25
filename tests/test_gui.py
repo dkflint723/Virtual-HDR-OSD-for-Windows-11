@@ -476,6 +476,29 @@ class UnreadableStateFileTests(WindowTestCase):
         self.assertIn("could not be read", window.status_label.text())
 
 
+    def test_a_file_that_cannot_be_opened_is_not_saved_over(self):
+        """Locked, not corrupt: the load leaves it where it is, and so must every save
+        after it. The next save used to write the defaults over every binding and
+        measured correction, and nothing said so."""
+        app_module.STATE_PATH.write_text(json.dumps({
+            "hdr": {"gamma": 2.4},
+            "display_bindings": {"K": {"sdr_profile": "Mine.icm"}},
+        }), encoding="utf-8")
+        original = app_module.STATE_PATH.read_bytes()
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.STATE_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked):
+            self.window.state = self.window._load_last_state()
+        self.window._save_state_now()
+        self.assertEqual(original, app_module.STATE_PATH.read_bytes())
+        self.assertIn("will not save over it", self.window._state_load_problem)
+
+
 class RestoreWindowsProfileTests(WindowTestCase):
     """One control that puts back what Windows had, and keeps it there until Apply.
 
@@ -492,6 +515,25 @@ class RestoreWindowsProfileTests(WindowTestCase):
 
     def working_names(self):
         return [path.name for path in self.window._working_profile_paths(self.display)]
+
+    def test_a_record_that_cannot_be_opened_at_startup_keeps_the_restore(self):
+        """The record was cached as empty and the next save wrote over it: the restore
+        was forgotten, and the automatic paths it holds off went back to installing the
+        working profile."""
+        self.apply()
+        self.restore()
+        self.window._original_profiles = None          # as at the next start
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.ORIGINAL_PROFILES_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked):
+            self.window._record_original_profiles(self.display)
+        self.assertTrue(self.window._is_restored(self.display), "once the lock is gone")
+        self.assertTrue(self.originals()[self.display.stable_key]["restored"])
 
     def runtime_record(self):
         return self.read_runtime()["displays"][self.display.key]
