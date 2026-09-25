@@ -411,14 +411,8 @@ class MainWindow(FluentWidget):
             for key, value in data.items():
                 if isinstance(key, str) and isinstance(value, dict):
                     profile_name = str(value.get("profile_name", ""))
-                    profile_path = str(value.get("profile_path", ""))
                     if profile_name:
-                        result[key] = {
-                            "profile_name": profile_name,
-                            "profile_path": profile_path,
-                            "base_profile_name": str(value.get("base_profile_name", "")),
-                            "base_profile_path": str(value.get("base_profile_path", "")),
-                        }
+                        result[key] = {"profile_name": profile_name}
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
@@ -4273,12 +4267,9 @@ class MainWindow(FluentWidget):
         self._applied_signature = signature
         self._active_profile_name = active_name
         key = f"{display.key}|HDR"
-        self._persisted_live_registry[key] = {
-            "profile_name": active_name,
-            "profile_path": str(active_path),
-            "base_profile_name": self._base_hdr_profiles.get(display.key, {}).get("profile_name", self.state.hdr.base_profile_name),
-            "base_profile_path": self._base_hdr_profiles.get(display.key, {}).get("profile_path", self.state.hdr.base_profile),
-        }
+        # Only the name is ever read back: cleanup uses it to find app-owned profiles
+        # left behind by earlier builds.
+        self._persisted_live_registry[key] = {"profile_name": active_name}
         self._save_live_registry()
         self._write_gamma_runtime_state(display, installed, on_option, enabled, active_name, active_path)
         if self._is_restored(display):

@@ -5902,6 +5902,29 @@ class MonitorPresetTests(WindowTestCase):
         self.assertTrue(text.startswith("Attention"), text)
 
 
+class LiveRegistryTests(WindowTestCase):
+    def test_a_registry_written_by_an_older_build_still_loads(self):
+        """Older builds also stored the profile's path and the base profile's name and
+        path. Nothing ever read them; the loader keeps the name and drops the rest."""
+        app_module.LIVE_REGISTRY_PATH.write_text(json.dumps({
+            "key|HDR": {
+                "profile_name": "Virtual_HDR_OSD_0123456789_On.icm",
+                "profile_path": r"C:\Windows\System32\spool\drivers\color\x.icm",
+                "base_profile_name": "BaseCalibration.icm",
+                "base_profile_path": r"C:\BaseCalibration.icm",
+            },
+        }), encoding="utf-8")
+        self.assertEqual(
+            {"key|HDR": {"profile_name": "Virtual_HDR_OSD_0123456789_On.icm"}},
+            self.window._load_live_registry(),
+        )
+
+    def test_an_apply_records_only_the_name(self):
+        self.apply()
+        entries = list(self.window._persisted_live_registry.values())
+        self.assertEqual([["profile_name"]], [list(entry) for entry in entries])
+
+
 @unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
 class TraceSwitchTests(unittest.TestCase):
     """Failures the app survives by falling back are logged at debug level, and nothing
