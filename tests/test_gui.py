@@ -5304,6 +5304,39 @@ class WatchdogBuildTests(WindowTestCase):
         self.assertIn("Task Scheduler", text)
 
 
+class PlacementThreadLifetimeTests(WindowTestCase):
+    def test_a_placement_thread_still_reading_is_kept_until_it_ends(self):
+        """Esc or Enter while a placement read is in flight. spotread can take a minute,
+        the watcher sees its cancel only between reads, and dropping the last reference
+        to a running QThread aborts the process."""
+        import threading
+
+        from PySide6.QtCore import QThread
+
+        release = threading.Event()
+
+        class Reading(QThread):
+            def run(self):
+                release.wait(10)
+
+        thread = Reading()
+        thread.start()
+        self.addCleanup(QThread.wait, thread, 5000)
+        self.addCleanup(release.set)
+        self.window._placement_thread = thread
+        self.window._placement_watcher = app_module.measure_view.PlacementWatcher(lambda: None)
+        with mock.patch.object(Reading, "wait", return_value=False):  # the 5 s join times out
+            self.window._stop_placement_watch()
+        self.assertIn(thread, [held for held, _ in self.window._draining_placement])
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while self.window._draining_placement and time.monotonic() < deadline:
+            self.qt_app.processEvents()
+            time.sleep(0.01)
+        self.assertEqual([], self.window._draining_placement)
+
+
 class PlacementCancelTests(WindowTestCase):
     """Pressing Esc while the meter is still being placed.
 

@@ -269,6 +269,9 @@ class MainWindow(FluentWidget):
         # closeEvent even if a run was never started.
         self._placement_thread = None
         self._placement_watcher = None
+        # Placement threads still inside a read when they were stopped, held until they
+        # end; see _stop_placement_watch.
+        self._draining_placement: list[tuple[QThread, object]] = []
         self._remembered_sdr_profiles: dict[str, str | None] = {}
         self._base_hdr_profiles: dict[str, dict[str, str]] = {}
         # Loaded on first use from ORIGINAL_PROFILES_PATH; see _originals.
@@ -3061,9 +3064,22 @@ class MainWindow(FluentWidget):
             # Joined rather than left to finish: an unjoined QThread whose last
             # reference goes is a fail-fast abort, which is how the measurement path
             # used to take the app down at the end of every run.
-            thread.wait(5000)
+            if not thread.wait(5000):
+                # Still inside a read. spotread can take a minute to answer or time
+                # out, and the watcher only sees its cancel between reads, so dropping
+                # the references here would be that same abort. Hold both until the
+                # thread ends.
+                self._draining_placement.append((thread, watcher))
+                thread.finished.connect(self._release_drained_placement)
         self._placement_watcher = None
         self._placement_thread = None
+
+    def _release_drained_placement(self) -> None:
+        """Let go of placement threads that have ended. Queued to the UI thread."""
+        self._draining_placement = [
+            (thread, watcher) for thread, watcher in self._draining_placement
+            if not thread.wait(100)
+        ]
 
     def _display_state_probe(self, display: DisplayInfo):
         """The operating system's view of one display, as a callable for the run.
