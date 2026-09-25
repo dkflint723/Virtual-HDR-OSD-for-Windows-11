@@ -221,7 +221,9 @@ class ModeState:
             try:
                 recorded = merged.get("panel_response_monitor")
                 merged["panel_response_monitor"] = None if recorded is None else int(recorded)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
+                # int(Infinity) is an OverflowError, which nothing above this catches:
+                # a state file holding one stopped the window being built at all.
                 merged["panel_response_monitor"] = None
 
         # Removed controls are neutralized when legacy profiles are imported.

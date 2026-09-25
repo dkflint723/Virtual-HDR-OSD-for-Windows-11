@@ -1281,6 +1281,24 @@ class CorruptStateTests(unittest.TestCase):
         self.assertEqual(2.2, state.hdr.gamma)
         self.assertEqual(1000.0, state.hdr.peak_luminance_nits)
 
+    def test_an_infinite_monitor_code_does_not_stop_the_state_loading(self):
+        """int() of an infinity raises OverflowError, not ValueError. It escaped both
+        this loader and the window's, so the app would not start."""
+        import json
+
+        rows = [v for i in range(8)
+                for v in (0.1 * (i + 1), 2.0 * (i + 1), 0.1 * (i + 1), 7.0 * (i + 1),
+                          0.1 * (i + 1), 1.0 * (i + 1))]
+        text = json.dumps({"hdr": {"panel_response": rows,
+                                   "panel_response_weights": [0.2, 0.7, 0.1],
+                                   "panel_response_monitor": 0}})
+        for bad in ("Infinity", "-Infinity", "1e400"):
+            with self.subTest(value=bad):
+                state = ApplicationState.from_dict(json.loads(
+                    text.replace('"panel_response_monitor": 0', f'"panel_response_monitor": {bad}')))
+                self.assertIsNone(state.hdr.panel_response_monitor)
+                self.assertEqual(len(rows), len(state.hdr.panel_response))
+
     def test_a_top_level_that_is_not_an_object_gives_the_neutral_state(self):
         neutral = ApplicationState.neutral().to_dict()
         for payload in ([], [["hdr", {}]], "state", 3, None, True):
