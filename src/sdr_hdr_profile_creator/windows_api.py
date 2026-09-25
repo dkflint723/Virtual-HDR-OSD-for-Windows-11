@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import platform
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -902,6 +905,7 @@ def watchdog_is_running() -> bool:
         kernel32.OpenMutexW.restype = ctypes.c_void_p
         handle = kernel32.OpenMutexW(SYNCHRONIZE, False, WATCHDOG_SINGLETON_MUTEX)
     except Exception:
+        _log.debug("Could not probe the watchdog mutex", exc_info=True)
         return False
     if not handle:
         return False
@@ -909,5 +913,5 @@ def watchdog_is_running() -> bool:
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle(handle)
     except Exception:
-        pass
+        _log.debug("Could not close the watchdog mutex handle", exc_info=True)
     return True

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import threading
 from ctypes import wintypes
 from typing import Callable
 
 from PySide6.QtCore import QObject, Qt, Signal
+
+_log = logging.getLogger(__name__)
 
 WM_HOTKEY = 0x0312
 WM_QUIT = 0x0012
@@ -124,7 +127,7 @@ class GammaHotkeyListener(QObject):
                 user32 = ctypes.windll.user32  # type: ignore[attr-defined]
                 user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
             except Exception:
-                pass
+                _log.debug("Could not post WM_QUIT to the hotkey thread", exc_info=True)
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self.registered = False

@@ -1511,6 +1511,17 @@ Use **Profile Folder** in the application or open:
 C:\Windows\System32\spool\drivers\color
 ```
 
+## Something went wrong without an error message
+
+Some failures the application recovers from by falling back to a default, such as a Windows query that errors or a runtime file that will not parse, and says nothing about them. To record them for a bug report, start the application from a Command Prompt with the trace switch set:
+
+```text
+set VIRTUAL_HDR_OSD_TRACE=1
+"1- Install & Run.bat"
+```
+
+Each such failure is then written, with its traceback, to `%LOCALAPPDATA%\Virtual_HDR_OSD_for_Windows\trace.log`.
+
 ---
 
 # Technical notes

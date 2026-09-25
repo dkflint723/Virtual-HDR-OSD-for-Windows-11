@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
@@ -86,6 +87,8 @@ from .windows_api import (
     NoDefaultProfile,
     WindowsColorError,
 )
+
+_log = logging.getLogger(__name__)
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
 STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
@@ -298,7 +301,7 @@ class MainWindow(FluentWidget):
             self.setMicaEffectEnabled(True)
             self.setCustomBackgroundColor(QColor(246, 248, 252), QColor(18, 22, 30))
         except Exception:
-            pass
+            _log.debug("Mica backdrop unavailable", exc_info=True)
 
         # Which direction a watchdog install/uninstall was last asked to go, so the
         # outcome can be reported once it actually lands. Empty when nothing is pending.
@@ -1123,6 +1126,7 @@ class MainWindow(FluentWidget):
                 try:
                     detected = get_sdr_white_level_nits(display)
                 except Exception:
+                    _log.debug("SDR white level unreadable", exc_info=True)
                     detected = None
         return resolve_white_level(option, detected)
 
@@ -1216,7 +1220,7 @@ class MainWindow(FluentWidget):
                 "warning" if enabled else "ok",
             )
         except Exception:
-            pass
+            _log.debug("Could not sync the watchdog hotkey state", exc_info=True)
 
     def _control_changed(self, field: str, value: float) -> None:
         if self._loading_controls:
@@ -1920,6 +1924,7 @@ class MainWindow(FluentWidget):
         try:
             current = get_default_profile(display, "HDR")
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             current = ""
         self._active_profile_name = Path(current).name if current else ""
         self._update_activity_bar()
@@ -1996,6 +2001,7 @@ class MainWindow(FluentWidget):
         try:
             displays = enumerate_displays()
         except Exception:
+            _log.debug("Display enumeration failed during the mode poll", exc_info=True)
             return
         selected = next((display for display in displays if self._is_selected_display(display)), None)
         if selected is None:
@@ -2206,6 +2212,7 @@ class MainWindow(FluentWidget):
         try:
             profile_name = get_default_profile(display, "SDR")
         except Exception:
+            _log.debug("Could not read the Windows SDR default", exc_info=True)
             profile_name = None
         self._remembered_sdr_profiles[display.key] = profile_name or None
 
@@ -2245,7 +2252,7 @@ class MainWindow(FluentWidget):
                 self._set_status(f"{reason}: Windows already has {profile_name} for SDR.", "ok")
                 return
         except Exception:
-            pass
+            _log.debug("Could not read the SDR default before re-asserting it", exc_info=True)
 
         try:
             active = reapply_existing_default_profile(display, "SDR", profile_name)
@@ -2299,6 +2306,7 @@ class MainWindow(FluentWidget):
             try:
                 path = get_color_directory() / path.name
             except Exception:
+                _log.debug("Could not locate the Windows colour directory", exc_info=True)
                 return False
         try:
             stamp = path.stat()
@@ -2575,6 +2583,7 @@ class MainWindow(FluentWidget):
         try:
             sdr_white = get_sdr_white_level_nits(display)
         except Exception:
+            _log.debug("SDR white level unreadable; assuming 240 nits", exc_info=True)
             sdr_white = 240.0
 
         # Adjusting a control that cannot change the display is pointless, and live mode
@@ -2706,6 +2715,7 @@ class MainWindow(FluentWidget):
         try:
             sdr_white = get_sdr_white_level_nits(display)
         except Exception:
+            _log.debug("SDR white level unreadable; assuming 240 nits", exc_info=True)
             sdr_white = 240.0
         panel = read_panel_metadata(display.device_path)
         # Ask for what the panel claims it can do, not for what was measured last
@@ -3234,6 +3244,7 @@ class MainWindow(FluentWidget):
                 intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
             )
         except Exception:
+            _log.debug("Could not build the transform for the shaping fingerprint", exc_info=True)
             return ()
         return tuple(
             round(greyscale.sample(transform.green, code), 6) for code in self.SHAPING_CODES
@@ -3451,6 +3462,7 @@ class MainWindow(FluentWidget):
                 intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
             )
         except Exception:
+            _log.debug("Could not build the transform for the measurement intent", exc_info=True)
             return {}
         intent = {}
         for step in measure.plan(peak):
@@ -3752,6 +3764,7 @@ class MainWindow(FluentWidget):
         try:
             response = measure.panel_response(result, sent)
         except Exception:
+            _log.debug("Could not solve a panel response from this run", exc_info=True)
             response = None
 
         if response is None:
@@ -3801,6 +3814,7 @@ class MainWindow(FluentWidget):
         try:
             return self._apply_mode_profile("Calibration measurements", force=True)
         except Exception:
+            _log.debug("Applying before measuring failed", exc_info=True)
             return False
 
     def _restore_live_mode(self, previous: bool) -> None:
@@ -3889,12 +3903,14 @@ class MainWindow(FluentWidget):
         try:
             profile_name = get_default_profile(display, "HDR")
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             return
         if not profile_name or self._is_managed_profile(Path(profile_name).name):
             return
         try:
             profile_path = get_color_directory() / Path(profile_name).name
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return
         if not profile_path.is_file():
             return
@@ -3956,7 +3972,7 @@ class MainWindow(FluentWidget):
                 self._load_mode_into_controls()
                 self._populate_profile_pickers()
             except Exception:
-                pass
+                _log.debug("Could not import %s as the editing base", profile_path, exc_info=True)
         self._save_state_now()
 
     def _cleanup_legacy_managed_profiles(self, display: DisplayInfo) -> None:
@@ -4003,7 +4019,7 @@ class MainWindow(FluentWidget):
                     if isinstance(active, str) and self._is_managed_profile(active):
                         names.add(active)
             except Exception:
-                pass
+                _log.debug("Could not read %s during cleanup", GAMMA_HOTKEY_STATE_PATH.name, exc_info=True)
         # The registry records only whichever variant was active, so an orphaned pair
         # leaves its sibling named nowhere. Derive it: the sibling of an app-owned
         # working profile is by definition also app-owned.
@@ -4031,7 +4047,7 @@ class MainWindow(FluentWidget):
             try:
                 remove_profile(name, display, "HDR")
             except Exception:
-                pass
+                _log.debug("Could not uninstall leftover profile %s", name, exc_info=True)
 
     @staticmethod
     def _working_profile_paths_for(stable_key: str) -> tuple[Path, Path]:
@@ -4083,6 +4099,7 @@ class MainWindow(FluentWidget):
             try:
                 detected_white = get_sdr_white_level_nits(display)
             except Exception:
+                _log.debug("SDR white level unreadable", exc_info=True)
                 detected_white = None
         on_white = resolve_white_level(on_option, detected_white)
 
@@ -4113,6 +4130,7 @@ class MainWindow(FluentWidget):
             if content_digest(installed.read_bytes()) != digest:
                 return False
         except Exception:
+            _log.debug("Could not compare installed %s; treating it as different", path.name, exc_info=True)
             return False
         self._installed_digests[path.name] = digest
         return True
@@ -4291,6 +4309,7 @@ class MainWindow(FluentWidget):
         try:
             current_name = Path(get_default_profile(display, "HDR")).name
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             return
         if current_name not in pending_names:
             return
@@ -4517,6 +4536,7 @@ class MainWindow(FluentWidget):
         try:
             return (get_color_directory() / Path(name).name).is_file()
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return False
 
     @staticmethod
@@ -4898,6 +4918,7 @@ class MainWindow(FluentWidget):
         try:
             capability = capability_for_device_name(display.gdi_name)
         except Exception:
+            _log.debug("DXGI capability query failed", exc_info=True)
             return ()
         if capability is None or not capability.is_hdr:
             return ()
@@ -5014,6 +5035,7 @@ class MainWindow(FluentWidget):
             try:
                 in_colour_dir = source.parent.samefile(get_color_directory())
             except Exception:
+                _log.debug("Could not compare %s with the colour directory", source.parent, exc_info=True)
                 in_colour_dir = False
             binding.hdr_profile = source.name if in_colour_dir else str(source)
         self._load_mode_into_controls()
@@ -5043,6 +5065,7 @@ class MainWindow(FluentWidget):
         try:
             return str(get_color_directory())
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return str(Path.home())
 
     def _import_profile(self) -> None:

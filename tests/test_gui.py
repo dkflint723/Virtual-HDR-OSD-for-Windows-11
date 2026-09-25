@@ -5902,5 +5902,44 @@ class MonitorPresetTests(WindowTestCase):
         self.assertTrue(text.startswith("Attention"), text)
 
 
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class TraceSwitchTests(unittest.TestCase):
+    """Failures the app survives by falling back are logged at debug level, and nothing
+    is written anywhere unless VIRTUAL_HDR_OSD_TRACE asks for it."""
+
+    def run_app(self, environ: dict[str, str]) -> Path:
+        import logging
+
+        from sdr_hdr_profile_creator import __main__ as entry
+
+        temp = Path(tempfile.mkdtemp(prefix="vhdrosd-trace-"))
+        self.addCleanup(shutil.rmtree, temp, True)
+        root = logging.getLogger()
+        handlers, level = set(root.handlers), root.level
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(app_module, "LOCAL_ROOT", temp), \
+             mock.patch.object(app_module, "MainWindow"), \
+             mock.patch("PySide6.QtWidgets.QApplication") as qt_app:
+            os.environ.pop("VIRTUAL_HDR_OSD_TRACE", None)
+            os.environ.update(environ)
+            qt_app.return_value.exec.return_value = 0
+            entry._run_app()
+        # basicConfig configures the process-wide root logger; leave it as it was.
+        for handler in set(root.handlers) - handlers:
+            root.removeHandler(handler)
+            handler.close()
+        root.setLevel(level)
+        return temp / "trace.log"
+
+    def test_the_switch_writes_a_trace_that_names_the_version(self):
+        from sdr_hdr_profile_creator import __version__
+
+        log = self.run_app({"VIRTUAL_HDR_OSD_TRACE": "1"})
+        self.assertIn(f"Virtual HDR OSD for Windows {__version__}", log.read_text(encoding="utf-8"))
+
+    def test_nothing_is_written_without_it(self):
+        self.assertFalse(self.run_app({}).exists())
+
+
 if __name__ == "__main__":
     unittest.main()
