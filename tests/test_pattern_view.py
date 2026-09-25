@@ -1786,5 +1786,20 @@ class LeavingTheGuidedRunTests(PatternViewTestCase):
         self.assertFalse(win.show_summary())
 
 
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class PatternKeyHintTests(unittest.TestCase):
+    def test_the_hint_names_the_key_for_every_pattern(self):
+        """The summary page said 1-9 while 0 opened the tenth pattern."""
+        from sdr_hdr_profile_creator.pattern_view import pattern_keys
+
+        self.assertEqual(10, len(PATTERNS))
+        self.assertEqual("1-9, 0", pattern_keys())
+
+    def test_every_hint_uses_it(self):
+        source = Path(pattern_view.__file__).read_text(encoding="utf-8")
+        self.assertNotIn('"1-9 ', source)
+        self.assertEqual(2, source.count("{pattern_keys()}"))
+
+
 if __name__ == "__main__":
     unittest.main()
