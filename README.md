@@ -192,7 +192,7 @@ Clone the repository or download it as a ZIP, then run:
 
 On first launch the script prepares the project-local runtime. Subsequent launches reuse it.
 
-## Build the single portable EXE (advanced usera & developers)
+## Build the single portable EXE (advanced users & developers)
 
 Run:
 
@@ -717,7 +717,7 @@ the glass inside it; the app reads the target until it sees green at a plausible
 brightness, so it can tell you the meter is in place rather than leaving you to guess.
 Press Enter to start once it is.
 
-The run is a Calman-style sweep: the six patches the profile is built from, then a
+The run is a Calman-style sweep: the seven patches the profile is built from, then a
 33-point greyscale ramp spaced evenly in PQ, then five saturations of each of the six
 hues. About four minutes in total. The ramp is dense at the bottom on purpose -- in HDR
 the bottom two stops are where a 5% step in signal is an enormous step in luminance, and
@@ -865,16 +865,16 @@ a PG32UCDM as a 15% shortfall through the midrange after a reset that zeroed
 
 It also means the correction in force has to still be valid. **If you change anything on
 the monitor -- picture mode, colour temperature, brightness, HDR mode -- press Reset
-Sliders before measuring again.** Reset Sliders asks separately about the measured
-greyscale correction, and keeps it unless you say otherwise; after a change to the
-monitor itself, discard it. The old correction was solved for a display that no
+Sliders before measuring again.** Reset Sliders clears the measured greyscale
+correction along with the trims, which after a change to the monitor itself is what you
+want. The old correction was solved for a display that no
 longer exists, and folding a new measurement into it gives a result that describes
 neither. Reset, rebuild from the panel, apply, then measure.
 
 ## What gets measured
 
-Six patches, each shown in the same centred window covering a tenth of the screen, on
-black. Holding the window size constant matters on an emissive panel, where the
+Seven patches on black, each in a centred window covering a tenth of the screen except
+peak white, which is read on a 3% window as well (below). Holding the window size constant matters on an emissive panel, where the
 brightness limiter responds to total output and a full-screen patch would not measure the
 same thing as a small one.
 
@@ -1324,7 +1324,7 @@ This means the watchdog can be shared separately with another Windows 11 user wh
 The standalone installer contains the required watchdog logic itself and installs it under the current user's local application-data directory.
 
 > [!NOTE]
-> The standalone Watchdog does not include gamma curve transformation; it only provides a minimal fix for the Windows 11 SDR-HDR profile association bug. To use gamma curve transformation, install Watchdog from the app.
+> The standalone Watchdog is the same script the app installs. It does not build profiles: its Alt+1 / Alt+2 switch between the Correction Off / Correction On pair the app has already prepared (see [Standalone hotkey persistence](#standalone-hotkey-persistence)). Without that pair it only fixes the Windows 11 SDR-HDR profile association bug.
 >
 > The watchdog is installed to `%LOCALAPPDATA%\ColorProfileModeWatchdog`. Its preferred autostart method is the Windows Task Scheduler COM API using the current account's SID and `InteractiveToken`, which avoids storing credentials and works consistently with local, Microsoft, Entra ID, and domain-backed interactive accounts. The task is named `Virtual HDR OSD - Color Profile Mode Watchdog` and starts hidden 10 seconds after sign-in. If Task Scheduler registration is unavailable on a particular system, the installer automatically falls back to a per-user `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry instead of failing the installation. The GUI-integrated and standalone installers use the same task/fallback name and installation directory; use only the installer matching the workflow you want to configure.
 
@@ -1590,8 +1590,8 @@ It is not:
 - a guarantee of reference-grade accuracy;
 - a substitute for mastering or reference equipment.
 
-Its measurements overlap with Windows HDR Calibration rather than replacing it: the same
-three luminance figures, found the same way. What it adds is that the readings feed a
+Its measurements overlap with Windows HDR Calibration rather than replacing it: black and
+peak luminance, found the same way. What it adds is that the readings feed a
 profile you can keep adjusting, instead of one that has to be regenerated from scratch.
 
 A reasonable workflow:
