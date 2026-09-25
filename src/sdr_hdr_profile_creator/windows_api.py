@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import platform
 import time
 from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
+
+_log = logging.getLogger(__name__)
 
 IS_WINDOWS = platform.system() == "Windows"
 
@@ -870,17 +873,6 @@ def open_windows_display_settings() -> None:
     os.startfile("ms-settings:display")  # type: ignore[attr-defined]
 
 
-def open_windows_hdr_calibration_app() -> None:
-    """Open the Windows HDR Calibration Store listing.
-
-    The app is a separate Microsoft download rather than a Settings page, so the
-    guided walkthrough sends the user to its Store product page.
-    """
-    if not IS_WINDOWS:
-        return
-    os.startfile("ms-windows-store://pdp/?productid=9N7F2SM5D1LR")  # type: ignore[attr-defined]
-
-
 def open_windows_color_profile_directory() -> None:
     """Open Windows' canonical ICC/ICM profile directory in File Explorer."""
     if not IS_WINDOWS:
@@ -913,6 +905,7 @@ def watchdog_is_running() -> bool:
         kernel32.OpenMutexW.restype = ctypes.c_void_p
         handle = kernel32.OpenMutexW(SYNCHRONIZE, False, WATCHDOG_SINGLETON_MUTEX)
     except Exception:
+        _log.debug("Could not probe the watchdog mutex", exc_info=True)
         return False
     if not handle:
         return False
@@ -920,5 +913,5 @@ def watchdog_is_running() -> bool:
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle(handle)
     except Exception:
-        pass
+        _log.debug("Could not close the watchdog mutex handle", exc_info=True)
     return True

@@ -165,11 +165,24 @@ class WindowTestCase(unittest.TestCase):
             # Probing the real watchdog would make the lock switch reflect the
             # developer's machine rather than the fixture.
             "watchdog_is_running": lambda: self.watchdog_running,
+            # The placement watcher polls this from a real QThread. Six measurement
+            # tests reached it with only the setup around it faked, so each one started
+            # a spotread that would have driven a meter had one been on PATH; they got
+            # away with it only because cleanup cancelled the watcher first.
+            "read_emissive": mock.Mock(side_effect=app_module.MeterError("no meter in tests")),
         }
         for name, value in patches.items():
             patcher = mock.patch.object(app_module, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        # The same tests read the real monitor over DDC/CI. Tests that need a monitor
+        # fake open_link themselves.
+        patcher = mock.patch.object(
+            app_module.ddc, "open_link",
+            lambda _name: app_module.ddc.UnavailableLink("no DDC in tests"),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
         self.window = app_module.MainWindow()
         self.addCleanup(self.window.deleteLater)
@@ -279,6 +292,21 @@ class FixtureSafetyTests(WindowTestCase):
             unlisted,
             f"windows_api gained mutating call(s) {sorted(unlisted)} that are not faked in tests",
         )
+
+
+class FixtureHardwareTests(WindowTestCase):
+    """The colorimeter and the monitor's own controls are hardware too."""
+
+    def test_the_meter_is_faked(self):
+        from sdr_hdr_profile_creator import meter
+
+        self.assertIsNot(app_module.read_emissive, meter.read_emissive)
+        with self.assertRaises(app_module.MeterError):
+            app_module.read_emissive(Path("spotread"), port=1)
+
+    def test_the_monitor_is_not_reached_over_ddc(self):
+        link = app_module.ddc.open_link("Test Monitor")
+        self.assertIsInstance(link, app_module.ddc.UnavailableLink)
 
 
 class EditorStructureTests(WindowTestCase):
@@ -448,6 +476,29 @@ class UnreadableStateFileTests(WindowTestCase):
         self.assertIn("could not be read", window.status_label.text())
 
 
+    def test_a_file_that_cannot_be_opened_is_not_saved_over(self):
+        """Locked, not corrupt: the load leaves it where it is, and so must every save
+        after it. The next save used to write the defaults over every binding and
+        measured correction, and nothing said so."""
+        app_module.STATE_PATH.write_text(json.dumps({
+            "hdr": {"gamma": 2.4},
+            "display_bindings": {"K": {"sdr_profile": "Mine.icm"}},
+        }), encoding="utf-8")
+        original = app_module.STATE_PATH.read_bytes()
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.STATE_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked):
+            self.window.state = self.window._load_last_state()
+        self.window._save_state_now()
+        self.assertEqual(original, app_module.STATE_PATH.read_bytes())
+        self.assertIn("will not save over it", self.window._state_load_problem)
+
+
 class RestoreWindowsProfileTests(WindowTestCase):
     """One control that puts back what Windows had, and keeps it there until Apply.
 
@@ -464,6 +515,25 @@ class RestoreWindowsProfileTests(WindowTestCase):
 
     def working_names(self):
         return [path.name for path in self.window._working_profile_paths(self.display)]
+
+    def test_a_record_that_cannot_be_opened_at_startup_keeps_the_restore(self):
+        """The record was cached as empty and the next save wrote over it: the restore
+        was forgotten, and the automatic paths it holds off went back to installing the
+        working profile."""
+        self.apply()
+        self.restore()
+        self.window._original_profiles = None          # as at the next start
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.ORIGINAL_PROFILES_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked):
+            self.window._record_original_profiles(self.display)
+        self.assertTrue(self.window._is_restored(self.display), "once the lock is gone")
+        self.assertTrue(self.originals()[self.display.stable_key]["restored"])
 
     def runtime_record(self):
         return self.read_runtime()["displays"][self.display.key]
@@ -1970,7 +2040,8 @@ class RebootStabilityTests(WindowTestCase):
         self.assertIn(pair[1], self.removed)
 
     def test_runtime_state_drops_records_for_a_previous_luid(self):
-        """The watchdog looks entries up by gdi_name, so duplicates are rivals."""
+        """The watchdog matches entries by device path, then gdi_name, so duplicates
+        are rivals."""
         self.apply()
         first_key = self.display.key
         self.reboot()
@@ -2190,7 +2261,8 @@ class RuntimeStateTests(WindowTestCase):
         self.assertEqual(set(entry["profiles"]), {"Off", "On"})
 
     def test_the_sdr_choice_is_published_for_the_watchdog(self):
-        """The watchdog force-restores SDR every five seconds regardless of drift.
+        """The watchdog puts SDR back to what it captured whenever it drifts, within a
+        second.
 
         The GUI refusing to touch an unmanaged SDR association is worth nothing
         unless the watchdog is told to leave it alone too.
@@ -5276,6 +5348,39 @@ class WatchdogBuildTests(WindowTestCase):
         self.assertIn("Task Scheduler", text)
 
 
+class PlacementThreadLifetimeTests(WindowTestCase):
+    def test_a_placement_thread_still_reading_is_kept_until_it_ends(self):
+        """Esc or Enter while a placement read is in flight. spotread can take a minute,
+        the watcher sees its cancel only between reads, and dropping the last reference
+        to a running QThread aborts the process."""
+        import threading
+
+        from PySide6.QtCore import QThread
+
+        release = threading.Event()
+
+        class Reading(QThread):
+            def run(self):
+                release.wait(10)
+
+        thread = Reading()
+        thread.start()
+        self.addCleanup(QThread.wait, thread, 5000)
+        self.addCleanup(release.set)
+        self.window._placement_thread = thread
+        self.window._placement_watcher = app_module.measure_view.PlacementWatcher(lambda: None)
+        with mock.patch.object(Reading, "wait", return_value=False):  # the 5 s join times out
+            self.window._stop_placement_watch()
+        self.assertIn(thread, [held for held, _ in self.window._draining_placement])
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while self.window._draining_placement and time.monotonic() < deadline:
+            self.qt_app.processEvents()
+            time.sleep(0.01)
+        self.assertEqual([], self.window._draining_placement)
+
+
 class PlacementCancelTests(WindowTestCase):
     """Pressing Esc while the meter is still being placed.
 
@@ -5445,6 +5550,25 @@ class ModePollDuringMeasurementTests(WindowTestCase):
         self.assertEqual(
             1, len(self.captured), "the deferred transition was never handled"
         )
+
+
+class ApplyDuringMeasurementTests(WindowTestCase):
+    def test_nothing_is_applied_while_a_meter_run_is_up(self):
+        """The readings would be paired with codes they were not measured under, and
+        the working-profile names do not change, so the run's own probe cannot see it."""
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.installed.clear()
+        self.associations.clear()
+        for reason in ("Apply Edits", "Live update", "Reapply"):
+            with self.subTest(reason=reason):
+                self.assertFalse(self.window._apply_mode_profile(reason, force=True))
+        self.assertEqual(([], []), (self.installed, self.associations))
+        self.assertIn("measurement is running", self.window.status_label.text())
+
+    def test_it_applies_again_once_the_run_is_over(self):
+        self.window._measure_window = None
+        self.assertTrue(self.window._apply_mode_profile("Apply Edits", force=True))
 
 
 class DisplaySurfaceGuardTests(WindowTestCase):
@@ -5900,6 +6024,68 @@ class MonitorPresetTests(WindowTestCase):
         text = self.window.status_label.text()
         self.assertIn("now 3", text)
         self.assertTrue(text.startswith("Attention"), text)
+
+
+class LiveRegistryTests(WindowTestCase):
+    def test_a_registry_written_by_an_older_build_still_loads(self):
+        """Older builds also stored the profile's path and the base profile's name and
+        path. Nothing ever read them; the loader keeps the name and drops the rest."""
+        app_module.LIVE_REGISTRY_PATH.write_text(json.dumps({
+            "key|HDR": {
+                "profile_name": "Virtual_HDR_OSD_0123456789_On.icm",
+                "profile_path": r"C:\Windows\System32\spool\drivers\color\x.icm",
+                "base_profile_name": "BaseCalibration.icm",
+                "base_profile_path": r"C:\BaseCalibration.icm",
+            },
+        }), encoding="utf-8")
+        self.assertEqual(
+            {"key|HDR": {"profile_name": "Virtual_HDR_OSD_0123456789_On.icm"}},
+            self.window._load_live_registry(),
+        )
+
+    def test_an_apply_records_only_the_name(self):
+        self.apply()
+        entries = list(self.window._persisted_live_registry.values())
+        self.assertEqual([["profile_name"]], [list(entry) for entry in entries])
+
+
+@unittest.skipUnless(GUI_AVAILABLE, f"GUI dependencies unavailable: {GUI_IMPORT_ERROR}")
+class TraceSwitchTests(unittest.TestCase):
+    """Failures the app survives by falling back are logged at debug level, and nothing
+    is written anywhere unless VIRTUAL_HDR_OSD_TRACE asks for it."""
+
+    def run_app(self, environ: dict[str, str]) -> Path:
+        import logging
+
+        from sdr_hdr_profile_creator import __main__ as entry
+
+        temp = Path(tempfile.mkdtemp(prefix="vhdrosd-trace-"))
+        self.addCleanup(shutil.rmtree, temp, True)
+        root = logging.getLogger()
+        handlers, level = set(root.handlers), root.level
+        with mock.patch.dict(os.environ), \
+             mock.patch.object(app_module, "LOCAL_ROOT", temp), \
+             mock.patch.object(app_module, "MainWindow"), \
+             mock.patch("PySide6.QtWidgets.QApplication") as qt_app:
+            os.environ.pop("VIRTUAL_HDR_OSD_TRACE", None)
+            os.environ.update(environ)
+            qt_app.return_value.exec.return_value = 0
+            entry._run_app()
+        # basicConfig configures the process-wide root logger; leave it as it was.
+        for handler in set(root.handlers) - handlers:
+            root.removeHandler(handler)
+            handler.close()
+        root.setLevel(level)
+        return temp / "trace.log"
+
+    def test_the_switch_writes_a_trace_that_names_the_version(self):
+        from sdr_hdr_profile_creator import __version__
+
+        log = self.run_app({"VIRTUAL_HDR_OSD_TRACE": "1"})
+        self.assertIn(f"Virtual HDR OSD for Windows {__version__}", log.read_text(encoding="utf-8"))
+
+    def test_nothing_is_written_without_it(self):
+        self.assertFalse(self.run_app({}).exists())
 
 
 if __name__ == "__main__":

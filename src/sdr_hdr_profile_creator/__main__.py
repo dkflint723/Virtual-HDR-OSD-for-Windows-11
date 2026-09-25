@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import sys
 import traceback
@@ -13,7 +14,19 @@ def _run_app() -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
-    from .app import MainWindow
+    from .app import LOCAL_ROOT, MainWindow
+
+    # Failures the app survives by falling back -- a Windows query that errors, a
+    # runtime file that will not parse -- are logged at debug level and dropped. Setting
+    # this keeps them, for a bug report.
+    if os.environ.get("VIRTUAL_HDR_OSD_TRACE"):
+        LOCAL_ROOT.mkdir(parents=True, exist_ok=True)
+        logging.basicConfig(
+            filename=LOCAL_ROOT / "trace.log",
+            level=logging.DEBUG,
+            format="%(asctime)s %(name)s %(message)s",
+        )
+        logging.getLogger(__name__).debug("Virtual HDR OSD for Windows %s", __version__)
 
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

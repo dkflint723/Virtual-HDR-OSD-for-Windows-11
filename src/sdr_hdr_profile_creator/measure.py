@@ -317,11 +317,11 @@ def plan(peak_nits: float, *, full: bool = True) -> tuple[MeasurementStep, ...]:
     ``full`` adds what a Calman-style run measures and these six patches cannot: a
     greyscale ramp, which is the only way to see RGB balance and tone response *across*
     the range rather than at one point, and a saturation sweep per hue, which is where
-    a display's own colour handling shows itself. The six core patches stay first and
+    a display's own colour handling shows itself. The core patches stay first and
     keep their keys, because everything the profile is built from is derived from those
     and a longer run must not change what a short one would have produced.
 
-    Set ``full=False`` for the original six. It is the same measurement, just blind to
+    Set ``full=False`` for the core patches alone. It is the same measurement, just blind to
     everything between black and white.
     """
     target = max(80.0, min(10000.0, float(peak_nits)))
@@ -631,7 +631,7 @@ class Calibration:
     #: primaries' own luminances were discarded, and a display that does that is worth
     #: telling someone about rather than quietly working around.
     additivity_error: float = 0.0
-    #: The greyscale ramp, if one was measured. Empty from a six-patch run.
+    #: The greyscale ramp, if one was measured. Empty from a core-only run.
     greyscale: tuple[GreyPoint, ...] = ()
     #: Measured XYZ of the red, green and blue patches, in that order. The
     #: white-balance solve already needs these; they are carried so a caller can
@@ -640,9 +640,9 @@ class Calibration:
     #: How the reference white's luminance divides between red, green and blue, summing
     #: to 1. This is what "neutral" means for this display and this signal path, and it
     #: is the target grey is held to at every other level. Empty if the channels did not
-    #: span a colour space, which ``validate`` would already have refused.
+    #: span a colour space, which ``balance_problems`` would already have refused.
     white_weights: tuple[float, ...] = ()
-    #: The saturation sweeps, if measured. Empty from a six-patch run.
+    #: The saturation sweeps, if measured. Empty from a core-only run.
     colours: tuple[ColourPoint, ...] = ()
 
     @property
@@ -834,14 +834,6 @@ def derive(
         channel_xyz=tuple(_xyz(readings[channel]) for channel in ("red", "green", "blue")),
         white_weights=_channel_weights(readings),
     )
-
-
-def _channel_matrix(readings: dict[str, Reading]) -> tuple[tuple[float, ...], tuple[float, ...]] | None:
-    """The channel-to-XYZ matrix and its inverse, or ``None`` if it does not invert."""
-    columns = [_xyz(readings[channel]) for channel in ("red", "green", "blue")]
-    matrix = tuple(columns[column][row] for row in range(3) for column in range(3))
-    inverse = _inverse3(matrix)
-    return None if inverse is None else (matrix, inverse)
 
 
 def _apportion(
@@ -1100,7 +1092,7 @@ def _greyscale_points(
 ) -> tuple[GreyPoint, ...]:
     """The ramp, in the order it was measured.
 
-    Absent from a six-patch run, and that is not a failure -- everything the profile is
+    Absent from a core-only run, and that is not a failure -- everything the profile is
     built from comes from the core patches, and the ramp is what makes the *report*
     worth reading. Anything here that is missing is simply not shown.
     """

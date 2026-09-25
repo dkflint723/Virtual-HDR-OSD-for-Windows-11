@@ -4,6 +4,7 @@ import dataclasses
 import functools
 import hashlib
 import json
+import logging
 import os
 import subprocess
 import time
@@ -74,7 +75,6 @@ from .windows_api import (
     install_and_associate_profile,
     get_color_directory,
     open_windows_display_settings,
-    open_windows_hdr_calibration_app,
     open_windows_color_profile_directory,
     get_default_profile,
     get_sdr_white_level_nits,
@@ -87,6 +87,8 @@ from .windows_api import (
     NoDefaultProfile,
     WindowsColorError,
 )
+
+_log = logging.getLogger(__name__)
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
 STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
@@ -252,9 +254,10 @@ class MainWindow(FluentWidget):
         self._first_run = not STATE_PATH.is_file()
         self.state = self._load_last_state()
         self.state.current_mode = "HDR"
-        # Live Apply is a preference, and discarding it here meant the guide's own
-        # step 4 had to be repeated every session: the user turned it on, closed the
-        # app, and found it off again with nothing to say why.
+        # live_mode is deliberately not reset here. Live Apply is a preference, and
+        # discarding it meant the guide's own step 4 had to be repeated every session:
+        # the user turned it on, closed the app, and found it off again with nothing to
+        # say why.
         self._loading_controls = False
         self._last_detected_mode: DisplayMode | None = None
         # Set while the chosen display is missing from Windows' list, so that is
@@ -266,6 +269,9 @@ class MainWindow(FluentWidget):
         # closeEvent even if a run was never started.
         self._placement_thread = None
         self._placement_watcher = None
+        # Placement threads still inside a read when they were stopped, held until they
+        # end; see _stop_placement_watch.
+        self._draining_placement: list[tuple[QThread, object]] = []
         self._remembered_sdr_profiles: dict[str, str | None] = {}
         self._base_hdr_profiles: dict[str, dict[str, str]] = {}
         # Loaded on first use from ORIGINAL_PROFILES_PATH; see _originals.
@@ -298,7 +304,7 @@ class MainWindow(FluentWidget):
             self.setMicaEffectEnabled(True)
             self.setCustomBackgroundColor(QColor(246, 248, 252), QColor(18, 22, 30))
         except Exception:
-            pass
+            _log.debug("Mica backdrop unavailable", exc_info=True)
 
         # Which direction a watchdog install/uninstall was last asked to go, so the
         # outcome can be reported once it actually lands. Empty when nothing is pending.
@@ -367,13 +373,20 @@ class MainWindow(FluentWidget):
 
     def _load_last_state(self) -> ApplicationState:
         self._state_load_problem = ""
+        self._state_unopened = False
         if not STATE_PATH.is_file():
             return ApplicationState.neutral()
         try:
             payload = json.loads(STATE_PATH.read_text(encoding="utf-8-sig"))
         except OSError:
             # Unreadable right now is not the same as corrupt -- another process can
-            # simply have it open -- so the file is left exactly where it is.
+            # simply have it open -- so the file is left exactly where it is. That
+            # includes not saving the defaults over it later in this session.
+            self._state_unopened = True
+            self._state_load_problem = (
+                f"{STATE_PATH.name} could not be opened, so the app started from defaults "
+                "and will not save over it. Close whatever has it open, then restart the app."
+            )
             return ApplicationState.neutral()
         except ValueError:
             # Not UTF-8, or not JSON. JSONDecodeError is a ValueError.
@@ -408,14 +421,8 @@ class MainWindow(FluentWidget):
             for key, value in data.items():
                 if isinstance(key, str) and isinstance(value, dict):
                     profile_name = str(value.get("profile_name", ""))
-                    profile_path = str(value.get("profile_path", ""))
                     if profile_name:
-                        result[key] = {
-                            "profile_name": profile_name,
-                            "profile_path": profile_path,
-                            "base_profile_name": str(value.get("base_profile_name", "")),
-                            "base_profile_path": str(value.get("base_profile_path", "")),
-                        }
+                        result[key] = {"profile_name": profile_name}
             return result
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
@@ -427,8 +434,9 @@ class MainWindow(FluentWidget):
     def _write_json_atomic(path: Path, payload: object) -> bool:
         """Write JSON via a temporary file so a crash cannot leave a truncated file.
 
-        The watchdog polls these files continuously; a half-written state file
-        would be parsed as corrupt and silently ignored.
+        The watchdog polls gamma_hotkeys.json continuously; a half-written file
+        would be parsed as corrupt and silently ignored. The app's own files are
+        read back at the next start, where a truncated one costs the whole state.
 
         On Windows the rename fails with a PermissionError whenever another
         process has the destination open without FILE_SHARE_DELETE — which the
@@ -469,6 +477,8 @@ class MainWindow(FluentWidget):
         The usual cause is a security product holding the file open; the same one the
         watchdog installer already warns about.
         """
+        if self._state_unopened:
+            return
         if self._write_json_atomic(STATE_PATH, self.state.to_dict()):
             return
         # Guarded: closeEvent calls this after the status bar may already be gone,
@@ -1122,6 +1132,7 @@ class MainWindow(FluentWidget):
                 try:
                     detected = get_sdr_white_level_nits(display)
                 except Exception:
+                    _log.debug("SDR white level unreadable", exc_info=True)
                     detected = None
         return resolve_white_level(option, detected)
 
@@ -1215,7 +1226,7 @@ class MainWindow(FluentWidget):
                 "warning" if enabled else "ok",
             )
         except Exception:
-            pass
+            _log.debug("Could not sync the watchdog hotkey state", exc_info=True)
 
     def _control_changed(self, field: str, value: float) -> None:
         if self._loading_controls:
@@ -1303,12 +1314,6 @@ class MainWindow(FluentWidget):
                 setattr(self.state.hdr, key, control.spec.default)
         finally:
             self._loading_controls = False
-        # Asked separately, and only when there is one. A measured correction is not a
-        # slider -- it took four minutes of the user's time and a meter -- so a reset
-        # that silently threw it away would be a very expensive misunderstanding of
-        # what "reset the sliders" means. Keeping it silently would be its own trap,
-        # because the profile would go on being shaped by something the dialog just
-        # implied had been cleared.
         # Cleared with the trims, not asked about separately. They are one thing: the
         # response records what each channel delivered for the code it was sent, and the
         # code it was sent came through the matrix the trims build. Keeping the response
@@ -1357,8 +1362,8 @@ class MainWindow(FluentWidget):
         self._load_profile_from_path(Path(base))
 
     def _automatic_mode_switching_toggled(self, checked: bool) -> None:
-        # These legacy state fields are kept synchronized for backward-compatible
-        # state/profile deserialization, but the GUI exposes one unambiguous control.
+        # Two stored fields behind one control. They are only ever read together:
+        # automatic switching is on when both are true.
         self.state.follow_windows_mode = checked
         self.state.auto_refresh_after_mode_change = checked
         if checked:
@@ -1401,10 +1406,7 @@ class MainWindow(FluentWidget):
         button in the walkthrough, and nothing else would notice."""
         actions = {
             "enable_hdr": lambda: self.hdr_switch.setChecked(True),
-            "display_settings": open_windows_display_settings,
-            "hdr_calibration_app": open_windows_hdr_calibration_app,
             "focus_profiles": self._highlight_profile_pickers,
-            "import_profile": self._import_profile,
             "enable_live": lambda: self.live_checkbox.setChecked(True),
             "watchdog": self._show_watchdog_settings,
             "calibrate": self._calibrate_display,
@@ -1928,6 +1930,7 @@ class MainWindow(FluentWidget):
         try:
             current = get_default_profile(display, "HDR")
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             current = ""
         self._active_profile_name = Path(current).name if current else ""
         self._update_activity_bar()
@@ -2004,6 +2007,7 @@ class MainWindow(FluentWidget):
         try:
             displays = enumerate_displays()
         except Exception:
+            _log.debug("Display enumeration failed during the mode poll", exc_info=True)
             return
         selected = next((display for display in displays if self._is_selected_display(display)), None)
         if selected is None:
@@ -2214,6 +2218,7 @@ class MainWindow(FluentWidget):
         try:
             profile_name = get_default_profile(display, "SDR")
         except Exception:
+            _log.debug("Could not read the Windows SDR default", exc_info=True)
             profile_name = None
         self._remembered_sdr_profiles[display.key] = profile_name or None
 
@@ -2253,7 +2258,7 @@ class MainWindow(FluentWidget):
                 self._set_status(f"{reason}: Windows already has {profile_name} for SDR.", "ok")
                 return
         except Exception:
-            pass
+            _log.debug("Could not read the SDR default before re-asserting it", exc_info=True)
 
         try:
             active = reapply_existing_default_profile(display, "SDR", profile_name)
@@ -2307,6 +2312,7 @@ class MainWindow(FluentWidget):
             try:
                 path = get_color_directory() / path.name
             except Exception:
+                _log.debug("Could not locate the Windows colour directory", exc_info=True)
                 return False
         try:
             stamp = path.stat()
@@ -2583,6 +2589,7 @@ class MainWindow(FluentWidget):
         try:
             sdr_white = get_sdr_white_level_nits(display)
         except Exception:
+            _log.debug("SDR white level unreadable; assuming 240 nits", exc_info=True)
             sdr_white = 240.0
 
         # Adjusting a control that cannot change the display is pointless, and live mode
@@ -2714,6 +2721,7 @@ class MainWindow(FluentWidget):
         try:
             sdr_white = get_sdr_white_level_nits(display)
         except Exception:
+            _log.debug("SDR white level unreadable; assuming 240 nits", exc_info=True)
             sdr_white = 240.0
         panel = read_panel_metadata(display.device_path)
         # Ask for what the panel claims it can do, not for what was measured last
@@ -3065,9 +3073,22 @@ class MainWindow(FluentWidget):
             # Joined rather than left to finish: an unjoined QThread whose last
             # reference goes is a fail-fast abort, which is how the measurement path
             # used to take the app down at the end of every run.
-            thread.wait(5000)
+            if not thread.wait(5000):
+                # Still inside a read. spotread can take a minute to answer or time
+                # out, and the watcher only sees its cancel between reads, so dropping
+                # the references here would be that same abort. Hold both until the
+                # thread ends.
+                self._draining_placement.append((thread, watcher))
+                thread.finished.connect(self._release_drained_placement)
         self._placement_watcher = None
         self._placement_thread = None
+
+    def _release_drained_placement(self) -> None:
+        """Let go of placement threads that have ended. Queued to the UI thread."""
+        self._draining_placement = [
+            (thread, watcher) for thread, watcher in self._draining_placement
+            if not thread.wait(100)
+        ]
 
     def _display_state_probe(self, display: DisplayInfo):
         """The operating system's view of one display, as a callable for the run.
@@ -3242,6 +3263,7 @@ class MainWindow(FluentWidget):
                 intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
             )
         except Exception:
+            _log.debug("Could not build the transform for the shaping fingerprint", exc_info=True)
             return ()
         return tuple(
             round(greyscale.sample(transform.green, code), 6) for code in self.SHAPING_CODES
@@ -3459,6 +3481,7 @@ class MainWindow(FluentWidget):
                 intended, hdr=True, sdr_white_nits=self._effective_sdr_white_nits()
             )
         except Exception:
+            _log.debug("Could not build the transform for the measurement intent", exc_info=True)
             return {}
         intent = {}
         for step in measure.plan(peak):
@@ -3497,7 +3520,7 @@ class MainWindow(FluentWidget):
     def _measure_finished(self, result, message: str) -> None:
         """Adopt a completed measurement, or explain why there is not one."""
         # Esc during placement ends the run before it starts, and the poll has to stop
-        # with it or it goes on driving the instrument for another minute and a half.
+        # with it or it goes on driving the instrument for the rest of its attempts.
         self._stop_placement_watch()
         window = getattr(self, "_measure_window", None)
         if window is not None:
@@ -3760,6 +3783,7 @@ class MainWindow(FluentWidget):
         try:
             response = measure.panel_response(result, sent)
         except Exception:
+            _log.debug("Could not solve a panel response from this run", exc_info=True)
             response = None
 
         if response is None:
@@ -3809,6 +3833,7 @@ class MainWindow(FluentWidget):
         try:
             return self._apply_mode_profile("Calibration measurements", force=True)
         except Exception:
+            _log.debug("Applying from the pattern view failed", exc_info=True)
             return False
 
     def _restore_live_mode(self, previous: bool) -> None:
@@ -3897,12 +3922,14 @@ class MainWindow(FluentWidget):
         try:
             profile_name = get_default_profile(display, "HDR")
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             return
         if not profile_name or self._is_managed_profile(Path(profile_name).name):
             return
         try:
             profile_path = get_color_directory() / Path(profile_name).name
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return
         if not profile_path.is_file():
             return
@@ -3964,7 +3991,7 @@ class MainWindow(FluentWidget):
                 self._load_mode_into_controls()
                 self._populate_profile_pickers()
             except Exception:
-                pass
+                _log.debug("Could not import %s as the editing base", profile_path, exc_info=True)
         self._save_state_now()
 
     def _cleanup_legacy_managed_profiles(self, display: DisplayInfo) -> None:
@@ -4011,7 +4038,7 @@ class MainWindow(FluentWidget):
                     if isinstance(active, str) and self._is_managed_profile(active):
                         names.add(active)
             except Exception:
-                pass
+                _log.debug("Could not read %s during cleanup", GAMMA_HOTKEY_STATE_PATH.name, exc_info=True)
         # The registry records only whichever variant was active, so an orphaned pair
         # leaves its sibling named nowhere. Derive it: the sibling of an app-owned
         # working profile is by definition also app-owned.
@@ -4039,7 +4066,7 @@ class MainWindow(FluentWidget):
             try:
                 remove_profile(name, display, "HDR")
             except Exception:
-                pass
+                _log.debug("Could not uninstall leftover profile %s", name, exc_info=True)
 
     @staticmethod
     def _working_profile_paths_for(stable_key: str) -> tuple[Path, Path]:
@@ -4091,6 +4118,7 @@ class MainWindow(FluentWidget):
             try:
                 detected_white = get_sdr_white_level_nits(display)
             except Exception:
+                _log.debug("SDR white level unreadable", exc_info=True)
                 detected_white = None
         on_white = resolve_white_level(on_option, detected_white)
 
@@ -4121,6 +4149,7 @@ class MainWindow(FluentWidget):
             if content_digest(installed.read_bytes()) != digest:
                 return False
         except Exception:
+            _log.debug("Could not compare installed %s; treating it as different", path.name, exc_info=True)
             return False
         self._installed_digests[path.name] = digest
         return True
@@ -4186,6 +4215,17 @@ class MainWindow(FluentWidget):
         display = self._selected_display()
         if display is None:
             self._set_status("Select a detected display before applying a profile.", "error")
+            return False
+        # A meter run is measured against the profile active when it began, and nothing
+        # in it can see a change made under the same working-profile names. Apply Edits,
+        # a Live Apply slider or the correction dropdown can all get here mid-run with
+        # the main window on another monitor, so they wait for the run instead.
+        if getattr(self, "_measure_window", None) is not None:
+            self._set_status(
+                f"{reason}: a meter measurement is running, so nothing was applied. "
+                "Your edits are kept; apply them once it has finished.",
+                "warning",
+            )
             return False
         if self._is_restored(display) and reason not in USER_APPLY_REASONS:
             self._set_status(
@@ -4263,12 +4303,9 @@ class MainWindow(FluentWidget):
         self._applied_signature = signature
         self._active_profile_name = active_name
         key = f"{display.key}|HDR"
-        self._persisted_live_registry[key] = {
-            "profile_name": active_name,
-            "profile_path": str(active_path),
-            "base_profile_name": self._base_hdr_profiles.get(display.key, {}).get("profile_name", self.state.hdr.base_profile_name),
-            "base_profile_path": self._base_hdr_profiles.get(display.key, {}).get("profile_path", self.state.hdr.base_profile),
-        }
+        # Only the name is ever read back: cleanup uses it to find app-owned profiles
+        # left behind by earlier builds.
+        self._persisted_live_registry[key] = {"profile_name": active_name}
         self._save_live_registry()
         self._write_gamma_runtime_state(display, installed, on_option, enabled, active_name, active_path)
         if self._is_restored(display):
@@ -4299,6 +4336,7 @@ class MainWindow(FluentWidget):
         try:
             current_name = Path(get_default_profile(display, "HDR")).name
         except Exception:
+            _log.debug("Could not read the Windows HDR default", exc_info=True)
             return
         if current_name not in pending_names:
             return
@@ -4447,9 +4485,9 @@ class MainWindow(FluentWidget):
             record = {}
 
         # Drop records describing this same monitor under a previous adapter LUID.
-        # The watchdog looks entries up by gdi_name, so leftovers are not merely
-        # clutter: they are rival records for the same display, and it used to act
-        # on whichever came first.
+        # The watchdog matches entries by device path and falls back to gdi_name, so
+        # leftovers are not merely clutter: they are rival records for the same
+        # display, and it used to act on whichever came first.
         for stale_key in [
             key for key, value in displays_state.items()
             if key != display.key and runtime_record_matches(value, display)
@@ -4462,18 +4500,24 @@ class MainWindow(FluentWidget):
     # Windows' own profiles: what to put back, and the one control that puts it back
 
     def _originals(self) -> dict[str, dict[str, object]]:
-        """What Windows had, per display, keyed by stable_key. Loaded once."""
+        """What Windows had, per display, keyed by stable_key. Loaded once it can be read."""
         if self._original_profiles is None:
-            self._original_profiles = self._load_original_profiles()
+            loaded = self._load_original_profiles()
+            if loaded is None:
+                # There but not openable right now. Not cached, so the next call reads
+                # it again, and _save_original_profiles will not write over it.
+                return {}
+            self._original_profiles = loaded
         return self._original_profiles
 
-    def _load_original_profiles(self) -> dict[str, dict[str, object]]:
+    def _load_original_profiles(self) -> dict[str, dict[str, object]] | None:
+        """None when the file is there but cannot be opened right now."""
         if not ORIGINAL_PROFILES_PATH.is_file():
             return {}
         try:
             payload = json.loads(ORIGINAL_PROFILES_PATH.read_text(encoding="utf-8-sig"))
         except OSError:
-            return {}
+            return None
         except ValueError:
             payload = None
         displays = payload.get("displays") if isinstance(payload, dict) else None
@@ -4494,6 +4538,11 @@ class MainWindow(FluentWidget):
         return {}
 
     def _save_original_profiles(self) -> bool:
+        if self._original_profiles is None and ORIGINAL_PROFILES_PATH.is_file():
+            # Never read, because it could not be opened. Writing now would replace the
+            # only record of what Windows had -- and whether it was restored -- with
+            # whatever this session has seen.
+            return False
         return self._write_json_atomic(
             ORIGINAL_PROFILES_PATH,
             {"schema": ORIGINAL_PROFILES_SCHEMA, "displays": self._originals()},
@@ -4525,6 +4574,7 @@ class MainWindow(FluentWidget):
         try:
             return (get_color_directory() / Path(name).name).is_file()
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return False
 
     @staticmethod
@@ -4906,6 +4956,7 @@ class MainWindow(FluentWidget):
         try:
             capability = capability_for_device_name(display.gdi_name)
         except Exception:
+            _log.debug("DXGI capability query failed", exc_info=True)
             return ()
         if capability is None or not capability.is_hdr:
             return ()
@@ -5022,6 +5073,7 @@ class MainWindow(FluentWidget):
             try:
                 in_colour_dir = source.parent.samefile(get_color_directory())
             except Exception:
+                _log.debug("Could not compare %s with the colour directory", source.parent, exc_info=True)
                 in_colour_dir = False
             binding.hdr_profile = source.name if in_colour_dir else str(source)
         self._load_mode_into_controls()
@@ -5051,6 +5103,7 @@ class MainWindow(FluentWidget):
         try:
             return str(get_color_directory())
         except Exception:
+            _log.debug("Could not locate the Windows colour directory", exc_info=True)
             return str(Path.home())
 
     def _import_profile(self) -> None:

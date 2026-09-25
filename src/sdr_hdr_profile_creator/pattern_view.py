@@ -102,6 +102,11 @@ class ControlBinding:
         return True
 
 
+def pattern_keys() -> str:
+    """The number keys that open a pattern: 1-9, then 0 for a tenth."""
+    return "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
+
+
 def context_for(
     capability: DisplayCapability | None,
     sdr_white_nits: float,
@@ -313,8 +318,7 @@ def render_overlay(
             confirm = "Enter  record it and finish" if last else "Enter  record it"
         else:
             confirm = "Enter  finish" if last else "Enter  done, next step"
-        keys = "1-9, 0" if len(PATTERNS) > 9 else f"1-{len(PATTERNS)}"
-        lines = [f"{keys}   pattern"]
+        lines = [f"{pattern_keys()}   pattern"]
         if not pattern.level_driven and controls:
             lines.append("Tab   next control")
         lines += [adjust]
@@ -514,7 +518,7 @@ class PatternWindow(QWidget):
         self._tracks: list[tuple[str, int, int, int, int]] = []
         self._overlay_origin = (0, 0)
         self._dragging: str | None = None
-        # Guided by default. Nine patterns and a page of theory is not a procedure, and a
+        # Guided by default. A list of patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
         self._step = 0
@@ -767,7 +771,7 @@ class PatternWindow(QWidget):
                 painter.drawText(margin, y, "Esc     leave; they stay in the editor")
             y += round(34 * scale)
             painter.setPen(QColor(130, 130, 130, 255))
-            painter.drawText(margin, y, "1-9 views a pattern, S returns here")
+            painter.drawText(margin, y, f"{pattern_keys()} views a pattern, S returns here")
         finally:
             painter.end()
         return (bytes(image.constBits()), width, height)

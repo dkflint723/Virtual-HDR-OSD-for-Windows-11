@@ -311,5 +311,15 @@ class HandleReleaseTests(unittest.TestCase):
         self.assertEqual([], self.destroyed)
 
 
+@unittest.skipUnless(sys.platform == "win32", "dxva2 structs are Windows-only")
+class PhysicalMonitorLayoutTests(unittest.TestCase):
+    def test_the_array_stride_matches_physical_monitor(self):
+        """GetPhysicalMonitorsFromHMONITOR fills an array of these: a HANDLE and a
+        128-character description. A wrong size shifts every monitor after the first."""
+        import ctypes
+
+        self.assertEqual(ctypes.sizeof(ctypes.c_void_p) + 128 * 2, ctypes.sizeof(ddc._PhysicalMonitor))
+
+
 if __name__ == "__main__":
     unittest.main()

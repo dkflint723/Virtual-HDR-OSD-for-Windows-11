@@ -74,7 +74,7 @@ class WatchdogPackagingTests(unittest.TestCase):
                 self.assertTrue((RESOURCES / name).is_file(), f"missing packaged resource: {name}")
 
     def test_all_copies_of_the_watchdog_stay_identical(self):
-        """Three copies of a 40 KB script are shipped; drift between them is a bug.
+        """Three copies of the script are shipped; drift between them is a bug.
 
         The packaged copy is what the GUI launches, the root copy is what users
         double-click, and the standalone copy is distributed on its own.
@@ -489,7 +489,7 @@ class InstallerOutcomeTests(unittest.TestCase):
     def test_the_summary_does_not_call_a_managed_hdr_profile_untouched(self):
         """The owner's screenshot: "HDR / EXTENDED : <none - left untouched>" printed at
         the same moment the app's own bar read "Active HDR profile: ..._On.icm". The
-        empty case is the one the watchdog rewrites with -Force every five seconds."""
+        empty case is exactly the one the watchdog manages, through that pair."""
         script = self.install()
         self.assertIn("<managed by the Gamma OFF/ON pair below>", script)
         self.assertNotIn(
@@ -566,7 +566,7 @@ class WatchdogIdentityTests(unittest.TestCase):
     def test_the_liveness_check_is_the_singleton_not_a_process_list(self):
         """A process list cannot see what it is not allowed to read; the mutex can."""
         script = self.install()
-        self.assertIn("OpenExisting('Local\ColorProfileModeWatchdogStandalone')", script)
+        self.assertIn(r"OpenExisting('Local\ColorProfileModeWatchdogStandalone')", script)
 
     def test_a_surplus_launcher_waits_before_standing_down(self):
         """Standing down on the first surplus exit loses the install-time handover: the

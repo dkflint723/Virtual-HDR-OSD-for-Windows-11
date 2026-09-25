@@ -889,8 +889,12 @@ class CorrectionTargetGammaTests(unittest.TestCase):
         bright = self.output_nits(self.corrected(2.0), 50.0)
         self.assertGreater(bright, dark * 1.05)
 
-    def test_the_target_matches_the_reference_transform(self):
-        """Cross-checked against the correction evaluated directly at that target."""
+    def test_the_curve_is_the_correction_evaluated_at_the_slider_target(self):
+        """The LUT against the same correction function called directly at gamma 2.0.
+
+        Not an independent reference: both sides use gamma_correction, so this checks the
+        wiring -- the slider reaching the correction as its target, and the LUT sampling
+        it -- rather than the maths itself."""
         from sdr_hdr_profile_creator.gamma_correction import (
             pq_eotf,
             pq_inverse_eotf,
@@ -1245,6 +1249,68 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
                 self.assertGreater(abs(moved - 1000.0), 50.0)
 
 
+class MHC2LayoutTests(unittest.TestCase):
+    """The MHC2 tag against Microsoft's published layout, read without icc.py.
+
+    ProfileStructureTests parse the tag with _parse_mhc2, the writer's own counterpart,
+    so a field both got wrong would pass there and be rejected by Windows. The layout
+    here is transcribed from "Windows hardware display color calibration pipeline" on
+    Microsoft Learn: signature, reserved, LUT count (4096 or fewer), min and peak
+    luminance as s15Fixed16, then offsets to the matrix and the red, green and blue
+    1DLUTs, relative to the start of the structure. The matrix is 3x4 s15Fixed16, row
+    major; each 1DLUT is 'sf32', four reserved bytes, then s15Fixed16 values in [0, 1].
+    """
+
+    @staticmethod
+    def fixed(raw: bytes) -> float:
+        return struct.unpack(">i", raw)[0] / 65536.0
+
+    def tag(self, profile: bytes, signature: bytes) -> bytes:
+        count = struct.unpack(">I", profile[128:132])[0]
+        for index in range(count):
+            sig, offset, size = struct.unpack(">4sII", profile[132 + 12 * index:144 + 12 * index])
+            if sig == signature:
+                return profile[offset:offset + size]
+        self.fail(f"no {signature!r} tag")
+
+    def test_the_tag_matches_the_published_layout(self):
+        state = ModeState.neutral("HDR")
+        state.minimum_luminance_nits, state.peak_luminance_nits = 0.05, 950.0
+        tag = self.tag(build_profile("HDR", state, build_transform(state, hdr=True)), b"MHC2")
+
+        self.assertEqual(b"MHC2", tag[0:4])
+        self.assertEqual(0, struct.unpack(">I", tag[4:8])[0])
+        entries = struct.unpack(">I", tag[8:12])[0]
+        self.assertTrue(2 <= entries <= 4096, entries)
+        self.assertAlmostEqual(0.05, self.fixed(tag[12:16]), places=4)
+        self.assertAlmostEqual(950.0, self.fixed(tag[16:20]), places=4)
+
+        matrix, red, green, blue = struct.unpack(">4I", tag[20:36])
+        self.assertGreaterEqual(matrix, 36)
+        rows = [self.fixed(tag[matrix + 4 * i:matrix + 4 * i + 4]) for i in range(12)]
+        # Neutral controls: the adjustment is identity in the three columns Windows reads.
+        for row in range(3):
+            for column in range(3):
+                self.assertAlmostEqual(float(row == column), rows[4 * row + column], places=4)
+
+        ends = []
+        for offset in (red, green, blue):
+            with self.subTest(offset=offset):
+                self.assertEqual(0, offset % 4)
+                self.assertEqual(b"sf32", tag[offset:offset + 4])
+                self.assertEqual(0, struct.unpack(">I", tag[offset + 4:offset + 8])[0])
+                values = [self.fixed(tag[offset + 8 + 4 * i:offset + 12 + 4 * i]) for i in range(entries)]
+                self.assertEqual(entries, len(values))
+                self.assertTrue(all(0.0 <= v <= 1.0 for v in values))
+                self.assertAlmostEqual(0.0, values[0], places=4)
+                self.assertAlmostEqual(1.0, values[-1], places=4)
+                ends.append(offset + 8 + 4 * entries)
+        self.assertGreaterEqual(red, matrix + 48, "the red LUT overlaps the matrix")
+        self.assertGreaterEqual(green, ends[0])
+        self.assertGreaterEqual(blue, ends[1])
+        self.assertLessEqual(ends[2], len(tag))
+
+
 class CorruptStateTests(unittest.TestCase):
     """What a damaged or hand-edited state file turns into.
 
@@ -1276,6 +1342,24 @@ class CorruptStateTests(unittest.TestCase):
         )
         self.assertEqual(2.2, state.hdr.gamma)
         self.assertEqual(1000.0, state.hdr.peak_luminance_nits)
+
+    def test_an_infinite_monitor_code_does_not_stop_the_state_loading(self):
+        """int() of an infinity raises OverflowError, not ValueError. It escaped both
+        this loader and the window's, so the app would not start."""
+        import json
+
+        rows = [v for i in range(8)
+                for v in (0.1 * (i + 1), 2.0 * (i + 1), 0.1 * (i + 1), 7.0 * (i + 1),
+                          0.1 * (i + 1), 1.0 * (i + 1))]
+        text = json.dumps({"hdr": {"panel_response": rows,
+                                   "panel_response_weights": [0.2, 0.7, 0.1],
+                                   "panel_response_monitor": 0}})
+        for bad in ("Infinity", "-Infinity", "1e400"):
+            with self.subTest(value=bad):
+                state = ApplicationState.from_dict(json.loads(
+                    text.replace('"panel_response_monitor": 0', f'"panel_response_monitor": {bad}')))
+                self.assertIsNone(state.hdr.panel_response_monitor)
+                self.assertEqual(len(rows), len(state.hdr.panel_response))
 
     def test_a_top_level_that_is_not_an_object_gives_the_neutral_state(self):
         neutral = ApplicationState.neutral().to_dict()

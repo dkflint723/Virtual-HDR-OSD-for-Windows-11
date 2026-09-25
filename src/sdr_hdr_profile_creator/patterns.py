@@ -148,9 +148,6 @@ class Pattern:
     levels: Callable[[PatternContext], tuple[float, ...]] | None = None
 
 
-# Relative sizes of the candidate patches in the gamma-match pattern. The middle entry is
-# the true half-luminance, so it is the answer; the others exist so a miss reads as a
-# direction rather than merely a failure.
 _NEAR_BLACK_LEVELS: tuple[float, ...] = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 # How much brighter the shape is than its surround in the clipping tests. This is the
@@ -159,6 +156,9 @@ _NEAR_BLACK_LEVELS: tuple[float, ...] = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
 # put the threshold well above where a panel actually runs out.
 SHAPE_CONTRAST = 1.08
 
+# Relative sizes of the candidate patches in the gamma-match pattern. The middle entry is
+# the true half-luminance, so it is the answer; the others exist so a miss reads as a
+# direction rather than merely a failure.
 GAMMA_CANDIDATES: tuple[tuple[float, str], ...] = (
     (0.70, "much darker"),
     (0.85, "darker"),

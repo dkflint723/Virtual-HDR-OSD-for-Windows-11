@@ -27,7 +27,7 @@ this wrong the other way is worse than useless: it would report a monitor as
 uncalibratable when it is not.
 
 The Windows entry points live behind a small object so the tuning logic can be exercised
-against a fake. None of the arithmetic in tune.py needs a monitor.
+against a fake. None of the arithmetic in ddc_tune.py needs a monitor.
 """
 
 from __future__ import annotations
@@ -48,9 +48,6 @@ COLOUR_PRESET = 0x14
 RED_GAIN = 0x16
 GREEN_GAIN = 0x18
 BLUE_GAIN = 0x1A
-RED_BLACK = 0x6C
-GREEN_BLACK = 0x6E
-BLUE_BLACK = 0x70
 GAMMA = 0x72
 PICTURE_MODE = 0xDC
 
