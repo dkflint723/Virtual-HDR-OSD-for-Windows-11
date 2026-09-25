@@ -1,8 +1,8 @@
 """Delta ITP (ITU-R BT.2124): how visible a colour error is, rather than how large.
 
-The report currently answers with a luminance error in percent and a white drift as a
-distance in xy. Two numbers, two units, and neither says the thing anyone actually wants
-to know -- would you see it. A 2% luminance error at 0.5 nits and the same 2% at 500
+A luminance error in percent and a white drift as a distance in xy, which is how
+accuracy was reported before this, are two numbers in two units, and neither says the
+thing anyone actually wants to know -- would you see it. A 2% luminance error at 0.5 nits and the same 2% at 500
 nits are nothing like each other to the eye, and a percentage cannot express that.
 
 dITP is defined on ICtCp (BT.2100), which is PQ-encoded and near enough perceptually

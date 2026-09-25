@@ -251,9 +251,10 @@ class MainWindow(FluentWidget):
         self._first_run = not STATE_PATH.is_file()
         self.state = self._load_last_state()
         self.state.current_mode = "HDR"
-        # Live Apply is a preference, and discarding it here meant the guide's own
-        # step 4 had to be repeated every session: the user turned it on, closed the
-        # app, and found it off again with nothing to say why.
+        # live_mode is deliberately not reset here. Live Apply is a preference, and
+        # discarding it meant the guide's own step 4 had to be repeated every session:
+        # the user turned it on, closed the app, and found it off again with nothing to
+        # say why.
         self._loading_controls = False
         self._last_detected_mode: DisplayMode | None = None
         # Set while the chosen display is missing from Windows' list, so that is
@@ -426,8 +427,9 @@ class MainWindow(FluentWidget):
     def _write_json_atomic(path: Path, payload: object) -> bool:
         """Write JSON via a temporary file so a crash cannot leave a truncated file.
 
-        The watchdog polls these files continuously; a half-written state file
-        would be parsed as corrupt and silently ignored.
+        The watchdog polls gamma_hotkeys.json continuously; a half-written file
+        would be parsed as corrupt and silently ignored. The app's own files are
+        read back at the next start, where a truncated one costs the whole state.
 
         On Windows the rename fails with a PermissionError whenever another
         process has the destination open without FILE_SHARE_DELETE — which the
@@ -1302,12 +1304,6 @@ class MainWindow(FluentWidget):
                 setattr(self.state.hdr, key, control.spec.default)
         finally:
             self._loading_controls = False
-        # Asked separately, and only when there is one. A measured correction is not a
-        # slider -- it took four minutes of the user's time and a meter -- so a reset
-        # that silently threw it away would be a very expensive misunderstanding of
-        # what "reset the sliders" means. Keeping it silently would be its own trap,
-        # because the profile would go on being shaped by something the dialog just
-        # implied had been cleared.
         # Cleared with the trims, not asked about separately. They are one thing: the
         # response records what each channel delivered for the code it was sent, and the
         # code it was sent came through the matrix the trims build. Keeping the response
@@ -1356,8 +1352,8 @@ class MainWindow(FluentWidget):
         self._load_profile_from_path(Path(base))
 
     def _automatic_mode_switching_toggled(self, checked: bool) -> None:
-        # These legacy state fields are kept synchronized for backward-compatible
-        # state/profile deserialization, but the GUI exposes one unambiguous control.
+        # Two stored fields behind one control. They are only ever read together:
+        # automatic switching is on when both are true.
         self.state.follow_windows_mode = checked
         self.state.auto_refresh_after_mode_change = checked
         if checked:
@@ -3493,7 +3489,7 @@ class MainWindow(FluentWidget):
     def _measure_finished(self, result, message: str) -> None:
         """Adopt a completed measurement, or explain why there is not one."""
         # Esc during placement ends the run before it starts, and the poll has to stop
-        # with it or it goes on driving the instrument for another minute and a half.
+        # with it or it goes on driving the instrument for the rest of its attempts.
         self._stop_placement_watch()
         window = getattr(self, "_measure_window", None)
         if window is not None:
@@ -4443,9 +4439,9 @@ class MainWindow(FluentWidget):
             record = {}
 
         # Drop records describing this same monitor under a previous adapter LUID.
-        # The watchdog looks entries up by gdi_name, so leftovers are not merely
-        # clutter: they are rival records for the same display, and it used to act
-        # on whichever came first.
+        # The watchdog matches entries by device path and falls back to gdi_name, so
+        # leftovers are not merely clutter: they are rival records for the same
+        # display, and it used to act on whichever came first.
         for stale_key in [
             key for key, value in displays_state.items()
             if key != display.key and runtime_record_matches(value, display)

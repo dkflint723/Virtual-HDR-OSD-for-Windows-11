@@ -514,7 +514,7 @@ class PatternWindow(QWidget):
         self._tracks: list[tuple[str, int, int, int, int]] = []
         self._overlay_origin = (0, 0)
         self._dragging: str | None = None
-        # Guided by default. Nine patterns and a page of theory is not a procedure, and a
+        # Guided by default. A list of patterns and a page of theory is not a procedure, and a
         # user who has to work out what to do first will do nothing.
         self._guided = bool(guided) and measure is not None
         self._step = 0

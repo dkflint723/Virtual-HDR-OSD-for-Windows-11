@@ -151,7 +151,7 @@ def _white_balance_matrix(state: ModeState) -> tuple[float, ...]:
         test_x, test_y = _uvp_to_xy(u + pu * 0.001, v + pv * 0.001)
         if test_y > y:
             pu, pv = -pu, -pv
-        # ±5 UI units ~= ±0.0025 u'v': deliberately a fine correction range.
+        # ±25 UI units ~= ±0.0125 u'v': deliberately a fine correction range.
         distance = tint * 0.0005
         x, y = _uvp_to_xy(u + pu * distance, v + pv * distance)
 

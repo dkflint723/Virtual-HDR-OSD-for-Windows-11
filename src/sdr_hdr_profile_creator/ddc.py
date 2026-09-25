@@ -27,7 +27,7 @@ this wrong the other way is worse than useless: it would report a monitor as
 uncalibratable when it is not.
 
 The Windows entry points live behind a small object so the tuning logic can be exercised
-against a fake. None of the arithmetic in tune.py needs a monitor.
+against a fake. None of the arithmetic in ddc_tune.py needs a monitor.
 """
 
 from __future__ import annotations

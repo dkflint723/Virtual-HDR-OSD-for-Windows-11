@@ -1,6 +1,6 @@
 """Tests for the embedded PowerShell watchdog.
 
-The watchdog is ~1100 lines of PowerShell inside a .bat, normally reachable only by
+The watchdog is ~1850 lines of PowerShell inside a .bat, normally reachable only by
 installing a scheduled task. These tests extract the decision function from the shipped
 file and exercise it in a real PowerShell process with the native layer stubbed, so the
 logic that decides which HDR profile Windows gets is actually covered.

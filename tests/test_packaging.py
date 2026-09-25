@@ -74,7 +74,7 @@ class WatchdogPackagingTests(unittest.TestCase):
                 self.assertTrue((RESOURCES / name).is_file(), f"missing packaged resource: {name}")
 
     def test_all_copies_of_the_watchdog_stay_identical(self):
-        """Three copies of a 40 KB script are shipped; drift between them is a bug.
+        """Three copies of the script are shipped; drift between them is a bug.
 
         The packaged copy is what the GUI launches, the root copy is what users
         double-click, and the standalone copy is distributed on its own.

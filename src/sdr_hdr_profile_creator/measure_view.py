@@ -231,7 +231,8 @@ class PlacementWatcher(QObject):
     #: Emitted when the attempt budget runs out, so the caller can offer a way forward.
     gave_up = Signal()
 
-    #: Roughly a minute and a half of trying, which is far longer than placing a meter
+    #: 45 attempts two seconds apart: about a minute and a half when each read answers
+    #: promptly, longer when reads run to spotread's timeout. Far longer than placing a meter
     #: takes and short enough not to look like a hang if the target is never found.
     MAX_ATTEMPTS = 45
     INTERVAL_SECONDS = 2.0
@@ -306,8 +307,8 @@ class MeasurementWorker(QObject):
         # Injected so tests are not charged the panel's settling time; the real
         # delays exist for the display, not for the code.
         self._sleep = sleep
-        # The long sweep by default; the short six-patch plan is for exercising
-        # the mechanics of a run without paying for sixty-nine readings.
+        # The long sweep by default; the short core-only plan is for exercising
+        # the mechanics of a run without paying for the full sweep.
         self._full = full
         self._abort = False
 
