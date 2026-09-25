@@ -177,7 +177,7 @@ the new boundaries.
 
 | Phase | Goal | Status |
 | --- | --- | --- |
-| 0 | Make today's app safe while the split happens | Done: `21346b6` to `e04ac57`; restore verified on hardware |
+| 0 | Make today's app safe while the split happens | Done: `21346b6` to `e04ac57`; restore verified on hardware. Two tasks from the decision were not done: the watchdog uninstaller still restores nothing (left out deliberately, `abd5f6a`), and Gamma with the correction off still acts on the whole range |
 | 1 | This record, CI, the import-boundary test, a tagged `main`, and the Independent-Flip question | In progress |
 | 2 | vhdr-color as a pure package, with golden vectors; the boundary test passes with no exceptions | |
 | 3 | A `.cube` reader, validator and CPU samplers you can trust before any shader exists | |
