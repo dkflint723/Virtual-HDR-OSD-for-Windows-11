@@ -2040,7 +2040,8 @@ class RebootStabilityTests(WindowTestCase):
         self.assertIn(pair[1], self.removed)
 
     def test_runtime_state_drops_records_for_a_previous_luid(self):
-        """The watchdog looks entries up by gdi_name, so duplicates are rivals."""
+        """The watchdog matches entries by device path, then gdi_name, so duplicates
+        are rivals."""
         self.apply()
         first_key = self.display.key
         self.reboot()
@@ -2260,7 +2261,8 @@ class RuntimeStateTests(WindowTestCase):
         self.assertEqual(set(entry["profiles"]), {"Off", "On"})
 
     def test_the_sdr_choice_is_published_for_the_watchdog(self):
-        """The watchdog force-restores SDR every five seconds regardless of drift.
+        """The watchdog puts SDR back to what it captured whenever it drifts, within a
+        second.
 
         The GUI refusing to touch an unmanaged SDR association is worth nothing
         unless the watchdog is told to leave it alone too.

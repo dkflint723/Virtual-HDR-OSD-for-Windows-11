@@ -489,7 +489,7 @@ class InstallerOutcomeTests(unittest.TestCase):
     def test_the_summary_does_not_call_a_managed_hdr_profile_untouched(self):
         """The owner's screenshot: "HDR / EXTENDED : <none - left untouched>" printed at
         the same moment the app's own bar read "Active HDR profile: ..._On.icm". The
-        empty case is the one the watchdog rewrites with -Force every five seconds."""
+        empty case is exactly the one the watchdog manages, through that pair."""
         script = self.install()
         self.assertIn("<managed by the Gamma OFF/ON pair below>", script)
         self.assertNotIn(
