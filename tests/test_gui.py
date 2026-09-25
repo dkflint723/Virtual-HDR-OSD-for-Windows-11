@@ -5550,6 +5550,25 @@ class ModePollDuringMeasurementTests(WindowTestCase):
         )
 
 
+class ApplyDuringMeasurementTests(WindowTestCase):
+    def test_nothing_is_applied_while_a_meter_run_is_up(self):
+        """The readings would be paired with codes they were not measured under, and
+        the working-profile names do not change, so the run's own probe cannot see it."""
+        self.window._measure_window = object()
+        self.addCleanup(setattr, self.window, "_measure_window", None)
+        self.installed.clear()
+        self.associations.clear()
+        for reason in ("Apply Edits", "Live update", "Reapply"):
+            with self.subTest(reason=reason):
+                self.assertFalse(self.window._apply_mode_profile(reason, force=True))
+        self.assertEqual(([], []), (self.installed, self.associations))
+        self.assertIn("measurement is running", self.window.status_label.text())
+
+    def test_it_applies_again_once_the_run_is_over(self):
+        self.window._measure_window = None
+        self.assertTrue(self.window._apply_mode_profile("Apply Edits", force=True))
+
+
 class DisplaySurfaceGuardTests(WindowTestCase):
     """Everything that may not touch the display while a fullscreen surface owns it.
 

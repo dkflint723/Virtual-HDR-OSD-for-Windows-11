@@ -3833,7 +3833,7 @@ class MainWindow(FluentWidget):
         try:
             return self._apply_mode_profile("Calibration measurements", force=True)
         except Exception:
-            _log.debug("Applying before measuring failed", exc_info=True)
+            _log.debug("Applying from the pattern view failed", exc_info=True)
             return False
 
     def _restore_live_mode(self, previous: bool) -> None:
@@ -4215,6 +4215,17 @@ class MainWindow(FluentWidget):
         display = self._selected_display()
         if display is None:
             self._set_status("Select a detected display before applying a profile.", "error")
+            return False
+        # A meter run is measured against the profile active when it began, and nothing
+        # in it can see a change made under the same working-profile names. Apply Edits,
+        # a Live Apply slider or the correction dropdown can all get here mid-run with
+        # the main window on another monitor, so they wait for the run instead.
+        if getattr(self, "_measure_window", None) is not None:
+            self._set_status(
+                f"{reason}: a meter measurement is running, so nothing was applied. "
+                "Your edits are kept; apply them once it has finished.",
+                "warning",
+            )
             return False
         if self._is_restored(display) and reason not in USER_APPLY_REASONS:
             self._set_status(
