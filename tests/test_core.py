@@ -889,8 +889,12 @@ class CorrectionTargetGammaTests(unittest.TestCase):
         bright = self.output_nits(self.corrected(2.0), 50.0)
         self.assertGreater(bright, dark * 1.05)
 
-    def test_the_target_matches_the_reference_transform(self):
-        """Cross-checked against the correction evaluated directly at that target."""
+    def test_the_curve_is_the_correction_evaluated_at_the_slider_target(self):
+        """The LUT against the same correction function called directly at gamma 2.0.
+
+        Not an independent reference: both sides use gamma_correction, so this checks the
+        wiring -- the slider reaching the correction as its target, and the LUT sampling
+        it -- rather than the maths itself."""
         from sdr_hdr_profile_creator.gamma_correction import (
             pq_eotf,
             pq_inverse_eotf,
