@@ -4395,16 +4395,22 @@ class MainWindow(FluentWidget):
         """Load the shared watchdog state and return (payload, displays, this display).
 
         Runtime coordination is best effort and must never prevent profile
-        application, so a malformed or unreadable file simply starts over.
+        application. None when the file cannot be read right now: publishing anyway
+        would write it back holding this display alone, erasing every other display's
+        record, so this publish is skipped instead. A file that is not JSON is kept
+        aside and started over.
         """
-        payload: dict[str, object] = {}
-        if GAMMA_HOTKEY_STATE_PATH.is_file():
-            try:
-                candidate = json.loads(GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8-sig"))
-                if isinstance(candidate, dict):
-                    payload = candidate
-            except (OSError, ValueError, json.JSONDecodeError):
-                payload = {}
+        payload = persistence.load_runtime_payload(GAMMA_HOTKEY_STATE_PATH)
+        if payload is None:
+            _log.warning("%s could not be read; not publishing", GAMMA_HOTKEY_STATE_PATH)
+            self._set_status(
+                f"Could not read {GAMMA_HOTKEY_STATE_PATH.name}, so the watchdog was not told "
+                "about this change and may put the previous correction back. Something else "
+                "is holding the file open -- check Controlled Folder Access under Windows "
+                "Security, Ransomware protection.",
+                "warning",
+            )
+            return None
         displays_state = payload.get("displays")
         if not isinstance(displays_state, dict):
             displays_state = {}
