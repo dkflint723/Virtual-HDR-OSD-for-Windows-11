@@ -131,7 +131,7 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 
 | Finding | Evidence | Why it is not fixed here |
 | --- | --- | --- |
-| Restore ignores `remove_profile`'s result, and when Windows had no HDR profile the reconcile pass falls back to the captured working pair. Together, a failed uninstall on such a display lets the watchdog re-assert the calibration | `_restore_windows_profiles`; `Get-DesiredExtendedProfile` returns `WorkingOn` for a restored record whose `profiles` are empty, measured with the pair present | The fallback is the most-recent-intent-wins logic, which is not to be changed without asking |
+| When Windows had no HDR profile, the reconcile pass falls back to the captured working pair, so a failed uninstall on such a display lets the watchdog re-assert the calibration. Restore now reports a failed uninstall; the fallback itself is unchanged (owner's choice, 2 October) | `Get-DesiredExtendedProfile` returns `WorkingOn` for a restored record whose `profiles` are empty, measured with the pair present | The fallback is the most-recent-intent-wins logic, which is not to be changed without asking |
 | `Launcher.vbs` is written as ASCII, so a non-ASCII profile path should stop the watchdog ever running | The `Launcher.vbs` write uses `-Encoding ASCII` | A watchdog change; verify on hardware first |
 | Mutex probes treat access-denied as "not running"; the uninstaller cannot see or stop an elevated watchdog; the elevated `Start-Process` fallback | `Test-WatchdogSingletonHeld`, `windows_api.watchdog_is_running`, `Uninstall-Watchdog.bat:30-34`, the fallback `Start-Process` | Watchdog changes; needs an elevation test |
 | A torn or locked read of `gamma_hotkeys.json` drops the other displays' records | `app.py` `_runtime_entry` | Multi-monitor only; an existing test fixes "start over" as the intended behaviour |
@@ -215,5 +215,6 @@ Branch `streamline-cleanup`, behaviour-preserving throughout.
   - Stale comments fixed.
   - The build id is now `e2ab667323ad`, so an installed watchdog reports a different build until reinstalled.
 - **Watchdog hotkeys respect a restore.** `Invoke-GammaHotkey` used to switch to the working pair after Restore Windows Profile and stamp `State.json`. It now skips a display whose `gamma_hotkeys.json` record is `restored`, and logs why. `tests/watchdog_gamma_hotkey.ps1` runs the real handler against a stub native type; against the previous watchdog its eight restored checks fail. The build id is now `6d05ca978ece`, and the standalone zip was rebuilt (the builder reproduces the previous zip byte for byte from the previous scripts).
+- **Restore checks the uninstall.** It looks for the working pair in the colour directory afterwards rather than trusting `remove_profile`, which returns True when only the association was removed. A kept profile is named in the status line. Two GUI tests cover it; both fail against the previous `app.py`.
 
 The scratch files from this session were outside the repository: the tripwire runner, the audit outputs and the raw test logs. They are not needed to resume. Every fact they supported is recorded here or in the commit messages.

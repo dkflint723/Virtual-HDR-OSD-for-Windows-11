@@ -487,10 +487,9 @@ It asks first, naming exactly what it will restore. Then it:
   ignores this and relies on the uninstall alone. The Watchdog dialog says when the
   installed one is a different build, and installing from there replaces it.
 
-Restore does not check that Windows actually removed the two profiles. If it did not,
-the calibration can still come back: from a watchdog installed by an earlier version,
-or, when Windows had no HDR profile to restore, from the watchdog's own copy of the
-working pair.
+Restore then checks that the two profiles are really gone. If Windows kept either one,
+the message names it and says the watchdog can still put the calibration back; press
+Restore again to retry, or uninstall the watchdog.
 
 Your sliders and measurements are kept. Until you press **Apply Edits**, **Reapply** or
 **Calibrate Display**, nothing changes the display: Live Apply, Automatic Mode
