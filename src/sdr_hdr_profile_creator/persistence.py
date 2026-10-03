@@ -104,6 +104,38 @@ def load_live_registry(path: Path) -> dict[str, dict[str, str]]:
         return {}
 
 
+def load_runtime_payload(path: Path) -> dict[str, object] | None:
+    """gamma_hotkeys.json, or None when it is there but cannot be read right now.
+
+    It holds a record for every display, and whatever this returns is written back with
+    one display changed. Starting over on a failed read therefore erased the other
+    displays' records. A read can fail for a moment while the watchdog renames its copy
+    into place, so it is retried the way the watchdog retries; a file still locked after
+    that is left alone, and one that is still not JSON is kept aside before starting over.
+    """
+    if not path.is_file():
+        return {}
+    problem: Exception | None = None
+    for attempt in range(1, 5):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError) as exc:
+            problem = exc
+            time.sleep(0.04 * attempt)
+            continue
+        if isinstance(payload, dict):
+            return payload
+        problem = ValueError("not a JSON object")
+        break
+    if isinstance(problem, OSError):
+        return None if path.exists() else {}
+    try:
+        path.replace(path.with_name(path.stem + ".unreadable.json"))
+    except OSError:
+        return None
+    return {}
+
+
 def load_original_profiles(path: Path) -> dict[str, dict[str, object]] | None:
     """None when the file is there but cannot be opened right now."""
     if not path.is_file():
