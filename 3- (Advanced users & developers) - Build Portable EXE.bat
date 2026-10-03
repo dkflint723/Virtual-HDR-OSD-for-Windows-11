@@ -46,10 +46,19 @@ set "UV_PYTHON_INSTALL_REGISTRY=0"
 ".uv\uv.exe" venv ".build-venv" --python ".venv\Scripts\python.exe"
 if errorlevel 1 goto :fail
 
-".uv\uv.exe" pip install --python ".build-venv\Scripts\python.exe" --no-cache "nuitka==4.1.3" "ordered-set" "zstandard"
+rem Nuitka and its two helpers are build tools, not app dependencies, so uv.lock does not
+rem hold them. Pinned to the versions that built the EXE confirmed on 2026-10-03.
+".uv\uv.exe" pip install --python ".build-venv\Scripts\python.exe" --no-cache "nuitka==4.1.3" "ordered-set==4.1.0" "zstandard==0.25.0"
 if errorlevel 1 goto :fail
 
-".uv\uv.exe" pip install --python ".build-venv\Scripts\python.exe" --no-cache -e .
+rem The app's own dependencies come from uv.lock, hashes and all, rather than being
+rem resolved afresh: two builds of the same commit should contain the same libraries.
+rem --locked stops the build when uv.lock no longer matches pyproject.toml.
+".uv\uv.exe" export --locked --no-dev --no-emit-project --format requirements-txt -o ".build-venv\locked-requirements.txt"
+if errorlevel 1 goto :fail
+".uv\uv.exe" pip install --python ".build-venv\Scripts\python.exe" --no-cache --require-hashes -r ".build-venv\locked-requirements.txt"
+if errorlevel 1 goto :fail
+".uv\uv.exe" pip install --python ".build-venv\Scripts\python.exe" --no-cache --no-deps -e .
 if errorlevel 1 goto :fail
 
 echo Running tests...
