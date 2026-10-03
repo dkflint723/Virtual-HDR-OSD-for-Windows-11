@@ -593,6 +593,38 @@ class RestoreWindowsProfileTests(WindowTestCase):
         self.assertTrue(self.window.status_label.text().startswith("Ready"))
         self.assertIn("restored", self.window.active_profile_label.text().lower())
 
+    def test_a_working_profile_windows_kept_is_reported(self):
+        """remove_profile answers True when only the association went, so Restore looks
+        at the file -- the same thing the watchdog looks at before asserting it."""
+        self.apply()
+
+        def association_only(profile_name, display, mode):
+            self.removed.append(profile_name)
+            return True, "association removed, uninstall Win32 5"
+
+        with mock.patch.object(app_module, "remove_profile", association_only):
+            self.restore()
+        status = self.window.status_label.text()
+        self.assertTrue(status.startswith("Attention"), status)
+        for name in self.working_names():
+            self.assertIn(f"{name}", status)
+        self.assertIn("watchdog can still put the calibration back", status)
+        self.assertNotIn("working profiles were removed", status)
+        self.assertTrue(self.window._is_restored(self.display))
+
+    def test_a_refused_removal_is_reported(self):
+        self.apply()
+
+        def refuse(profile_name, display, mode):
+            raise app_module.WindowsColorError("access denied")
+
+        with mock.patch.object(app_module, "remove_profile", refuse):
+            self.restore()
+        status = self.window.status_label.text()
+        self.assertTrue(status.startswith("Attention"), status)
+        self.assertIn("Windows did not remove", status)
+        self.assertTrue(self.window._is_restored(self.display))
+
     def test_declining_the_question_changes_nothing(self):
         self.apply()
         active = self.default_profiles["HDR"]

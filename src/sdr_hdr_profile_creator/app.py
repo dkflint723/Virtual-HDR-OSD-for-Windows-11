@@ -4518,11 +4518,12 @@ class MainWindow(FluentWidget):
         Three things make it stick, each against a different writer. The original is
         re-associated as the default. The working pair is uninstalled, so nothing can
         re-assert it: the watchdog has never handed Windows a profile that is not
-        installed, and its hotkey switch fails on one. And the original is published to
-        the watchdog as both correction variants, so every build of it -- including one
-        installed before this control existed -- asserts Windows' profile rather than
-        leaving the display to whatever Windows picks next. This app's own automatic
-        paths are stopped by the restored flag in _apply_mode_profile and the mode poll.
+        installed. And the original is published to the watchdog as both correction
+        variants, marked restored, so every build of it -- including one installed before
+        this control existed -- asserts Windows' profile rather than leaving the display
+        to whatever Windows picks next, and a current build's hotkeys leave it alone.
+        This app's own automatic paths are stopped by the restored flag in
+        _apply_mode_profile and the mode poll.
         """
         display = self._selected_display()
         if display is None:
@@ -4565,11 +4566,22 @@ class MainWindow(FluentWidget):
         elif hdr:
             notes.append(f"{hdr} is no longer installed, so Windows chooses its own HDR default")
             hdr = ""
+        left: list[str] = []
         for path in self._working_profile_paths(display):
             try:
                 remove_profile(path.name, display, "HDR")
             except Exception as exc:
-                notes.append(f"{path.name} could not be removed ({exc})")
+                _log.debug("remove_profile raised for %s: %s", path.name, exc)
+            # Checked on disk, not from the result: remove_profile reports success when
+            # only the association went, and the file is what the watchdog looks at
+            # before it asserts a profile.
+            if self._profile_is_installed(path.name):
+                left.append(path.name)
+        if left:
+            notes.append(
+                f"Windows did not remove {' and '.join(left)}, so the watchdog can still put "
+                "the calibration back. Press Restore again to retry, or uninstall the watchdog"
+            )
         if sdr and not sdr_unmanaged and self._profile_is_installed(sdr):
             current_sdr, _known = self._read_windows_default(display, "SDR")
             if (current_sdr or "").casefold() != sdr.casefold():
@@ -4587,11 +4599,14 @@ class MainWindow(FluentWidget):
         self._applied_signature = None
         self._sync_active_profile_from_windows(display)
         shown = hdr or "no HDR profile, so Windows uses its default"
-        message = (
-            f"Restored Windows' own profile on {display.friendly_name}: {shown}. This app's "
-            "working profiles were removed, and nothing will change the display until you "
-            "press Apply Edits."
-        )
+        if left:
+            done = "Nothing will change the display until you press Apply Edits."
+        else:
+            done = (
+                "This app's working profiles were removed, and nothing will change the "
+                "display until you press Apply Edits."
+            )
+        message = f"Restored Windows' own profile on {display.friendly_name}: {shown}. {done}"
         if notes:
             message += " Note: " + "; ".join(notes) + "."
         self._set_status(message, "warning" if notes else "ok")
@@ -4615,7 +4630,7 @@ class MainWindow(FluentWidget):
                 # Both variants name the original, so whichever one the watchdog wants,
                 # the answer is Windows' profile. Empty when Windows had none: the
                 # watchdog then falls back to its captured pair, which is uninstalled,
-                # and asserts nothing.
+                # and asserts nothing. If Windows kept the pair, Restore says so.
                 "profiles": {"Off": hdr, "On": hdr},
                 "paths": {},
                 "restored": True,
