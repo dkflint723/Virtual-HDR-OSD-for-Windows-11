@@ -435,6 +435,17 @@ class SustainedTests(unittest.TestCase):
         with self.assertRaises(Aborted):
             self.run_sustained([300.0, 260.0], should_abort=lambda: True)
 
+    def test_a_read_stopped_by_the_cancel_is_a_cancel(self):
+        cancelled = {"now": False}
+
+        def reader():
+            cancelled["now"] = True
+            raise MeterError("Stopped before the meter answered.")
+
+        with self.assertRaises(Aborted):
+            sustained(self.display, reader, peak_nits=1000.0, sleep=self.slept.append,
+                      should_abort=lambda: cancelled["now"])
+
     def test_a_meter_failure_is_reported_not_swallowed(self):
         def bad():
             raise MeterError("diffuser closed")
@@ -775,6 +786,18 @@ class RunTests(unittest.TestCase):
         with self.assertRaises(Aborted):
             self.run_sequence(self.good_reader(), should_abort=lambda: True)
         self.assertEqual(self.display.shown, [])
+
+    def test_a_read_stopped_by_the_cancel_is_a_cancel_not_a_meter_fault(self):
+        """Esc now stops the spotread in flight, which fails that read. Reporting it as
+        a failed measurement would tell the user who cancelled that the meter broke."""
+        cancelled = {"now": False}
+
+        def reader():
+            cancelled["now"] = True
+            raise MeterError("Stopped before the meter answered.")
+
+        with self.assertRaises(Aborted):
+            self.run_sequence(reader, should_abort=lambda: cancelled["now"])
 
     def test_readings_that_do_not_survive_validation_are_refused(self):
         """The run completing is not the same as the readings being usable.

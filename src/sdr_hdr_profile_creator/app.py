@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+import threading
 import time
 from types import SimpleNamespace
 from typing import Callable
@@ -2346,6 +2347,28 @@ class MainWindow(FluentWidget):
                 # A window already destroyed by Qt is not worth failing over.
                 pass
 
+    def _join_measurement(self, seconds: float) -> bool:
+        """Wait, within a bound, for a cancelled run's thread to end. True once it has.
+
+        Closing the app mid-run left the thread running, and a QThread still running
+        when Python finalises it is a fail-fast abort. Its window is already closed by
+        now, which cancels the worker and stops the read it is in. quit() is called
+        here because the worker's own finished handler, which normally does it, is
+        queued to this thread. Events are processed while waiting: a worker that was
+        about to show a patch blocks until this thread serves it, and that is also
+        where the finished handler gets delivered.
+        """
+        thread = getattr(self, "_measure_thread", None)
+        if thread is None:
+            return True
+        thread.quit()
+        deadline = time.monotonic() + seconds
+        while not thread.wait(100):
+            if time.monotonic() >= deadline:
+                return False
+            QApplication.processEvents()
+        return True
+
     def _fullscreen_surface_busy(self) -> str:
         """Why a fullscreen surface cannot be opened right now, or an empty string.
 
@@ -2695,9 +2718,10 @@ class MainWindow(FluentWidget):
             "settles. Esc stops it.",
             "warning",
         )
+        stop = self._read_stopper(window.closed)
         thread, worker = measure_view.start_sustained(
             window,
-            lambda: read_emissive(ready.spotread, port=ready.instrument.port),
+            lambda: read_emissive(ready.spotread, port=ready.instrument.port, stop=stop),
             ready.peak,
             self._sustained_reading,
             self._sustained_finished,
@@ -2886,8 +2910,11 @@ class MainWindow(FluentWidget):
         # holding an instrument flat against a screen cannot see the keyboard, and
         # reaching for one moves the thing they have just placed.
         watcher_thread = QThread()
+        # Enter as well as Esc: the run's first reading needs the instrument this poll
+        # is holding.
+        stop = self._read_stopper(window.closed, window.ready)
         watcher = measure_view.PlacementWatcher(
-            lambda: read_emissive(spotread, port=instrument.port)
+            lambda: read_emissive(spotread, port=instrument.port, stop=stop)
         )
         watcher.moveToThread(watcher_thread)
         watcher_thread.started.connect(watcher.run)
@@ -2913,6 +2940,20 @@ class MainWindow(FluentWidget):
         self._placement_thread = watcher_thread
         self._placement_watcher = watcher
         watcher_thread.start()
+
+    @staticmethod
+    def _read_stopper(*signals) -> threading.Event:
+        """An Event, set by any of ``signals``, that stops a spotread read in flight.
+
+        The workers only see a cancel between readings, and one reading can take a
+        minute, so Esc left the instrument busy and the placement poll could run for
+        most of an hour. Direct, like the workers' cancel: their threads are busy
+        inside the very read this stops.
+        """
+        stop = threading.Event()
+        for signal in signals:
+            signal.connect(lambda *_: stop.set(), Qt.ConnectionType.DirectConnection)
+        return stop
 
     def _placement_surface_closed(self) -> None:
         """Give the fullscreen surface back when a run ends before it starts.
@@ -3110,9 +3151,10 @@ class MainWindow(FluentWidget):
             "warning",
         )
 
+        stop = self._read_stopper(window.closed)
         thread, worker = measure_view.start(
             window,
-            lambda: read_emissive(spotread, port=instrument.port),
+            lambda: read_emissive(spotread, port=instrument.port, stop=stop),
             peak,
             self._measure_progress,
             self._measure_finished,
@@ -5036,6 +5078,7 @@ class MainWindow(FluentWidget):
         # And a placement poll outlives it too, driving the instrument after the window
         # it was waiting for has gone.
         self._stop_placement_watch()
+        self._join_measurement(5.0)
         self.live_timer.stop()
         self.mode_timer.stop()
         self.watchdog_timer.stop()

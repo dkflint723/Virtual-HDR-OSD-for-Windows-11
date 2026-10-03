@@ -5693,6 +5693,33 @@ class DisplaySurfaceGuardTests(WindowTestCase):
         self.assertEqual("Off", self.window.state.hdr.sdr_gamma_correction)
 
 
+class CloseDuringRunTests(WindowTestCase):
+    """Closing the app mid-run, and Esc mid-read."""
+
+    def test_closing_the_app_joins_a_running_measurement_thread(self):
+        """A QThread still running when Python finalises it is a fail-fast abort, and
+        closeEvent never waited for the measurement thread."""
+        from PySide6.QtCore import QThread
+
+        thread = QThread()
+        thread.start()   # an event loop, like a worker's thread between readings
+        self.addCleanup(lambda: (thread.quit(), thread.wait(2000)))
+        self.window._measure_thread = thread
+        self.window.close()
+        self.assertTrue(thread.isFinished(), "the measurement thread outlived the window")
+
+    def test_a_read_stopper_is_set_by_its_signal(self):
+        class Source(QObject):
+            closed = Signal()
+            ready = Signal()
+
+        source = Source()
+        stop = app_module.MainWindow._read_stopper(source.closed, source.ready)
+        self.assertFalse(stop.is_set())
+        source.ready.emit()
+        self.assertTrue(stop.is_set())
+
+
 class DisplayProbeTests(WindowTestCase):
     """The run's view of the display comes from Windows, not from this app's state.
 
