@@ -9,11 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from .curves import CalibrationTransform, _inverse3, estimate_curve_gamma
+from .curves import D65_XYZ, CalibrationTransform, _inverse3, estimate_curve_gamma
+from .curves import _matvec3 as _matrix_vector
 from .model import DisplayMode, ModeState, normalize_primaries
 
 D50_XYZ = (0.9642, 1.0, 0.8249)
-D65_XYZ = (0.95047, 1.0, 1.08883)
 # Tag groups that are only coherent when they all come from the same source.
 COUPLED_TAG_GROUPS: tuple[tuple[bytes, ...], ...] = (
     (b"rXYZ", b"gXYZ", b"bXYZ"),   # colorants
@@ -154,15 +154,6 @@ def _display_primaries_xyz(
             # Coordinates that pass range checks can still be collinear.
             pass
     return _chromaticities_to_xyz(PRIMARIES[mode])
-
-
-def _matrix_vector(
-    matrix: tuple[float, ...], vector: tuple[float, float, float]
-) -> tuple[float, float, float]:
-    return tuple(
-        sum(matrix[row * 3 + column] * vector[column] for column in range(3))
-        for row in range(3)
-    )  # type: ignore[return-value]
 
 
 # Linear Bradford chromatic adaptation from D65 to the ICC D50 PCS.

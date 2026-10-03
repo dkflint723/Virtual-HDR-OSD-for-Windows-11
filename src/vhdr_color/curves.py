@@ -30,7 +30,7 @@ _REC2020_TO_XYZ = (
     0.0000000000, 0.0280726930, 1.0609850577,
 )
 _REC2020_LUMA = (0.2627, 0.6780, 0.0593)
-_D65_XYZ = (0.95047, 1.0, 1.08883)
+D65_XYZ = (0.95047, 1.0, 1.08883)
 
 # Bradford chromatic-adaptation transform. Temperature/tint are expressed as a
 # white-point adaptation in XYZ rather than crude per-channel LUT multipliers.
@@ -157,7 +157,7 @@ def _white_balance_matrix(state: ModeState) -> tuple[float, ...]:
 
     target_xyz = _xy_to_xyz(x, y)
     bradford_inv = _inverse3(_BRADFORD)
-    source_lms = _matvec3(_BRADFORD, _D65_XYZ)
+    source_lms = _matvec3(_BRADFORD, D65_XYZ)
     target_lms = _matvec3(_BRADFORD, target_xyz)
     scale = _diag3(
         target_lms[0] / max(1e-12, source_lms[0]),
