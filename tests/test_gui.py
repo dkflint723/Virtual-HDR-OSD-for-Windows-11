@@ -21,8 +21,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QObject, QTimer, Signal
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
     from sdr_hdr_profile_creator import app as app_module
     from sdr_hdr_profile_creator.controls import ControlSpec, SliderControl
@@ -208,6 +208,56 @@ class WindowTestCase(unittest.TestCase):
 
     def read_runtime(self) -> dict:
         return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+
+
+class AccessibleNameTests(WindowTestCase):
+    """What a screen reader can call each control. A tooltip is not a name."""
+
+    @staticmethod
+    def spoken_name(widget) -> str:
+        from PySide6.QtWidgets import QAbstractButton
+
+        name = widget.accessibleName()
+        if not name and isinstance(widget, QAbstractButton):
+            name = widget.text()
+        return name.strip()
+
+    def unnamed(self) -> list[str]:
+        from PySide6.QtWidgets import QAbstractButton, QAbstractSlider, QLineEdit
+
+        found = []
+        for widget in self.window.findChildren(QWidget):
+            if not isinstance(widget, (QAbstractButton, QAbstractSlider, QLineEdit)):
+                continue
+            if widget.focusPolicy() == Qt.FocusPolicy.NoFocus:
+                continue   # not reachable from the keyboard, so not announced in turn
+            if not widget.isVisibleTo(self.window):
+                continue   # hidden even once the window is shown: a disabled clear button,
+                           # the unused title bar the Fluent one replaces
+            if not self.spoken_name(widget):
+                found.append(f"{type(widget).__name__} {widget.objectName()!r} "
+                             f"under {type(widget.parent()).__name__}")
+        return found
+
+    def test_every_keyboard_control_has_a_name(self):
+        self.assertEqual([], self.unnamed())
+
+    def test_each_reset_button_says_what_it_resets(self):
+        names = [c.reset_button.accessibleName() for c in self.window.control_widgets.values()]
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertTrue(all(name.startswith("Reset ") and len(name) > 6 for name in names))
+
+    def test_a_combo_box_names_what_it_chooses_and_its_value(self):
+        combo = self.window.gamma_correction_combo
+        combo.setCurrentText("Off")
+        self.assertEqual("SDR-in-HDR gamma correction: Off", combo.accessibleName())
+        combo.setCurrentText("Auto (Recommended)")
+        self.assertEqual("SDR-in-HDR gamma correction: Auto (Recommended)", combo.accessibleName())
+
+    def test_a_switch_is_named_where_it_takes_focus(self):
+        indicator = self.window.live_checkbox.indicator
+        self.assertNotEqual(Qt.FocusPolicy.NoFocus, indicator.focusPolicy())
+        self.assertEqual("Live Apply", indicator.accessibleName())
 
 
 class FixtureSafetyTests(WindowTestCase):

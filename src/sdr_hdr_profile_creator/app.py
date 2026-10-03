@@ -45,6 +45,7 @@ from qfluentwidgets import (
     setTheme,
     setThemeColor,
 )
+from qfluentwidgets.components.widgets.scroll_bar import ScrollBarGroove
 
 from .controls import Card, ControlSpec, SliderControl
 from vhdr_color.curves import build_transform
@@ -97,6 +98,32 @@ from .windows_api import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _name_switch(switch: SwitchButton, name: str) -> None:
+    """Give a Fluent switch a name a screen reader can find.
+
+    Its visible text is a separate label, and the part that takes keyboard focus is an
+    unlabelled child button, so on its own the switch is announced as a nameless toggle.
+    """
+    switch.setAccessibleName(name)
+    indicator = getattr(switch, "indicator", None)
+    if indicator is not None:
+        indicator.setAccessibleName(name)
+
+
+def _name_combo(combo: ComboBox, name: str) -> None:
+    """Name a Fluent combo box for what it chooses, and keep its current value in the name.
+
+    It is a push button underneath, so its accessible name was just its current text:
+    "Off" or a monitor's name, with nothing to say what it was the choice of. Setting a
+    name replaces that text, so the value is kept in it and updated as it changes.
+    """
+    def update(text: str) -> None:
+        combo.setAccessibleName(f"{name}: {text}" if text else name)
+
+    update(combo.currentText())
+    combo.currentTextChanged.connect(update)
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
 STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
@@ -303,6 +330,7 @@ class MainWindow(FluentWidget):
         self.watchdog_timer.timeout.connect(self._sync_lock_switch)
 
         self._build_ui()
+        self._name_window_chrome()
         self._load_mode_into_controls()
         # The switch and the state used to agree by accident, because the state was
         # forced off a few lines above. Now that it is restored, the switch has to be
@@ -383,6 +411,20 @@ class MainWindow(FluentWidget):
 
     # ----------------------------------------------------------------------------------
     # Fluent UI
+
+    def _name_window_chrome(self) -> None:
+        """Names for the buttons qfluentwidgets draws itself: the title bar's three and the
+        scroll bars' paging arrows. All take keyboard focus and none had a name."""
+        for button, name in (
+            (self.titleBar.minBtn, "Minimize"),
+            (self.titleBar.maxBtn, "Maximize"),
+            (self.titleBar.closeBtn, "Close"),
+        ):
+            button.setAccessibleName(name)
+        for groove in self.findChildren(ScrollBarGroove):
+            vertical = groove.parent().orientation() == Qt.Orientation.Vertical
+            groove.upButton.setAccessibleName("Page up" if vertical else "Page left")
+            groove.downButton.setAccessibleName("Page down" if vertical else "Page right")
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -572,6 +614,7 @@ class MainWindow(FluentWidget):
         self.display_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.display_combo.setToolTip("Select the active Windows display to target. HDR state and profile association are tracked per display.")
         self.display_combo.currentIndexChanged.connect(self._display_selected)
+        _name_combo(self.display_combo, "Target display")
         display_row.addWidget(self.display_combo, 1)
         self.hdr_switch = SwitchButton(bar)
         self.hdr_switch.setOffText("HDR Off")
@@ -581,6 +624,7 @@ class MainWindow(FluentWidget):
             "Unlike Win + Alt + B this targets the display you picked above."
         )
         self.hdr_switch.checkedChanged.connect(self._hdr_switch_toggled)
+        _name_switch(self.hdr_switch, "Windows HDR for this display")
         display_row.addWidget(self.hdr_switch)
         refresh_displays = PushButton("Refresh", bar)
         refresh_displays.setToolTip("Rescan active Windows displays and refresh the selected display information.")
@@ -617,6 +661,7 @@ class MainWindow(FluentWidget):
             "This app never edits your SDR profile."
         )
         self.sdr_profile_combo.textActivated.connect(self._sdr_profile_chosen)
+        _name_combo(self.sdr_profile_combo, "SDR profile for this display")
         profile_row.addWidget(self.sdr_profile_combo, 1)
 
         hdr_label = BodyLabel("HDR", bar)
@@ -631,6 +676,7 @@ class MainWindow(FluentWidget):
             "never compound on already-edited data."
         )
         self.hdr_profile_combo.textActivated.connect(self._hdr_profile_chosen)
+        _name_combo(self.hdr_profile_combo, "HDR profile to edit")
         profile_row.addWidget(self.hdr_profile_combo, 1)
 
         import_button = PushButton("Import…", bar)
@@ -657,6 +703,7 @@ class MainWindow(FluentWidget):
         self.live_checkbox.setOnText("Live Apply")
         self.live_checkbox.setToolTip("Automatically regenerate and apply the HDR profile shortly after each slider change. Disable it when you want to make several edits before applying them manually.")
         self.live_checkbox.checkedChanged.connect(self._live_mode_toggled)
+        _name_switch(self.live_checkbox, "Live Apply")
         runtime_row.addWidget(self.live_checkbox)
         self.automatic_mode_checkbox = SwitchButton(bar)
         self.automatic_mode_checkbox.setOffText("Auto Mode Switching")
@@ -665,6 +712,7 @@ class MainWindow(FluentWidget):
         automatic_enabled = self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
+        _name_switch(self.automatic_mode_checkbox, "Auto Mode Switching")
         runtime_row.addWidget(self.automatic_mode_checkbox)
         self.lock_switch = SwitchButton(bar)
         self.lock_switch.setOffText("Lock Profile")
@@ -681,6 +729,7 @@ class MainWindow(FluentWidget):
             "The switch follows what is actually running, not what was last clicked."
         )
         self.lock_switch.checkedChanged.connect(self._lock_toggled)
+        _name_switch(self.lock_switch, "Lock Profile")
         runtime_row.addWidget(self.lock_switch)
         runtime_row.addStretch(1)
         layout.addLayout(runtime_row)
@@ -767,6 +816,7 @@ class MainWindow(FluentWidget):
         self.gamma_correction_combo.setMinimumWidth(270)
         self.gamma_correction_combo.setToolTip("Off; Auto reads Windows' current SDR reference white internally; the remaining choices mirror dylanraga's published profile options. The correction is display-wide, so disable it for native HDR content.")
         self.gamma_correction_combo.currentTextChanged.connect(self._gamma_correction_changed)
+        _name_combo(self.gamma_correction_combo, "SDR-in-HDR gamma correction")
         correction_row.addWidget(self.gamma_correction_combo)
         correction_hint = CaptionLabel("Alt+1 Off  ·  Alt+2 On", self)
         correction_hint.setToolTip("Global hotkeys while the app runs. Installing the watchdog keeps the hotkeys available after the GUI closes.")
