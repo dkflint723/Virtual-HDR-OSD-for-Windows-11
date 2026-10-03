@@ -145,7 +145,6 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 | The D65-to-D50 adaptation matrix was built for D50 = (0.96422, 1, 0.82521), while the profile header writes the ICC PCS white (0.9642, 1, 0.8249): adapted D65 lands 4.8e-4 off in Z | `vhdr_color/icc.py` `D65_TO_D50_CHAD` vs `D50_XYZ`; derived in `test_golden_vectors` | Correcting it changes the bytes of every generated profile |
 | The watchdog's five-second "fallback reassertion" now repeats the per-pass check made moments before, since it stopped forcing | `Install-Watchdog.bat`, the block that sets `$lastForced` | Removing it changes behaviour in one edge: an empty mode-change refresh |
 | `build_transform(hdr=False)` and the SDR branch of `build_profile` are reached only by tests | `vhdr_color/curves.py`, `vhdr_color/icc.py` | The SDR branch sits beside the coupled-tag merge, which is on the do-not-touch list |
-| The portable EXE has not been rebuilt since the colour core moved to `src/vhdr_color` | Nuitka follows imports, so it should be included | Run the build once |
 
 ## Verification gaps: manual procedures
 
@@ -209,6 +208,7 @@ Branch `streamline-cleanup`, behaviour-preserving throughout.
   - JSON persistence and the watchdog build id moved to `persistence.py` and `watchdog_identity.py`, now tested in CI.
   - `test_app_split_guard` keeps any split module from importing anything that reaches Windows.
   - Nothing that calls Windows moved, so the fixture guard is unchanged.
+- **Portable build confirmed.** On 2 October the owner ran `3- (Advanced users & developers) - Build Portable EXE.bat` at `cdb4f4e`. Its own run of the full test suite passed. Nuitka produced `release\Virtual HDR OSD for Windows.exe`: 26,490,880 bytes, SHA-256 `7463864204c04da1e4550c04be291f1092db35c180b963342d5dcbf7c7e2cd17`, recomputed independently and matching the `.sha256.txt` beside it. The owner launched it and it started normally, so the moved `vhdr_color` package is included.
 - **Watchdog.**
   - Removed dead C#.
   - Four silent failures now log.
