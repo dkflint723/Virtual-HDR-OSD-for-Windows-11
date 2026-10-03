@@ -42,15 +42,30 @@ SCRGB_WHITE_NITS = 80.0
 
 
 def pq_eotf(value: float) -> float:
-    """ST 2084 code value -> absolute luminance in nits."""
-    v = max(0.0, min(1.0, float(value)))
+    """ST 2084 code value -> absolute luminance in nits.
+
+    NaN is black. ``min(1.0, nan)`` is 1.0, so the plain clamp turned a NaN into peak
+    white, the worst answer for a display.
+    """
+    v = float(value)
+    if math.isnan(v):
+        return 0.0
+    v = max(0.0, min(1.0, v))
     p = v ** (1.0 / M2)
     return 10000.0 * (max(p - C1, 0.0) / (C2 - C3 * p)) ** (1.0 / M1)
 
 
 def pq_inverse_eotf(luminance_nits: float) -> float:
-    """Absolute luminance in nits -> ST 2084 code value."""
-    l = max(0.0, float(luminance_nits)) / 10000.0
+    """Absolute luminance in nits -> ST 2084 code value, within 0..1.
+
+    Clamped at 10,000 nits, the top of the curve: above it the formula returned codes
+    past 1.0, and at infinity NaN. NaN is no light, as it always was; it is checked
+    first because ``min(10000.0, nan)`` is 10000.0.
+    """
+    l = float(luminance_nits)
+    if math.isnan(l):
+        l = 0.0
+    l = max(0.0, min(10000.0, l)) / 10000.0
     return ((C1 + C2 * l**M1) / (1.0 + C3 * l**M1)) ** M2
 
 
