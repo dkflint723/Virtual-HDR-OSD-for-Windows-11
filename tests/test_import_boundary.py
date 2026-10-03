@@ -6,10 +6,8 @@ the core imports nothing but the standard library and itself. So this reads ever
 statement in each core module, at any depth, from source -- a module never has to be
 importable to be checked -- and refuses anything else.
 
-Two imports still cross, and each is marked as an expected failure. When one moves, its
-test passes, unittest reports an unexpected success, and the run fails until the marker
-is deleted. test_nothing_else_crosses pins each crossing exactly, because an expected
-failure passes however many imports cross and would otherwise hide a second one.
+Nothing crosses. The last two imports that did -- measure's meter types and patterns'
+scRGB constant -- moved into the core in Phase 2.
 """
 
 from __future__ import annotations
@@ -19,7 +17,7 @@ import sys
 import unittest
 from pathlib import Path
 
-PACKAGE_NAME = "sdr_hdr_profile_creator"
+PACKAGE_NAME = "vhdr_color"
 PACKAGE = Path(__file__).parents[1] / "src" / PACKAGE_NAME
 
 CORE = (
@@ -35,13 +33,6 @@ CORE = (
 
 # In the standard library, and the platform in all but name.
 PLATFORM_STDLIB = frozenset({"ctypes", "winreg", "msvcrt", "_winapi", "winsound", "subprocess"})
-
-# Cut in Phase 2 of the ADR. Written as crossings() reports them.
-KNOWN_CROSSINGS = {
-    "measure": [".meter"],
-    "patterns": [".hdr_display"],
-}
-
 
 def _own(name: str) -> str:
     """This package's modules as ".name", however they were imported."""
@@ -111,22 +102,23 @@ class ColourCoreBoundaryTests(unittest.TestCase):
     def test_model(self):
         self.assertStaysInTheCore("model")
 
-    @unittest.expectedFailure
     def test_measure(self):
-        """Imports MeterError and Reading from meter, which runs Argyll's spotread as a
-        subprocess. Phase 2 moves both types into the core."""
         self.assertStaysInTheCore("measure")
 
-    @unittest.expectedFailure
     def test_patterns(self):
-        """Imports SCRGB_WHITE_NITS from hdr_display, the Direct3D swapchain. Phase 2
-        moves the constant into the core."""
         self.assertStaysInTheCore("patterns")
 
-    def test_nothing_else_crosses(self):
+    def test_the_package_holds_exactly_the_core(self):
+        """A module added to the package has to be added here, and to a test, on purpose."""
+        self.assertEqual(sorted(CORE), sorted(p.stem for p in PACKAGE.glob("*.py") if p.stem != "__init__"))
+
+    def test_the_package_init_imports_nothing(self):
+        self.assertEqual(set(), imports_in((PACKAGE / "__init__.py").read_text(encoding="utf-8")))
+
+    def test_nothing_crosses(self):
         for module in CORE:
             with self.subTest(module=module):
-                self.assertEqual(KNOWN_CROSSINGS.get(module, []), crossings(module))
+                self.assertEqual([], crossings(module))
 
     def test_every_core_module_has_its_own_test(self):
         """A module added to CORE without one is checked only by the pin above, which a
@@ -156,7 +148,8 @@ class CheckerTests(unittest.TestCase):
             "    pass\n"
         )
         self.assertEqual(
-            ["..", ".app", ".hotkeys", ".windows_api", "PySide6.QtGui", "ctypes", "numpy", "winreg"],
+            ["..", ".windows_api", "PySide6.QtGui", "ctypes", "numpy", "sdr_hdr_profile_creator",
+             "sdr_hdr_profile_creator.hotkeys", "winreg"],
             crossings_in(source),
         )
 
@@ -167,7 +160,7 @@ class CheckerTests(unittest.TestCase):
             "from dataclasses import dataclass\n"
             "from .gamma_correction import pq_eotf\n"
             "from . import greyscale\n"
-            "from sdr_hdr_profile_creator.model import ModeState\n"
+            "from vhdr_color.model import ModeState\n"
         )
         self.assertEqual([], crossings_in(source))
 

@@ -883,7 +883,7 @@ class ReadmeAccuracyTests(unittest.TestCase):
         return self.README.read_text(encoding="utf-8", errors="replace")
 
     def test_every_offered_correction_option_is_documented(self):
-        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+        from vhdr_color.gamma_correction import CORRECTION_OPTIONS
 
         for option in CORRECTION_OPTIONS:
             with self.subTest(option=option):
@@ -896,7 +896,7 @@ class ReadmeAccuracyTests(unittest.TestCase):
                 self.assertNotIn(entry, self.text())
 
     def test_every_guided_step_is_named(self):
-        from sdr_hdr_profile_creator.patterns import GUIDED_SEQUENCE, pattern_by_key
+        from vhdr_color.patterns import GUIDED_SEQUENCE, pattern_by_key
 
         for key in GUIDED_SEQUENCE:
             with self.subTest(step=key):
@@ -906,7 +906,7 @@ class ReadmeAccuracyTests(unittest.TestCase):
         """The table went on listing Full-frame white as a step after the code dropped
         it, and every real step was still named, so the check above kept passing. This
         reads the table itself, and the counts written around it."""
-        from sdr_hdr_profile_creator.patterns import (
+        from vhdr_color.patterns import (
             GUIDED_SEQUENCE, MEASUREMENT_SEQUENCE, pattern_by_key,
         )
 
@@ -919,7 +919,7 @@ class ReadmeAccuracyTests(unittest.TestCase):
         self.assertIn(f"The first {words[len(MEASUREMENT_SEQUENCE)]} move", section)
 
     def test_the_documented_pattern_keys_match_the_pattern_count(self):
-        from sdr_hdr_profile_creator.patterns import PATTERNS
+        from vhdr_color.patterns import PATTERNS
 
         mentions_zero = "`1`–`9`, `0`" in self.text()
         self.assertEqual(mentions_zero, len(PATTERNS) > 9,
@@ -962,7 +962,7 @@ class ReadmeAccuracyTests(unittest.TestCase):
         names the clamp now, so removing the clamp fails this until it is updated."""
         import struct
 
-        from sdr_hdr_profile_creator.patterns import PatternContext, measurement_frame
+        from vhdr_color.patterns import PatternContext, measurement_frame
 
         width, height = 40, 20
         frame = measurement_frame(

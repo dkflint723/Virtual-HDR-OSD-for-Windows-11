@@ -101,9 +101,10 @@ $script:LastLogOnce = @{}
 function Write-LogOnce {
     param([string]$Key, [string]$Message)
 
-    # For conditions that are a *state* rather than an event. The three call sites --
-    # a requested correction whose profiles are not installed, and a failing STANDARD or
-    # EXTENDED write -- all sit on the reconcile path, which runs about 1.3 times a
+    # For conditions that are a *state* rather than an event. The four call sites --
+    # a requested correction whose profiles are not installed, a failing STANDARD or
+    # EXTENDED write, and gamma_hotkeys.json that cannot be read -- all sit on the
+    # reconcile path, which runs about 1.3 times a
     # second per display. At roughly 140 bytes a line that is 500 KB in an hour, and
     # Write-Log rotates at 512 KB keeping one .old, so a fault that lasted two hours
     # erased every line from before it happened. The log exists to answer "what took my
@@ -228,7 +229,6 @@ namespace ColorProfileWatchdog
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME = 1;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME = 2;
         public const int DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO = 9;
-        public const int DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL = 11;
 
         public const int HOTKEY_OFF = 0x564801;
         public const int HOTKEY_ON = 0x564802;
@@ -237,18 +237,12 @@ namespace ColorProfileWatchdog
         public const uint VK_1 = 0x31;
         public const uint VK_2 = 0x32;
         public const uint WM_HOTKEY = 0x0312;
-        public const uint PM_REMOVE = 0x0001;
 
         [StructLayout(LayoutKind.Sequential)]
         public struct LUID
         {
             public UInt32 LowPart;
             public Int32 HighPart;
-
-            public override string ToString()
-            {
-                return HighPart.ToString("X8") + LowPart.ToString("X8");
-            }
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -343,13 +337,6 @@ namespace ColorProfileWatchdog
         }
 
         [StructLayout(LayoutKind.Sequential)]
-        public struct DISPLAYCONFIG_SDR_WHITE_LEVEL
-        {
-            public DISPLAYCONFIG_DEVICE_INFO_HEADER header;
-            public UInt32 SDRWhiteLevel;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
         public struct POINT
         {
             public Int32 X;
@@ -376,19 +363,7 @@ namespace ColorProfileWatchdog
             public UInt32 AdapterLow { get; set; }
             public Int32 AdapterHigh { get; set; }
             public UInt32 SourceId { get; set; }
-            public UInt32 TargetId { get; set; }
             public bool AdvancedColorEnabled { get; set; }
-
-            internal LUID AdapterLuid
-            {
-                get
-                {
-                    LUID value = new LUID();
-                    value.LowPart = AdapterLow;
-                    value.HighPart = AdapterHigh;
-                    return value;
-                }
-            }
         }
 
         [DllImport("user32.dll")]
@@ -417,10 +392,6 @@ namespace ColorProfileWatchdog
         [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
         private static extern int DisplayConfigGetAdvancedColorInfo(
             ref DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO requestPacket);
-
-        [DllImport("user32.dll", EntryPoint = "DisplayConfigGetDeviceInfo")]
-        private static extern int DisplayConfigGetSdrWhiteLevel(
-            ref DISPLAYCONFIG_SDR_WHITE_LEVEL requestPacket);
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -662,7 +633,7 @@ namespace ColorProfileWatchdog
                 packet.monitorFriendlyDeviceName = String.Empty;
                 packet.monitorDevicePath = String.Empty;
 
-                if (DisplayConfigGetDeviceInfo_Target(ref packet) != ERROR_SUCCESS)
+                if (DisplayConfigGetTargetName(ref packet) != ERROR_SUCCESS)
                     return String.Empty;
                 return packet.monitorDevicePath == null ? String.Empty : packet.monitorDevicePath;
             }
@@ -670,11 +641,6 @@ namespace ColorProfileWatchdog
             {
                 return String.Empty;
             }
-        }
-
-        private static int DisplayConfigGetDeviceInfo_Target(ref DISPLAYCONFIG_TARGET_DEVICE_NAME packet)
-        {
-            return DisplayConfigGetTargetName(ref packet);
         }
 
         private static bool GetAdvancedColorEnabled(DISPLAYCONFIG_PATH_TARGET_INFO target)
@@ -743,7 +709,6 @@ namespace ColorProfileWatchdog
                         info.AdapterLow = path.targetInfo.adapterId.LowPart;
                         info.AdapterHigh = path.targetInfo.adapterId.HighPart;
                         info.SourceId = path.sourceInfo.id;
-                        info.TargetId = path.targetInfo.id;
                         info.AdvancedColorEnabled = GetAdvancedColorEnabled(path.targetInfo);
                         result.Add(info);
                     }
@@ -765,19 +730,6 @@ namespace ColorProfileWatchdog
             luid.LowPart = display.AdapterLow;
             luid.HighPart = display.AdapterHigh;
             return luid;
-        }
-
-        public static double GetSdrWhiteLevelNits(DisplayInfo display)
-        {
-            DISPLAYCONFIG_SDR_WHITE_LEVEL packet = new DISPLAYCONFIG_SDR_WHITE_LEVEL();
-            packet.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
-            packet.header.size = (UInt32)Marshal.SizeOf(typeof(DISPLAYCONFIG_SDR_WHITE_LEVEL));
-            packet.header.adapterId = display.AdapterLuid;
-            packet.header.id = display.TargetId;
-            int rc = DisplayConfigGetSdrWhiteLevel(ref packet);
-            if (rc != ERROR_SUCCESS)
-                return 200.0;
-            return ((double)packet.SDRWhiteLevel / 1000.0) * 80.0;
         }
 
         public static int GetSelectedScope(DisplayInfo display)
@@ -922,7 +874,6 @@ function Test-InstalledColorProfile {
 
 function Resolve-StableWorkingPair {
     param(
-        $Display,
         [string]$CurrentExtended,
         $GammaEntry
     )
@@ -1030,7 +981,7 @@ function Get-SavedProfileState {
     )
 
     $gammaEntry = Get-GammaEntryForDisplay -CurrentDisplay $Display
-    $pair = Resolve-StableWorkingPair -Display $Display -CurrentExtended $extended -GammaEntry $gammaEntry
+    $pair = Resolve-StableWorkingPair -CurrentExtended $extended -GammaEntry $gammaEntry
 
     [PSCustomObject]@{
         GdiName         = $Display.GdiName
@@ -1058,11 +1009,6 @@ function Get-GammaEntryForDisplay {
 
     if (-not (Test-Path -LiteralPath $GammaStatePath)) { return $null }
     try {
-        # The GUI publishes this file by writing a temporary copy and renaming over
-        # the original, so a read landing in that window fails. Returning $null then
-        # makes the caller fall back to the state captured at install time, which can
-        # assert the OPPOSITE correction variant -- the user's choice appears to
-        # revert seconds after they make it, with nothing logged. Retry briefly.
         # Read only when the file has actually changed. This runs on every reconcile
         # pass -- about 75 times a minute -- against a file the GUI rewrites rarely,
         # and both halves of doing it every time leak in Windows PowerShell 5.1:
@@ -1081,6 +1027,13 @@ function Get-GammaEntryForDisplay {
             # obtained and never which record is chosen.
             $gamma = $script:GammaCacheValue
         }
+        # The GUI publishes this file by writing a temporary copy and renaming over
+        # the original, so a read landing in that window fails. Returning $null then
+        # makes the caller fall back to the state captured at install time, which can
+        # assert the OPPOSITE correction variant -- the user's choice appears to
+        # revert seconds after they make it. Retry briefly, and log once if every
+        # attempt fails.
+        $readError = $null
         for ($attempt = 1; $attempt -le 4 -and -not $gamma; $attempt++) {
             try {
                 # [IO.File]::ReadAllText rather than Get-Content -Raw: same bytes, same
@@ -1090,12 +1043,17 @@ function Get-GammaEntryForDisplay {
                     $gamma = $raw | ConvertFrom-Json
                     break
                 }
-            } catch {}
+            } catch { $readError = $_.Exception.Message }
             Start-Sleep -Milliseconds (40 * $attempt)
         }
         if ($gamma -and $null -ne $stampNow) {
             $script:GammaCacheStamp = $stampNow
             $script:GammaCacheValue = $gamma
+        }
+        if ($gamma) {
+            Clear-LogOnce 'GAMMA-READ'
+        } elseif ($readError) {
+            Write-LogOnce 'GAMMA-READ' ('Could not read gamma_hotkeys.json after four attempts ({0}); using the state captured at install.' -f $readError)
         }
         if (-not $gamma) { return $null }
         if (-not $gamma.displays) { return $null }
@@ -1317,8 +1275,9 @@ function Restore-SavedProfiles {
                     'Failed to restore STANDARD profile on {0}: HRESULT {1}' -f $CurrentDisplay.GdiName, (Format-HResult $hr))
             } elseif ($current -ne $sdrDesired) {
                 Clear-LogOnce ('{0}|STANDARD' -f $CurrentDisplay.GdiName)
-                # Only a real correction. The forced pass rewrites this every five
-                # seconds whether anything drifted or not, and logging that made 614 of
+                # Only a real correction. Forced writes -- the mode-change reassertion,
+                # and the five-second pass before it stopped forcing -- rewrite this
+                # whether anything drifted or not, and logging those made 614 of
                 # 618 lines identical: 37 bytes a second, the 512 KB cap reached in
                 # about four hours, and one .old kept, so eight hours of history at
                 # most -- for a log whose whole purpose is answering "did something
@@ -1429,7 +1388,9 @@ function Invoke-GammaHotkey {
                     $gamma | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $gammaTmp -Encoding UTF8
                     Move-Item -LiteralPath $gammaTmp -Destination $GammaStatePath -Force
                 }
-            } catch {}
+            } catch {
+                Write-Log ('Gamma hotkey: could not update gamma_hotkeys.json for {0}: {1}' -f $current.GdiName, $_.Exception.Message)
+            }
 
             $verify = [ColorProfileWatchdog.Native]::GetDefaultProfileWithFallback(
                 $current,
@@ -1466,7 +1427,9 @@ if ($Install) {
                 warnings = @(@($script:InstallWarnings) + $failure)
                 at       = (Get-Date).ToString('o')
             } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-        } catch {}
+        } catch {
+            Write-Log ('Install failed, and the failure could not be recorded in install_result.json: ' + $_.Exception.Message)
+        }
         Write-Host ''
         Write-Host ('  Installation failed: ' + $failure) -ForegroundColor Red
         exit 1
@@ -1707,7 +1670,7 @@ Loop
         # association is this app's own working profile, which Resolve-BaseExtendedProfile
         # deliberately refuses to adopt as a fallback -- otherwise the watchdog would
         # restore already-edited output as its own source. The pair below is what it
-        # actually keeps in place, re-checked every five seconds. Reporting that as
+        # actually keeps in place, re-checked on every pass, under a second apart. Reporting that as
         # "left untouched" said the opposite of what happens, and contradicted the app's
         # own status bar at the same moment.
         Write-Host ('    HDR / EXTENDED : {0}' -f $(if ($item.ExtendedProfile) { $item.ExtendedProfile } else { '<managed by the Gamma OFF/ON pair below>' }))
@@ -1735,7 +1698,7 @@ Loop
         }
     }
     if (-not $started) {
-        Start-Process -FilePath (Join-Path $env:WINDIR 'System32\wscript.exe') `
+        Start-Process -FilePath $wscriptPath `
             -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
             -WindowStyle Hidden
     }
@@ -1761,13 +1724,15 @@ Loop
     }
     try {
         $result | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ResultPath -Encoding UTF8
-    } catch {}
+    } catch {
+        Write-Log ('Install: could not write install_result.json: ' + $_.Exception.Message)
+        Write-Warning ('Could not record the result for Virtual HDR OSD: ' + $_.Exception.Message)
+    }
 
     Write-Host ''
     Write-Host ('Startup mode: {0} / hidden / 10-second Task Scheduler delay when supported' -f $startupMethod) -ForegroundColor Green
     Write-Host ('State: {0}' -f $StatePath)
     Write-Host ('Log  : {0}' -f $LogPath)
-
 
     exit 0
 }

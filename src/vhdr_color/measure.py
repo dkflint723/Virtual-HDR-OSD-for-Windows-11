@@ -44,18 +44,43 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Protocol
 
+from .curves import _matvec3
 from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .greyscale import PanelResponse
-from .meter import MeterError, Reading
+from .patterns import WINDOW_AREA_FRACTION
+
+
+class MeterError(RuntimeError):
+    """A meter reading could not be taken. The message is shown to the user."""
+
+
+@dataclass(frozen=True, slots=True)
+class Reading:
+    """One emissive measurement, in absolute units.
+
+    ``Y`` is luminance in cd/m² -- nits -- because spotread was asked for an
+    emissive absolute reading. The same number in a relative mode would be a
+    percentage of white, which is why the mode is never left to a default.
+    """
+
+    X: float
+    Y: float
+    Z: float
+    x: float
+    y: float
+
+    @property
+    def nits(self) -> float:
+        return self.Y
+
 
 WHITE = (1.0, 1.0, 1.0)
 BLACK = (0.0, 0.0, 0.0)
 
-# The patch covers this fraction of screen area -- see patterns.WINDOW_AREA_FRACTION.
-# Peak luminance is meaningless without it: an emissive panel's brightness limiter
-# responds to total output, and the display this was developed against is rated
-# 1015 nits but reads 454 on a tenth of the screen.
-WINDOW_AREA_FRACTION = 0.10
+# Patches cover patterns.WINDOW_AREA_FRACTION of the screen's area. Peak luminance is
+# meaningless without it: an emissive panel's brightness limiter responds to total output,
+# and the display this was developed against is rated 1015 nits but reads 454 on a tenth
+# of the screen.
 
 # CIE xy of D65, the white every HDR profile here is built around.
 D65_XY = (0.3127, 0.3290)
@@ -438,14 +463,6 @@ def _inverse3(m: tuple[float, ...]) -> tuple[float, ...] | None:
         (e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det,
         (f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det,
         (d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det,
-    )
-
-
-def _matvec3(m: tuple[float, ...], v: tuple[float, float, float]) -> tuple[float, float, float]:
-    return (
-        m[0] * v[0] + m[1] * v[1] + m[2] * v[2],
-        m[3] * v[0] + m[4] * v[1] + m[5] * v[2],
-        m[6] * v[0] + m[7] * v[1] + m[8] * v[2],
     )
 
 

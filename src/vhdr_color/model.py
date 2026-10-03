@@ -295,12 +295,13 @@ class DisplayBinding:
 
 @dataclass(slots=True)
 class ApplicationState:
-    current_mode: DisplayMode
+    """The editor's saved state. Only HDR is edited: the SDR association is pinned or
+    left alone, never generated, so there is no SDR state to keep."""
+
     follow_windows_mode: bool
     auto_refresh_after_mode_change: bool
     live_mode: bool
     selected_display_key: str
-    sdr: ModeState
     hdr: ModeState
     # Keyed by DisplayInfo.stable_key, not .key: adapter LUIDs are reissued on
     # reboot, so anything keyed on those would be lost every restart.
@@ -314,15 +315,11 @@ class ApplicationState:
     @classmethod
     def neutral(cls) -> "ApplicationState":
         return cls(
-            "HDR",
-            True,
-            True,
-            False,
-            "",
-            ModeState.neutral("SDR"),
-            ModeState.neutral("HDR"),
-            {},
-            "",
+            follow_windows_mode=True,
+            auto_refresh_after_mode_change=True,
+            live_mode=False,
+            selected_display_key="",
+            hdr=ModeState.neutral("HDR"),
         )
 
     def binding(self, stable_key: str) -> DisplayBinding:
@@ -333,21 +330,13 @@ class ApplicationState:
             self.display_bindings[stable_key] = existing
         return existing
 
-    def set_mode_state(self, mode: DisplayMode, state: ModeState) -> None:
-        if mode == "SDR":
-            self.sdr = state
-        else:
-            self.hdr = state
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema": "virtual-hdr-osd-state-v1",
-            "current_mode": self.current_mode,
             "follow_windows_mode": self.follow_windows_mode,
             "auto_refresh_after_mode_change": self.auto_refresh_after_mode_change,
             "live_mode": self.live_mode,
             "selected_display_key": self.selected_display_key,
-            "sdr": self.sdr.to_dict(),
             "hdr": self.hdr.to_dict(),
             "display_bindings": {
                 key: binding.to_dict() for key, binding in self.display_bindings.items()
@@ -363,22 +352,22 @@ class ApplicationState:
         # again until someone found this file and deleted it by hand.
         if not isinstance(data, dict):
             return cls.neutral()
+        # Files from earlier builds also carry "current_mode" and an "sdr" section.
+        # Neither was ever read back, and both are ignored here.
         return cls(
-            "HDR" if data.get("current_mode") != "SDR" else "SDR",
-            bool(data.get("follow_windows_mode", True)),
-            bool(data.get("auto_refresh_after_mode_change", True)),
+            follow_windows_mode=bool(data.get("follow_windows_mode", True)),
+            auto_refresh_after_mode_change=bool(data.get("auto_refresh_after_mode_change", True)),
             # live_mode was hardcoded False here, and forced False again in the window's
             # constructor, so the preference was discarded twice over and to_dict wrote
             # a field nothing ever read back. Turning Live Apply on had to be repeated
             # every session, which is the guide's own step 4.
-            bool(data.get("live_mode", False)),
-            str(data.get("selected_display_key", "")),
+            live_mode=bool(data.get("live_mode", False)),
+            selected_display_key=str(data.get("selected_display_key", "")),
             # One malformed section costs that section, not the whole file: dict() of a
             # string raised, and the loader then threw away every binding and setting.
-            ModeState.from_dict(data.get("sdr"), "SDR"),
-            ModeState.from_dict(data.get("hdr"), "HDR"),
-            cls._bindings_from_dict(data.get("display_bindings")),
-            str(data.get("argyll_path", "") or ""),
+            hdr=ModeState.from_dict(data.get("hdr"), "HDR"),
+            display_bindings=cls._bindings_from_dict(data.get("display_bindings")),
+            argyll_path=str(data.get("argyll_path", "") or ""),
         )
 
     @staticmethod

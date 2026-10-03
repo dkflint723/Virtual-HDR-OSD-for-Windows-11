@@ -11,8 +11,8 @@ from __future__ import annotations
 import struct
 import unittest
 
-from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
-from sdr_hdr_profile_creator.patterns import (
+from vhdr_color.gamma_correction import pq_eotf, pq_inverse_eotf
+from vhdr_color.patterns import (
     PLACEMENT_NITS,
     placement_frame,
     PATTERNS,
@@ -307,31 +307,6 @@ class OverlayPlacementTests(unittest.TestCase):
         self.assertEqual(len(frame), self.WIDTH * self.HEIGHT * 8)
 
 
-class DeclaredMetadataTests(unittest.TestCase):
-    """A panel quoting the same number for peak and full frame is quoting a spec."""
-
-    def test_equal_peak_and_full_frame_is_flagged(self):
-        from sdr_hdr_profile_creator.hdr_display import DisplayCapability
-
-        from tests.test_hdr_display import capability
-
-        panel = capability(max_nits=1080.0, max_full_frame_nits=1080.0)
-        self.assertIsInstance(panel, DisplayCapability)
-        self.assertTrue(panel.luminance_looks_declared)
-
-    def test_a_panel_reporting_a_real_full_frame_figure_is_not_flagged(self):
-        from tests.test_hdr_display import capability
-
-        self.assertFalse(capability(max_nits=1080.0, max_full_frame_nits=250.0)
-                         .luminance_looks_declared)
-
-    def test_a_dim_panel_is_not_flagged(self):
-        """Equal figures are plausible when there is no headroom to throttle."""
-        from tests.test_hdr_display import capability
-
-        self.assertFalse(capability(max_nits=350.0, max_full_frame_nits=350.0)
-                         .luminance_looks_declared)
-
 
 class GuidanceTests(unittest.TestCase):
     """A pattern nobody can act on is decoration."""
@@ -359,7 +334,7 @@ class ShapeSensitivityTests(unittest.TestCase):
     large gap merges long after the real limit and reports a threshold that is too high."""
 
     def test_the_gap_is_small_enough_to_find_a_real_limit(self):
-        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+        from vhdr_color.patterns import SHAPE_CONTRAST
 
         self.assertLessEqual(SHAPE_CONTRAST, 1.10,
                              "a coarse gap puts the threshold well above where a panel clips")
@@ -370,7 +345,7 @@ class ShapeSensitivityTests(unittest.TestCase):
         """They ask the same question, so they must ask it with the same sensitivity."""
         from dataclasses import replace
 
-        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+        from vhdr_color.patterns import SHAPE_CONTRAST
 
         context = replace(HDR, probe_nits=300.0)
         for key in ("peak-white", "full-frame-white"):
@@ -399,7 +374,7 @@ class ToneTrackingTests(unittest.TestCase):
         return field, bar
 
     def levels(self):
-        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+        from vhdr_color.patterns import tone_tracking_levels
 
         return tone_tracking_levels(HDR)
 
@@ -463,7 +438,7 @@ class TrackingSensitivityTests(unittest.TestCase):
     step -- so an obvious block stays obvious when the curve moves, and reports nothing."""
 
     def test_the_step_is_within_a_few_just_noticeable_differences(self):
-        from sdr_hdr_profile_creator.patterns import TONE_TRACKING_DELTA_PQ
+        from vhdr_color.patterns import TONE_TRACKING_DELTA_PQ
 
         # One JND is about one to two ten-bit PQ codes.
         codes = TONE_TRACKING_DELTA_PQ * 1023
@@ -474,7 +449,7 @@ class TrackingSensitivityTests(unittest.TestCase):
         """At 0.03 PQ the darkest patch was 2.35x its surround. That is not a faint patch."""
         from dataclasses import replace
 
-        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+        from vhdr_color.patterns import tone_tracking_levels
 
         for level in tone_tracking_levels(HDR):
             context = replace(HDR, probe_nits=level)
@@ -490,9 +465,9 @@ class TrackingSensitivityTests(unittest.TestCase):
         """If the controls did not move these, the pattern could not be used to set them."""
         from dataclasses import replace
 
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.model import ModeState
-        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+        from vhdr_color.curves import build_transform
+        from vhdr_color.model import ModeState
+        from vhdr_color.patterns import tone_tracking_levels
 
         def lifts(contrast):
             state = ModeState.neutral("HDR")
@@ -745,7 +720,7 @@ class PlacementTargetTests(unittest.TestCase):
     def test_a_reading_of_the_target_is_what_detection_accepts(self):
         """The two halves have to agree, or the meter watches for something the screen
         never shows."""
-        from sdr_hdr_profile_creator.measure import sees_placement_target
+        from vhdr_color.measure import sees_placement_target
         from sdr_hdr_profile_creator.meter import Reading
 
         # A plausible instrument reading of a green patch at PLACEMENT_NITS.

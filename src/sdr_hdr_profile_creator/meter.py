@@ -27,6 +27,9 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
+# The types belong to the colour core, which has to stay importable without Argyll.
+from vhdr_color.measure import MeterError, Reading
+
 # Argyll ships these as plain executables; the name never varies by version.
 SPOTREAD_NAMES = ("spotread.exe", "spotread")
 
@@ -74,30 +77,6 @@ _FAILURES: tuple[tuple[re.Pattern[str], str], ...] = (
 # A runaway cannot be allowed to grow without bound. Generous enough that a
 # normal verbose run is never truncated.
 _MAX_LINES = 400
-
-
-class MeterError(RuntimeError):
-    """A meter reading could not be taken. The message is shown to the user."""
-
-
-@dataclass(frozen=True, slots=True)
-class Reading:
-    """One emissive measurement, in absolute units.
-
-    ``Y`` is luminance in cd/m² -- nits -- because spotread was asked for an
-    emissive absolute reading. The same number in a relative mode would be a
-    percentage of white, which is why the mode is never left to a default.
-    """
-
-    X: float
-    Y: float
-    Z: float
-    x: float
-    y: float
-
-    @property
-    def nits(self) -> float:
-        return self.Y
 
 
 @dataclass(frozen=True, slots=True)

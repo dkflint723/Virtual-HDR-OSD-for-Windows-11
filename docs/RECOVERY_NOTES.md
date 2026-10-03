@@ -70,11 +70,11 @@ The stdlib-only subset that CI runs takes about 40 s. The full suite takes about
 | ctypes Windows layer | `windows_api.py`, `edid.py`, `ddc.py`, `elevation.py`, `hotkeys.py` | `test_core` (struct sizes, overwrite), `test_edid`, `test_ddc`, `test_elevation` | The real mscms and DisplayConfig calls (faked in `test_gui`); `hotkeys` |
 | Struct layouts | 15 DisplayConfig sizes asserted at import; DXGI, D3D11 and PHYSICAL_MONITOR pinned by tests since `a8dfec1` | `test_core`, `test_hdr_display`, `test_ddc` | Only against Microsoft Learn's definitions: no SDK header is installed |
 | D3D11 scRGB renderer | `hdr_display.py`, `pattern_view.py`, `measure_view.py` | `test_hdr_display`, `test_pattern_view`, `test_measure_view` (surface faked) | `HdrSurface.resize` and `close`; `show_placement_target` |
-| ICC / MHC2 | `icc.py` | `test_core`; the MHC2 bytes against Microsoft's table since `6452077` | Third-party `.icm` files; the `vcgt` import path |
-| Colour and tone maths | `curves.py`, `gamma_correction.py`, `greyscale.py`, `delta_itp.py`, `patterns.py` | `test_core`, `test_greyscale`, `test_delta_itp`, `test_patterns` | Golden vectors for PQ, sRGB, Bradford and ICtCp |
-| Measurement | `meter.py`, `measure.py`, `measure_view.py`, `tools/*_report.py` | `test_meter`, `test_measure`, `test_measure_view`, parts of `test_gui` | `_terminate`'s kill path; closing the main window mid-run; the tools |
+| ICC / MHC2 | `vhdr_color/icc.py` | `test_core`; the MHC2 bytes against Microsoft's table since `6452077` | Third-party `.icm` files; the `vcgt` import path |
+| Colour and tone maths | `vhdr_color/`: `curves.py`, `gamma_correction.py`, `greyscale.py`, `delta_itp.py`, `patterns.py` | `test_core`, `test_greyscale`, `test_delta_itp`, `test_patterns`, `test_golden_vectors` | -- |
+| Measurement | `meter.py`, `vhdr_color/measure.py`, `measure_view.py`, `tools/*_report.py` | `test_meter`, `test_measure`, `test_measure_view`, parts of `test_gui` | `_terminate`'s kill path; closing the main window mid-run; the tools |
 | Qt UI and threading | `app.py` (about 5,100 lines), `dialogs.py`, `controls.py`, `__main__.py` | `test_gui` (65 classes), `test_measure_view` | Many handlers are reached only by calling them directly |
-| Settings and state | `model.py`; five JSON files written by `app.py` | `test_gui`, `test_core` | Schema keys are written but never read |
+| Settings and state | `vhdr_color/model.py`; `persistence.py` reads and writes the JSON files for `app.py` | `test_persistence`, `test_gui`, `test_core` | Schema keys are written but never read |
 | Watchdogs | `2- OPTIONAL - Install-Watchdog.bat`, byte-identical to the copies in `resources\` and `watchdogs standalone\`; `Uninstall-Watchdog.bat` | `test_watchdog` (6 payload functions run in real PowerShell); `test_packaging` (mostly text checks) | The main loop, the hotkey thread, task registration, the uninstaller |
 | Build, CI, packaging | `Install.ps1`, the `.bat` launchers, `tools/portable_entry.py`, `.github/workflows/tests.yml` | `test_packaging` | The Nuitka build; CI never runs the three Qt test modules |
 
@@ -131,9 +131,9 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 
 | Finding | Evidence | Why it is not fixed here |
 | --- | --- | --- |
-| README 484-490 says Restore holds against any installed watchdog and that Alt+1/Alt+2 are refused while restored. Neither holds when the watchdog owns the hotkeys | `Install-Watchdog.bat` never reads `restored`; `Invoke-GammaHotkey` writes at :1380 unguarded | The fix could go in the watchdog (which changes its build id and the standalone zip) or in the README |
-| `Launcher.vbs` is written as ASCII, so a non-ASCII profile path should stop the watchdog ever running | `.bat:1570` `-Encoding ASCII` | A watchdog change; verify on hardware first |
-| Mutex probes treat access-denied as "not running"; the uninstaller cannot see or stop an elevated watchdog; the elevated `Start-Process` fallback | `.bat:154-156`, `windows_api.watchdog_is_running`, `Uninstall-Watchdog.bat:30-34`, `.bat:1737-1741` | Watchdog changes; needs an elevation test |
+| README 484-490 says Restore holds against any installed watchdog and that Alt+1/Alt+2 are refused while restored. Neither holds when the watchdog owns the hotkeys | `Install-Watchdog.bat` never reads `restored`; `Invoke-GammaHotkey` calls `SetCurrentUserDefault` unguarded | The fix could go in the watchdog (which changes its build id and the standalone zip) or in the README |
+| `Launcher.vbs` is written as ASCII, so a non-ASCII profile path should stop the watchdog ever running | The `Launcher.vbs` write uses `-Encoding ASCII` | A watchdog change; verify on hardware first |
+| Mutex probes treat access-denied as "not running"; the uninstaller cannot see or stop an elevated watchdog; the elevated `Start-Process` fallback | `Test-WatchdogSingletonHeld`, `windows_api.watchdog_is_running`, `Uninstall-Watchdog.bat:30-34`, the fallback `Start-Process` | Watchdog changes; needs an elevation test |
 | A torn or locked read of `gamma_hotkeys.json` drops the other displays' records | `app.py` `_runtime_entry` | Multi-monitor only; an existing test fixes "start over" as the intended behaviour |
 | Refusing to save for the rest of a session after a locked settings file (`6bd43b3`) | | Retrying the read later is the alternative |
 | Closing the main window mid-run does not join the measurement thread; a placement thread still draining at exit | `app.py` `closeEvent` | Needs a decision on how long closing may block |
@@ -142,8 +142,10 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 | `pq_eotf(NaN)` returns 10,000 nits; `pq_inverse_eotf(inf)` returns NaN; input above 10,000 nits gives a PQ code above 1.0 | Probed directly | No caller found that can pass these values |
 | Hand-edited state: `"gamma": 1.0` reads as the legacy trim (3.0); `null` becomes the string `"None"`; `"false"` becomes True | `model.py` | Only reachable by editing the file by hand |
 | The build does not use `uv.lock`, and `ordered-set` and `zstandard` are unpinned | Build `.bat`:49-53 | Packaging policy |
-| `ddc_tune.py` is still present; the ADR removes it in Phase 2 | Only imported by `tests/test_ddc.py` | ADR Phase 2 |
-| Duplicated maths: the D65 constants, `_matvec3` (three copies), `clamp` (two), 3x3 inverses with different contracts | Architecture map | ADR Phase 2 moves the colour core into a single package; `curves` and `greyscale` import each other, which blocks merging `clamp` |
+| The D65-to-D50 adaptation matrix was built for D50 = (0.96422, 1, 0.82521), while the profile header writes the ICC PCS white (0.9642, 1, 0.8249): adapted D65 lands 4.8e-4 off in Z | `vhdr_color/icc.py` `D65_TO_D50_CHAD` vs `D50_XYZ`; derived in `test_golden_vectors` | Correcting it changes the bytes of every generated profile |
+| The watchdog's five-second "fallback reassertion" now repeats the per-pass check made moments before, since it stopped forcing | `Install-Watchdog.bat`, the block that sets `$lastForced` | Removing it changes behaviour in one edge: an empty mode-change refresh |
+| `build_transform(hdr=False)` and the SDR branch of `build_profile` are reached only by tests | `vhdr_color/curves.py`, `vhdr_color/icc.py` | The SDR branch sits beside the coupled-tag merge, which is on the do-not-touch list |
+| The portable EXE has not been rebuilt since the colour core moved to `src/vhdr_color` | Nuitka follows imports, so it should be included | Run the build once |
 
 ## Verification gaps: manual procedures
 
@@ -188,6 +190,29 @@ These need hardware this session could not use. Run them before relying on the c
 
 ## Resuming
 
-The plan remains the ADR. Phase 1 is open on the Independent-Flip measurement, and Phase 2 is the `vhdr-color` extraction. The decisions above are waiting.
+The plan remains the ADR. Phase 1 is open on the Independent-Flip measurement. Phase 2 is done (see below); Phase 3 is next. The decisions above are waiting.
+
+## Second pass, 2 October 2026
+
+Branch `streamline-cleanup`, behaviour-preserving throughout.
+
+- **Safe cleanup.**
+  - Removed `ddc_tune` and the whole DDC/CI write path; the app now only reads from the monitor.
+  - Removed the never-read `current_mode` and `sdr` state fields (old files still load).
+  - Removed three helpers only tests called, and launcher settings nothing read.
+- **ADR Phase 2.**
+  - Golden-vector tests check PQ, sRGB, Bradford and ICtCp against the standards, and two generated profiles are pinned by digest.
+  - The two crossing imports moved into the core.
+  - The eight modules moved to `src/vhdr_color`, with the profile bytes unchanged.
+  - Exact duplicate helpers were merged.
+- **`app.py` split, the safe part.**
+  - JSON persistence and the watchdog build id moved to `persistence.py` and `watchdog_identity.py`, now tested in CI.
+  - `test_app_split_guard` keeps any split module from importing anything that reaches Windows.
+  - Nothing that calls Windows moved, so the fixture guard is unchanged.
+- **Watchdog.**
+  - Removed dead C#.
+  - Four silent failures now log.
+  - Stale comments fixed.
+  - The build id is now `e2ab667323ad`, so an installed watchdog reports a different build until reinstalled.
 
 The scratch files from this session were outside the repository: the tripwire runner, the audit outputs and the raw test logs. They are not needed to resume. Every fact they supported is recorded here or in the commit messages.

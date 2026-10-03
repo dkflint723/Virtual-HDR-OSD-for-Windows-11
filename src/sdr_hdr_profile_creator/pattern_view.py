@@ -24,9 +24,9 @@ from PySide6.QtGui import QColor, QCursor, QFont, QImage, QPainter, QPen, QPixma
 from PySide6.QtWidgets import QWidget
 
 from .edid import PanelMetadata
-from .gamma_correction import pq_eotf, pq_inverse_eotf
+from vhdr_color.gamma_correction import pq_eotf, pq_inverse_eotf
 from .hdr_display import PQ_MAX_NITS, DisplayCapability, HdrDisplayError, HdrSurface
-from .patterns import (
+from vhdr_color.patterns import (
     GUIDED_SEQUENCE,
     MEASUREMENT_SEQUENCE,
     pattern_by_key,

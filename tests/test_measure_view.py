@@ -19,7 +19,7 @@ try:
     from PySide6.QtWidgets import QApplication
 
     from sdr_hdr_profile_creator import measure_view
-    from sdr_hdr_profile_creator.measure import Calibration, MeasurementStep
+    from vhdr_color.measure import Calibration, MeasurementStep
     from sdr_hdr_profile_creator.meter import MeterError, Reading
 
     GUI_AVAILABLE = True
@@ -526,7 +526,7 @@ class CancellationTests(unittest.TestCase):
         """Exercised through require_shown rather than show, because a
         BlockingQueuedConnection issued from the thread that would service it
         deadlocks -- the hazard _WindowDisplay's own docstring describes."""
-        from sdr_hdr_profile_creator.measure import Aborted
+        from vhdr_color.measure import Aborted
 
         window = self.window()
         display = measure_view._WindowDisplay(window)
