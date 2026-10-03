@@ -908,7 +908,12 @@ def watchdog_is_running() -> bool:
         _log.debug("Could not probe the watchdog mutex", exc_info=True)
         return False
     if not handle:
-        return False
+        # Access denied means the mutex exists but belongs to a process this one may
+        # not open -- a watchdog started by an elevated install. That is running, and
+        # answering "not running" is what left the app reporting no watchdog while one
+        # went on holding the associations.
+        ERROR_ACCESS_DENIED = 5
+        return ctypes.get_last_error() == ERROR_ACCESS_DENIED
     try:
         kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
         kernel32.CloseHandle(handle)

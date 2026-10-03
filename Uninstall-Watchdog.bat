@@ -29,7 +29,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
   "$escaped=[Regex]::Escape($watchdog);" ^
   "Get-CimInstance Win32_Process | Where-Object { ($_.Name -ieq 'wscript.exe' -or $_.Name -ieq 'cscript.exe') -and $_.CommandLine -and ($_.CommandLine -like '*ColorProfileModeWatchdog*Launcher.vbs*') } | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null };" ^
   "Get-CimInstance Win32_Process | Where-Object { ($_.Name -ieq 'powershell.exe' -or $_.Name -ieq 'pwsh.exe') -and $_.CommandLine -and ($_.CommandLine -match $escaped) } | ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null };" ^
-  "Start-Sleep -Milliseconds 300;" ^
+  "$running=$true; for ($i=0; $i -lt 12 -and $running; $i++) { Start-Sleep -Milliseconds 250; try{ $m=[System.Threading.Mutex]::OpenExisting('Local\ColorProfileModeWatchdogStandalone'); $m.Dispose(); $running=$true }catch [System.UnauthorizedAccessException]{ $running=$true }catch{ $running=$false } };" ^
+  "if ($running) { $problems += 'The watchdog is still running. It was most likely started by an install run as administrator, which this account cannot see or stop. Re-run this uninstaller as administrator.' };" ^
   "$keep = $problems.Count -gt 0;" ^
   "if (-not $keep) { Remove-Item -LiteralPath $app -Recurse -Force } else { $problems += 'The watchdog files were left in place, because deleting them while the task survives would leave it launching a script that no longer exists.' };" ^
   "$startup=[Environment]::GetFolderPath('Startup');" ^

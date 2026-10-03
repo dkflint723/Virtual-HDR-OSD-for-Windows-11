@@ -451,10 +451,11 @@ class InstallerOutcomeTests(unittest.TestCase):
         in is behind a `pause` the user may never read."""
         script = self.install()
         self.assertEqual(
-            4, script.count("$script:InstallWarnings +="),
+            5, script.count("$script:InstallWarnings +="),
             "each degraded outcome should record its own warning: the Run-key fallback, "
-            "the un-replaceable task, a running watchdog that cannot be stopped, and a "
-            "task that registered but would not start now",
+            "the un-replaceable task, a running watchdog that cannot be stopped, a "
+            "task that registered but would not start now, and a watchdog started "
+            "as administrator",
         )
 
     def test_the_gui_reads_the_same_file_the_scripts_write(self):

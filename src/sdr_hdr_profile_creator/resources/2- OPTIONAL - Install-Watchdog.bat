@@ -152,6 +152,11 @@ function Test-WatchdogSingletonHeld {
         return $true
     } catch [System.Threading.WaitHandleCannotBeOpenedException] {
         return $false
+    } catch [System.UnauthorizedAccessException] {
+        # It exists, and belongs to a process this one may not open: a watchdog started
+        # by an elevated install. Answering "not running" here is what let an install
+        # over one report that it had cleared the way.
+        return $true
     } catch {
         return $false
     }
@@ -1713,6 +1718,13 @@ Loop
         }
     }
     if (-not $started) {
+        # Start-Process gives the watchdog this script's token, so an install run as
+        # administrator starts an elevated watchdog that only an elevated run can stop.
+        $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+            [Security.Principal.WindowsBuiltInRole]::Administrator)
+        if ($elevated) {
+            $script:InstallWarnings += 'This install ran as administrator, so the watchdog was started as administrator too. Replacing or removing it later needs the installer or the uninstaller run as administrator.'
+        }
         Start-Process -FilePath $wscriptPath `
             -ArgumentList @('//B', '//Nologo', ('"{0}"' -f $LauncherPath)) `
             -WindowStyle Hidden
