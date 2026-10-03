@@ -34,7 +34,7 @@ jobs:
         run: python -m unittest -v tests.test_import_boundary tests.test_golden_vectors tests.test_core tests.test_delta_itp tests.test_greyscale tests.test_measure tests.test_patterns
 
       - name: Windows layer, against fakes
-        run: python -m unittest -v tests.test_edid tests.test_ddc tests.test_elevation tests.test_meter tests.test_hdr_display tests.test_watchdog
+        run: python -m unittest -v tests.test_persistence tests.test_app_split_guard tests.test_edid tests.test_ddc tests.test_elevation tests.test_meter tests.test_hdr_display tests.test_watchdog
 
       - name: Packaging, installers and README claims
         run: python -m unittest -v tests.test_packaging

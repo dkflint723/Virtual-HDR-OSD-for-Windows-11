@@ -54,7 +54,13 @@ from . import ddc
 from vhdr_color import delta_itp
 from vhdr_color import greyscale
 from .hotkeys import GammaHotkeyListener
-from . import elevation, measure_view
+from . import elevation, measure_view, persistence
+from .watchdog_identity import (
+    WATCHDOG_INSTALLER_NAME,
+    WATCHDOG_PAYLOAD_MARKER,
+    watchdog_build_id,
+    watchdog_payload,
+)
 from vhdr_color import measure
 from .edid import read_panel_metadata
 from .meter import MeterError, find_spotread, list_instruments, read_emissive
@@ -120,43 +126,6 @@ USER_APPLY_REASONS = frozenset({"Apply Edits", "Reapply", "Calibrate Display"})
 WATCHDOG_INSTALL_ROOT = Path(
     os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")
 ) / "ColorProfileModeWatchdog"
-#: The installer carries the watchdog script as a payload after this marker and writes
-#: it to WATCHDOG_INSTALL_ROOT. Nothing in the deployed copy records which build it is,
-#: which is how an August portable build kept in another folder installed its own
-#: watchdog over a September one on 2026-09-03 -- silently, and with every check this
-#: app performs still reporting success. Comparing what is on disk against what we ship
-#: is the only way to see that, so both sides are reduced to one short id.
-WATCHDOG_INSTALLER_NAME = "2- OPTIONAL - Install-Watchdog.bat"
-WATCHDOG_PAYLOAD_MARKER = ":__WATCHDOG_POWERSHELL_PAYLOAD__"
-
-
-def watchdog_payload(installer_text: str) -> str:
-    """The script the installer would deploy, or "" when the marker is missing.
-
-    Searched from the end for the same reason the .bat uses ``LastIndexOf``: the marker
-    also appears in the extraction command near the top of the file, and matching that
-    one would return the whole installer instead of the payload.
-    """
-    index = installer_text.rfind(WATCHDOG_PAYLOAD_MARKER)
-    if index < 0:
-        return ""
-    return installer_text[index + len(WATCHDOG_PAYLOAD_MARKER):]
-
-
-def watchdog_build_id(script_text: str) -> str:
-    """A short identity for a watchdog script, stable across how it reached us.
-
-    Normalised rather than hashed raw, because the two sides arrive differently: the
-    deployed copy is written by PowerShell's ``Set-Content -Encoding UTF8``, which adds
-    a byte-order mark and keeps CRLF, while the shipped side is sliced out of the .bat.
-    Reading both with ``utf-8-sig`` already folds the mark and the line endings, so this
-    is belt and braces -- but it is the half worth stating, since a normalisation that
-    disagreed would report every build as wrong and be worse than no check at all.
-    """
-    body = script_text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n").strip()
-    if not body:
-        return ""
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
 
 
 @functools.lru_cache(maxsize=1)
@@ -372,98 +341,16 @@ class MainWindow(FluentWidget):
     # State persistence
 
     def _load_last_state(self) -> ApplicationState:
-        self._state_load_problem = ""
-        self._state_unopened = False
-        if not STATE_PATH.is_file():
-            return ApplicationState.neutral()
-        try:
-            payload = json.loads(STATE_PATH.read_text(encoding="utf-8-sig"))
-        except OSError:
-            # Unreadable right now is not the same as corrupt -- another process can
-            # simply have it open -- so the file is left exactly where it is. That
-            # includes not saving the defaults over it later in this session.
-            self._state_unopened = True
-            self._state_load_problem = (
-                f"{STATE_PATH.name} could not be opened, so the app started from defaults "
-                "and will not save over it. Close whatever has it open, then restart the app."
-            )
-            return ApplicationState.neutral()
-        except ValueError:
-            # Not UTF-8, or not JSON. JSONDecodeError is a ValueError.
-            payload = None
-        if isinstance(payload, dict):
-            try:
-                return ApplicationState.from_dict(payload)
-            except (ValueError, TypeError, AttributeError, KeyError):
-                pass
-        # Falling back to defaults used to be silent, and the first save afterwards wrote
-        # them over the file: every display binding and measured correction gone, with
-        # nothing on screen to say so. Keep what was there, and say it.
-        aside = STATE_PATH.with_name("last_gui_state.unreadable.json")
-        try:
-            STATE_PATH.replace(aside)
-            kept = f" The unreadable file was kept as {aside.name}."
-        except OSError:
-            kept = ""
-        self._state_load_problem = (
-            "The saved settings could not be read, so the app started from defaults." + kept
-        )
-        return ApplicationState.neutral()
+        state, self._state_load_problem, self._state_unopened = persistence.load_state(STATE_PATH)
+        return state
 
     def _load_live_registry(self) -> dict[str, dict[str, str]]:
-        if not LIVE_REGISTRY_PATH.is_file():
-            return {}
-        try:
-            data = json.loads(LIVE_REGISTRY_PATH.read_text(encoding="utf-8-sig"))
-            if not isinstance(data, dict):
-                return {}
-            result: dict[str, dict[str, str]] = {}
-            for key, value in data.items():
-                if isinstance(key, str) and isinstance(value, dict):
-                    profile_name = str(value.get("profile_name", ""))
-                    if profile_name:
-                        result[key] = {"profile_name": profile_name}
-            return result
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            return {}
+        return persistence.load_live_registry(LIVE_REGISTRY_PATH)
 
     def _save_live_registry(self) -> None:
         self._write_json_atomic(LIVE_REGISTRY_PATH, self._persisted_live_registry)
 
-    @staticmethod
-    def _write_json_atomic(path: Path, payload: object) -> bool:
-        """Write JSON via a temporary file so a crash cannot leave a truncated file.
-
-        The watchdog polls gamma_hotkeys.json continuously; a half-written file
-        would be parsed as corrupt and silently ignored. The app's own files are
-        read back at the next start, where a truncated one costs the whole state.
-
-        On Windows the rename fails with a PermissionError whenever another
-        process has the destination open without FILE_SHARE_DELETE — which the
-        watchdog does on every poll. Retrying briefly covers that window; the
-        temporary file is cleaned up rather than left behind, and the caller is
-        told whether the publish actually landed.
-        """
-        temporary = path.with_name(path.name + ".tmp")
-        try:
-            temporary.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        except OSError:
-            return False
-        for attempt in range(5):
-            try:
-                temporary.replace(path)
-                return True
-            except PermissionError:
-                # The watchdog reads these files roughly every 800ms; a few short
-                # retries clear a collision without blocking the GUI meaningfully.
-                time.sleep(0.04 * (attempt + 1))
-            except OSError:
-                break
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
+    _write_json_atomic = staticmethod(persistence.write_json_atomic)
 
     def _save_state_now(self) -> None:
         """Persist the editor state, and say so when it does not land.
@@ -4512,30 +4399,7 @@ class MainWindow(FluentWidget):
 
     def _load_original_profiles(self) -> dict[str, dict[str, object]] | None:
         """None when the file is there but cannot be opened right now."""
-        if not ORIGINAL_PROFILES_PATH.is_file():
-            return {}
-        try:
-            payload = json.loads(ORIGINAL_PROFILES_PATH.read_text(encoding="utf-8-sig"))
-        except OSError:
-            return None
-        except ValueError:
-            payload = None
-        displays = payload.get("displays") if isinstance(payload, dict) else None
-        if isinstance(displays, dict):
-            return {
-                key: dict(value)
-                for key, value in displays.items()
-                if isinstance(key, str) and key and isinstance(value, dict)
-            }
-        # The same rule as the settings file: an unreadable record is kept rather than
-        # written over, because it may be the only note of what Windows had.
-        try:
-            ORIGINAL_PROFILES_PATH.replace(
-                ORIGINAL_PROFILES_PATH.with_name("original_profiles.unreadable.json")
-            )
-        except OSError:
-            pass
-        return {}
+        return persistence.load_original_profiles(ORIGINAL_PROFILES_PATH)
 
     def _save_original_profiles(self) -> bool:
         if self._original_profiles is None and ORIGINAL_PROFILES_PATH.is_file():
