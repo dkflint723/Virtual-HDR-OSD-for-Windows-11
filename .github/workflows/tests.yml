@@ -31,7 +31,7 @@ jobs:
           python-version: "3.12"
 
       - name: Colour core and its import boundary
-        run: python -m unittest -v tests.test_import_boundary tests.test_core tests.test_delta_itp tests.test_greyscale tests.test_measure tests.test_patterns
+        run: python -m unittest -v tests.test_import_boundary tests.test_golden_vectors tests.test_core tests.test_delta_itp tests.test_greyscale tests.test_measure tests.test_patterns
 
       - name: Windows layer, against fakes
         run: python -m unittest -v tests.test_edid tests.test_ddc tests.test_elevation tests.test_meter tests.test_hdr_display tests.test_watchdog
