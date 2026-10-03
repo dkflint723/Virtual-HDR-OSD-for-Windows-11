@@ -21,7 +21,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QObject, Qt, QTimer, Signal
+    from PySide6.QtCore import QObject, QSignalBlocker, Qt, QTimer, Signal
     from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
     from sdr_hdr_profile_creator import app as app_module
@@ -258,6 +258,78 @@ class AccessibleNameTests(WindowTestCase):
         indicator = self.window.live_checkbox.indicator
         self.assertNotEqual(Qt.FocusPolicy.NoFocus, indicator.focusPolicy())
         self.assertEqual("Live Apply", indicator.accessibleName())
+
+
+class ComboKeyboardTests(WindowTestCase):
+    """The four combo boxes open and choose from the keyboard.
+
+    qfluentwidgets opens its menu only on a mouse release. The fix calls the library's
+    private _showComboMenu, so these also catch an upgrade that changes it."""
+
+    def setUp(self):
+        super().setUp()
+        import shiboken6
+
+        from PySide6.QtTest import QTest
+
+        self.window.show()
+        self.addCleanup(self.window.hide)
+        # Let the show finish. An activation still queued from it closes the first
+        # popup opened, which is a property of the test, not of anyone using the app.
+        QTest.qWaitForWindowExposed(self.window)
+        QApplication.processEvents()
+        self.combo = self.window.gamma_correction_combo
+        with QSignalBlocker(self.combo):
+            self.combo.setCurrentText("Off")
+        self.combo.setFocus()
+        self.open = lambda menu: shiboken6.isValid(menu) and menu.isVisible()
+
+    def press(self, widget, key):
+        from PySide6.QtTest import QTest
+
+        QTest.keyClick(widget, key)
+        QApplication.processEvents()
+
+    def test_each_opening_key_opens_the_menu_on_the_current_item(self):
+        for key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_F4, Qt.Key.Key_Down):
+            with self.subTest(key=key):
+                self.press(self.combo, key)
+                menu = self.combo.dropMenu
+                self.assertTrue(menu is not None and self.open(menu))
+                self.assertEqual(self.combo.currentIndex(), menu.view.currentRow())
+                self.press(menu.view, Qt.Key.Key_Escape)
+                self.assertFalse(self.open(menu))
+
+    def test_enter_in_the_menu_chooses_like_a_click(self):
+        chosen = []
+        self.combo.textActivated.connect(chosen.append)
+        self.press(self.combo, Qt.Key.Key_Space)
+        menu = self.combo.dropMenu
+        self.press(menu.view, Qt.Key.Key_Down)
+        self.press(menu.view, Qt.Key.Key_Return)
+        self.assertEqual(CORRECTION_OPTIONS[1], self.combo.currentText())
+        self.assertEqual([CORRECTION_OPTIONS[1]], chosen)
+        self.assertFalse(self.open(menu))
+
+    def test_escape_changes_nothing(self):
+        self.press(self.combo, Qt.Key.Key_Space)
+        menu = self.combo.dropMenu
+        self.press(menu.view, Qt.Key.Key_Down)
+        self.press(menu.view, Qt.Key.Key_Escape)
+        self.assertEqual("Off", self.combo.currentText())
+
+    def test_every_combo_box_in_the_window_opens_from_the_keyboard(self):
+        from qfluentwidgets import ComboBox
+
+        combos = [c for c in self.window.findChildren(ComboBox) if c.count()]
+        self.assertTrue(combos)
+        for combo in combos:
+            with self.subTest(combo=combo.accessibleName()):
+                combo.setFocus()
+                self.press(combo, Qt.Key.Key_Space)
+                menu = combo.dropMenu
+                self.assertTrue(menu is not None and self.open(menu))
+                self.press(menu.view, Qt.Key.Key_Escape)
 
 
 class FixtureSafetyTests(WindowTestCase):

@@ -14,7 +14,7 @@ from typing import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, Qt, QThread, QTimer
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -117,13 +117,48 @@ def _name_combo(combo: ComboBox, name: str) -> None:
 
     It is a push button underneath, so its accessible name was just its current text:
     "Off" or a monitor's name, with nothing to say what it was the choice of. Setting a
-    name replaces that text, so the value is kept in it and updated as it changes.
+    name replaces that text, so the value is kept in it and updated as it changes. It is
+    also made to open from the keyboard; see _ComboKeyboard.
     """
     def update(text: str) -> None:
         combo.setAccessibleName(f"{name}: {text}" if text else name)
 
     update(combo.currentText())
     combo.currentTextChanged.connect(update)
+    combo.installEventFilter(_ComboKeyboard(combo))
+
+
+class _ComboKeyboard(QObject):
+    """Opens a Fluent combo box from the keyboard.
+
+    qfluentwidgets 1.11.3 opens its menu only on a mouse release, so none of Space,
+    Enter, F4 or the arrow keys did anything: a keyboard user could reach the control and
+    never change it. These keys open the menu with the current item highlighted. The
+    arrows open it rather than stepping the value in place, as a native combo box does,
+    because two of these act on every change -- an HDR profile loads as the base, and a
+    correction is applied -- so stepping through them would apply each item on the way.
+
+    Inside the menu the arrows move, Esc closes, and Enter picks: its list emits
+    itemActivated for Enter, which is forwarded to itemClicked so the pick goes through
+    exactly the path a mouse click does. _showComboMenu is private to the library;
+    tests.test_gui.ComboKeyboardTests fails if an upgrade changes it.
+    """
+
+    OPEN_KEYS = frozenset({
+        Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F4,
+        Qt.Key.Key_Up, Qt.Key.Key_Down,
+    })
+
+    def eventFilter(self, combo, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress or event.key() not in self.OPEN_KEYS:
+            return False
+        combo._showComboMenu()
+        menu = combo.dropMenu
+        if menu is not None:
+            menu.view.itemActivated.connect(menu.view.itemClicked)
+            menu.view.setCurrentRow(max(0, combo.currentIndex()))
+            menu.view.setFocus()
+        return True
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
 STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
