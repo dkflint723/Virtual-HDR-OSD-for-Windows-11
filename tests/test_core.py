@@ -1407,6 +1407,50 @@ class CorruptStateTests(unittest.TestCase):
         self.assertEqual(r"C:\Argyll\bin", state.argyll_path)
         self.assertEqual("sRGB.icm", state.display_bindings["panel-a"].sdr_profile)
 
+    def test_a_null_text_field_is_empty_not_the_word_none(self):
+        """str(None) named a base profile, a pinned SDR profile and a display "None"."""
+        import json
+
+        state = ApplicationState.from_dict(json.loads(
+            '{"selected_display_key": null, "argyll_path": null,'
+            ' "hdr": {"base_profile": null, "base_profile_name": null, "imported_profile": null,'
+            '         "profile_name": null, "sdr_gamma_correction": null},'
+            ' "display_bindings": {"panel-a": {"sdr_profile": null, "hdr_profile": null,'
+            '                                  "display_label": null}}}'
+        ))
+        texts = [state.selected_display_key, state.argyll_path, state.hdr.base_profile,
+                 state.hdr.base_profile_name, state.hdr.imported_profile]
+        binding = state.display_bindings["panel-a"]
+        texts += [binding.sdr_profile, binding.hdr_profile, binding.display_label]
+        self.assertEqual([""] * len(texts), texts)
+        self.assertEqual(ModeState.neutral("HDR").profile_name, state.hdr.profile_name)
+        self.assertEqual("Off", state.hdr.sdr_gamma_correction)
+
+    def test_a_quoted_false_is_not_true(self):
+        """bool("false") is True: a hand-written "false" switched the setting on."""
+        import json
+
+        state = ApplicationState.from_dict(json.loads(
+            '{"live_mode": "false", "follow_windows_mode": "false",'
+            ' "auto_refresh_after_mode_change": 0}'
+        ))
+        neutral = ApplicationState.neutral()
+        self.assertEqual(
+            (neutral.live_mode, neutral.follow_windows_mode, neutral.auto_refresh_after_mode_change),
+            (state.live_mode, state.follow_windows_mode, state.auto_refresh_after_mode_change),
+        )
+        flipped = ApplicationState.from_dict({"live_mode": True, "follow_windows_mode": False})
+        self.assertEqual((True, False), (flipped.live_mode, flipped.follow_windows_mode))
+
+    def test_a_saved_state_still_round_trips(self):
+        state = ApplicationState.from_dict({
+            "live_mode": True, "selected_display_key": "panel-a", "argyll_path": r"C:\Argyll",
+            "hdr": {"base_profile": r"C:\p\Base.icm", "profile_name": "Mine"},
+            "display_bindings": {"panel-a": {"sdr_profile": "sRGB.icm", "display_label": "A"}},
+        })
+        self.assertEqual(state.to_dict(), ApplicationState.from_dict(state.to_dict()).to_dict())
+        self.assertEqual("Base.icm", state.hdr.base_profile_name)
+
     def test_a_mode_section_that_is_not_an_object_is_neutral(self):
         for payload in ("text", ["gamma", 2.4], 7, None):
             with self.subTest(payload=payload):
