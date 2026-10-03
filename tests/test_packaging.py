@@ -846,6 +846,24 @@ class EntryPointTests(unittest.TestCase):
         self.assertIn("--windows-console-mode=disable", builder)
         self.assertNotIn("--standalone", builder)
 
+    def test_the_portable_build_installs_only_pinned_packages(self):
+        """Two builds of one commit used to resolve whatever was newest that day."""
+        builder = (ROOT / "3- (Advanced users & developers) - Build Portable EXE.bat").read_text(
+            encoding="utf-8", errors="replace"
+        )
+        installs = [line for line in builder.splitlines() if " pip install " in line]
+        self.assertTrue(installs, "no pip install lines found")
+        for line in installs:
+            with self.subTest(line=line):
+                named = re.findall(r'"([A-Za-z][\w.-]*(?:[=<>!~].*?)?)"', line.split("--no-cache", 1)[1])
+                for spec in named:
+                    self.assertIn("==", spec, f"{spec} is not pinned")
+                if "-r " in line:
+                    self.assertIn("--require-hashes", line)
+                if line.rstrip().endswith("-e ."):
+                    self.assertIn("--no-deps", line, "the project would pull its dependencies unlocked")
+        self.assertIn("export --locked", builder)
+
 
 class VersionTests(unittest.TestCase):
     """One version, written once, and read by everything that reports one.
