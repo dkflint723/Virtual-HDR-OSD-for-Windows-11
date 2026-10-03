@@ -1620,8 +1620,8 @@ class MainWindow(FluentWidget):
             return ""
         return (
             f"the watchdog on disk is build {installed}, not the {shipped} this app "
-            "ships -- another copy of Virtual HDR OSD installed over it, and installing "
-            "from here replaces it"
+            "ships -- an earlier version of this app, or another copy of it, installed that one, "
+            "and installing from here replaces it"
         )
 
     def _report_watchdog_outcome(
