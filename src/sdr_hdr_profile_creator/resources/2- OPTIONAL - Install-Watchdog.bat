@@ -1539,7 +1539,13 @@ Do
   WScript.Sleep 5000
 Loop
 "@
-    Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding ASCII
+    # UTF-16 with a byte-order mark: the one encoding Windows Script Host reads that
+    # can hold any path. The launcher names Watchdog.ps1 by full path, which contains
+    # the user's profile folder, and ASCII turned every non-ASCII character in it into
+    # '?' -- so on an account named, say, Jose with an accent, the launcher could never
+    # find the script and the watchdog never ran. UTF-8 is no better: WSH reads it as
+    # the ANSI code page. Measured with cscript on 2026-10-03.
+    Set-Content -LiteralPath $LauncherPath -Value $vbs -Encoding Unicode
 
     # Register persistence through the Task Scheduler COM API instead of the
     # ScheduledTasks CIM cmdlets.  A SID is unambiguous for local, Microsoft,
