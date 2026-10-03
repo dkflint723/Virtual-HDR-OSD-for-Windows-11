@@ -1322,11 +1322,20 @@ function Invoke-GammaHotkey {
             $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
             if (-not $saved) { continue }
 
+            # Restore Windows Profile marks the GUI's record "restored" until the next
+            # apply from the GUI. Without this check the hotkeys switched straight back
+            # to the working pair the restore had set aside, and stamped State.json so
+            # the reconcile pass would keep asserting it.
+            $entry = Get-GammaEntryForDisplay -CurrentDisplay $current
+            if ($entry -and ($entry.PSObject.Properties.Name -contains 'restored') -and [bool]$entry.restored) {
+                Write-Log ('Gamma hotkey ignored on {0}: Windows'' own profile is restored. Apply from Virtual HDR OSD to bring the calibration back.' -f $current.GdiName)
+                continue
+            }
+
             $profile = $(if ($Enable) { $saved.WorkingOn } else { $saved.WorkingOff })
             if (-not $profile) {
                 # Backward-compatible fallback if this watchdog was installed before the
                 # self-contained state fields existed.
-                $entry = Get-GammaEntryForDisplay -CurrentDisplay $current
                 if ($entry) {
                     $profile = $(if ($Enable) { $entry.profiles.On } else { $entry.profiles.Off })
                 }

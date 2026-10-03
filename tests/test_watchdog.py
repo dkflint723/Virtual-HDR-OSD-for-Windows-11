@@ -98,6 +98,35 @@ class GammaDecisionTests(unittest.TestCase):
         self.assertIn("ALL PASS", completed.stdout)
 
 
+@unittest.skipUnless(POWERSHELL, "PowerShell is unavailable on this machine")
+class GammaHotkeyTests(unittest.TestCase):
+    """Run the real Alt+1 / Alt+2 handler against a stubbed native layer."""
+
+    def test_the_hotkeys_respect_a_restore(self):
+        source = payload()
+        functions = "\n\n".join(
+            extract_function(source, name)
+            for name in ("ConvertTo-GammaTimestamp", "Get-GammaEntryForDisplay",
+                         "Invoke-GammaHotkey", "Write-LogOnce", "Clear-LogOnce")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            functions_path = Path(directory) / "funcs.ps1"
+            functions_path.write_text(functions, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass",
+                    "-File", str(ROOT / "tests" / "watchdog_gamma_hotkey.ps1"),
+                    "-FunctionsPath", str(functions_path),
+                ],
+                capture_output=True, text=True, timeout=180,
+            )
+        self.assertEqual(
+            completed.returncode, 0,
+            f"watchdog gamma hotkey test failed:\n{completed.stdout}\n{completed.stderr}",
+        )
+        self.assertIn("ALL PASS", completed.stdout)
+
+
 class LogThrottleTests(unittest.TestCase):
     """A persistent fault must not erase the log it is being written to.
 

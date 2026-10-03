@@ -131,7 +131,7 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 
 | Finding | Evidence | Why it is not fixed here |
 | --- | --- | --- |
-| The watchdog's Alt+1/Alt+2 ignore a restore. The README now says so (it used to say Restore holds against any watchdog and that both hotkeys are refused); the behaviour itself is unchanged | `Install-Watchdog.bat` never reads `restored`; `Invoke-GammaHotkey` calls `SetCurrentUserDefault` without checking the profile is installed; Restore ignores `remove_profile`'s result | A watchdog fix changes its build id and the standalone zip; verify on hardware first (procedure 7.3) |
+| Restore ignores `remove_profile`'s result, and when Windows had no HDR profile the reconcile pass falls back to the captured working pair. Together, a failed uninstall on such a display lets the watchdog re-assert the calibration | `_restore_windows_profiles`; `Get-DesiredExtendedProfile` returns `WorkingOn` for a restored record whose `profiles` are empty, measured with the pair present | The fallback is the most-recent-intent-wins logic, which is not to be changed without asking |
 | `Launcher.vbs` is written as ASCII, so a non-ASCII profile path should stop the watchdog ever running | The `Launcher.vbs` write uses `-Encoding ASCII` | A watchdog change; verify on hardware first |
 | Mutex probes treat access-denied as "not running"; the uninstaller cannot see or stop an elevated watchdog; the elevated `Start-Process` fallback | `Test-WatchdogSingletonHeld`, `windows_api.watchdog_is_running`, `Uninstall-Watchdog.bat:30-34`, the fallback `Start-Process` | Watchdog changes; needs an elevation test |
 | A torn or locked read of `gamma_hotkeys.json` drops the other displays' records | `app.py` `_runtime_entry` | Multi-monitor only; an existing test fixes "start over" as the intended behaviour |
@@ -174,10 +174,10 @@ These need hardware this session could not use. Run them before relying on the c
    3. Capture with PresentMon: `PresentMon --process_name <game>.exe --output_file flip.csv`.
    4. Confirm the tint is visible while `PresentMode` reads `Hardware: Independent Flip`.
    5. Record the result in `docs/measurements/`.
-7. **The watchdog (no changes this session).**
+7. **The watchdog.**
    1. Install it from the app, then check with `schtasks /query /tn "Virtual HDR OSD - Color Profile Mode Watchdog"`.
    2. Test Alt+1 and Alt+2.
-   3. After Restore Windows Profile, press Alt+1 and Alt+2. Check whether the association changes (README, Restore Windows Profile), and read `%LOCALAPPDATA%\ColorProfileModeWatchdog\Watchdog.log`.
+   3. After Restore Windows Profile, press Alt+1 and Alt+2. Check that the association does not change and that `Watchdog.log` says the hotkey was ignored (`%LOCALAPPDATA%\ColorProfileModeWatchdog\Watchdog.log`).
    4. On an account whose name has a non-ASCII character, install it and check that `Watchdog.log` shows it running (T1).
    5. With an elevated watchdog running, check whether the app's lock switch sees it and whether the uninstaller stops it.
 8. **Sleep, wake and hot-plug.**
@@ -214,5 +214,6 @@ Branch `streamline-cleanup`, behaviour-preserving throughout.
   - Four silent failures now log.
   - Stale comments fixed.
   - The build id is now `e2ab667323ad`, so an installed watchdog reports a different build until reinstalled.
+- **Watchdog hotkeys respect a restore.** `Invoke-GammaHotkey` used to switch to the working pair after Restore Windows Profile and stamp `State.json`. It now skips a display whose `gamma_hotkeys.json` record is `restored`, and logs why. `tests/watchdog_gamma_hotkey.ps1` runs the real handler against a stub native type; against the previous watchdog its eight restored checks fail. The build id is now `6d05ca978ece`, and the standalone zip was rebuilt (the builder reproduces the previous zip byte for byte from the previous scripts).
 
 The scratch files from this session were outside the repository: the tripwire runner, the audit outputs and the raw test logs. They are not needed to resume. Every fact they supported is recorded here or in the commit messages.
