@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -125,6 +126,103 @@ class GammaHotkeyTests(unittest.TestCase):
             f"watchdog gamma hotkey test failed:\n{completed.stdout}\n{completed.stderr}",
         )
         self.assertIn("ALL PASS", completed.stdout)
+
+
+REAL_MUTEX = r"Local\ColorProfileModeWatchdogStandalone"
+
+# A mutex that denies everyone, which is what a medium-integrity process meets when the
+# watchdog was started by an elevated install. Created under a test-only name: the real
+# one belongs to a watchdog that may be running on this machine.
+DENIED_MUTEX_PS = r"""
+$sec = New-Object System.Security.AccessControl.MutexSecurity
+$everyone = New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')
+$sec.AddAccessRule((New-Object System.Security.AccessControl.MutexAccessRule($everyone, 'FullControl', 'Deny')))
+$created = $false
+$held = New-Object System.Threading.Mutex($false, '__NAME__', [ref]$created, $sec)
+"""
+
+
+@unittest.skipUnless(POWERSHELL, "PowerShell is unavailable on this machine")
+class ElevatedWatchdogLivenessTests(unittest.TestCase):
+    """A watchdog this account may not open is running, not absent."""
+
+    def run_ps(self, body: str) -> str:
+        with tempfile.TemporaryDirectory() as directory:
+            script = Path(directory) / "probe.ps1"
+            script.write_text(body, encoding="utf-8")
+            completed = subprocess.run(
+                [POWERSHELL, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+                capture_output=True, text=True, timeout=120,
+            )
+        self.assertEqual(0, completed.returncode, completed.stderr)
+        return completed.stdout.strip()
+
+    def names(self) -> tuple[str, str]:
+        import uuid
+        token = uuid.uuid4().hex
+        return rf"Local\VhdrTestDenied-{token}", rf"Local\VhdrTestMissing-{token}"
+
+    def test_the_installer_probe_counts_a_denied_mutex_as_running(self):
+        denied, missing = self.names()
+        function = extract_function(payload(), "Test-WatchdogSingletonHeld")
+        self.assertIn(REAL_MUTEX, function)
+        body = DENIED_MUTEX_PS.replace("__NAME__", denied) + "\n" + "\n".join((
+            function.replace(REAL_MUTEX, denied),
+            "$a = Test-WatchdogSingletonHeld",
+            function.replace(REAL_MUTEX, missing),
+            "$b = Test-WatchdogSingletonHeld",
+            "Write-Output ('{0} {1}' -f $a, $b)",
+        ))
+        self.assertEqual("True False", self.run_ps(body))
+
+    def test_the_uninstaller_notices_a_watchdog_it_could_not_stop(self):
+        denied, missing = self.names()
+        text = (ROOT / "Uninstall-Watchdog.bat").read_text(encoding="utf-8")
+        line = next(l for l in text.splitlines() if "$running=$true; for" in l)
+        probe = line.strip()[1:-len('" ^')]
+        self.assertIn(REAL_MUTEX, probe)
+        body = DENIED_MUTEX_PS.replace("__NAME__", denied) + "\n" + "\n".join((
+            probe.replace(REAL_MUTEX, denied), "$a = $running",
+            probe.replace(REAL_MUTEX, missing), "$b = $running",
+            "Write-Output ('{0} {1}' -f $a, $b)",
+        ))
+        self.assertEqual("True False", self.run_ps(body))
+
+    @unittest.skipUnless(sys.platform == "win32", "OpenMutexW is Windows")
+    def test_the_app_probe_counts_a_denied_mutex_as_running(self):
+        import ctypes
+        import uuid
+        from ctypes import wintypes
+        from unittest import mock
+
+        from sdr_hdr_profile_creator import windows_api
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+        class SecurityAttributes(ctypes.Structure):
+            _fields_ = [("nLength", wintypes.DWORD), ("lpSecurityDescriptor", ctypes.c_void_p),
+                        ("bInheritHandle", wintypes.BOOL)]
+
+        descriptor = ctypes.c_void_p()
+        advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+            wintypes.LPCWSTR, wintypes.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p]
+        self.assertTrue(advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            "D:(D;;GA;;;WD)", 1, ctypes.byref(descriptor), None))
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        kernel32.CreateMutexW.argtypes = [ctypes.POINTER(SecurityAttributes), wintypes.BOOL,
+                                          wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = ctypes.c_void_p
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        name = rf"Local\VhdrTestDenied-{uuid.uuid4().hex}"
+        handle = kernel32.CreateMutexW(ctypes.byref(attributes), False, name)
+        self.assertTrue(handle)
+        self.addCleanup(kernel32.CloseHandle, handle)
+
+        with mock.patch.object(windows_api, "WATCHDOG_SINGLETON_MUTEX", name):
+            self.assertTrue(windows_api.watchdog_is_running())
+        with mock.patch.object(windows_api, "WATCHDOG_SINGLETON_MUTEX", name + "-missing"):
+            self.assertFalse(windows_api.watchdog_is_running())
 
 
 class LogThrottleTests(unittest.TestCase):
