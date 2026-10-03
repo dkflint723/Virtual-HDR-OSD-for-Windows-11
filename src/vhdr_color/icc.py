@@ -157,10 +157,14 @@ def _display_primaries_xyz(
 
 
 # Linear Bradford chromatic adaptation from D65 to the ICC D50 PCS.
+#
+# Computed for D50_XYZ above, the PCS white ICC.1 fixes and the header declares. The
+# matrix this replaced was the widely copied one built for D50 = (0.96422, 1, 0.82521),
+# so it took D65 to a white 3e-4 off in Z from the one the same profile declares.
 D65_TO_D50_CHAD = (
-    1.0478112, 0.0228866, -0.0501270,
-    0.0295424, 0.9904844, -0.0170491,
-    -0.0092345, 0.0150436, 0.7521316,
+    1.0478400, 0.0228979, -0.0501808,
+    0.0295537, 0.9904924, -0.0170663,
+    -0.0092459, 0.0150633, 0.7518389,
 )
 
 
