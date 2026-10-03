@@ -253,7 +253,6 @@ class MainWindow(FluentWidget):
 
         self._first_run = not STATE_PATH.is_file()
         self.state = self._load_last_state()
-        self.state.current_mode = "HDR"
         # live_mode is deliberately not reset here. Live Apply is a preference, and
         # discarding it meant the guide's own step 4 had to be repeated every session:
         # the user turned it on, closed the app, and found it off again with nothing to
@@ -5066,7 +5065,7 @@ class MainWindow(FluentWidget):
             # Filename, not description; see import_profile.
             imported.state.base_profile_name = source.name
         adopted = self._adopt_panel_luminance(imported)
-        self.state.set_mode_state("HDR", imported.state)
+        self.state.hdr = imported.state
         self._base_is_user_selected = True
         binding = self._selected_binding()
         if binding is not None:

@@ -17,8 +17,14 @@ from sdr_hdr_profile_creator.model import ApplicationState, ModeState, normalize
 
 
 class CoreTests(unittest.TestCase):
-    def test_final_state_defaults_to_hdr(self):
-        self.assertEqual(ApplicationState.neutral().current_mode, "HDR")
+    def test_a_state_file_from_an_earlier_build_still_loads(self):
+        """Earlier builds also wrote current_mode and an sdr section, which nothing read."""
+        state = ApplicationState.from_dict({
+            "current_mode": "SDR", "sdr": {"gamma": 2.6}, "hdr": {"gamma": 2.4},
+        })
+        self.assertAlmostEqual(2.4, state.hdr.gamma)
+        self.assertNotIn("sdr", state.to_dict())
+        self.assertNotIn("current_mode", state.to_dict())
 
     def test_removed_controls_are_neutralized(self):
         state = ModeState.from_dict(
@@ -1374,7 +1380,6 @@ class CorruptStateTests(unittest.TestCase):
             "argyll_path": r"C:\Argyll\bin",
             "display_bindings": {"panel-a": {"sdr_profile": "sRGB.icm"}},
         })
-        self.assertEqual(ModeState.neutral("SDR").to_dict(), state.sdr.to_dict())
         self.assertAlmostEqual(2.4, state.hdr.gamma)
         self.assertEqual(r"C:\Argyll\bin", state.argyll_path)
         self.assertEqual("sRGB.icm", state.display_bindings["panel-a"].sdr_profile)
