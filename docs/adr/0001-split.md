@@ -179,7 +179,7 @@ the new boundaries.
 | --- | --- | --- |
 | 0 | Make today's app safe while the split happens | Done: `21346b6` to `e04ac57`; restore verified on hardware. Two tasks from the decision were not done: the watchdog uninstaller still restores nothing (left out deliberately, `abd5f6a`), and Gamma with the correction off still acts on the whole range |
 | 1 | This record, CI, the import-boundary test, a tagged `main`, and the Independent-Flip question | In progress |
-| 2 | vhdr-color as a pure package, with golden vectors; the boundary test passes with no exceptions | Done: `377909d` to `16b4075`. The core is `src/vhdr_color`; `ddc_tune` removed (`b2366db`). Not yet confirmed by a real Nuitka build |
+| 2 | vhdr-color as a pure package, with golden vectors; the boundary test passes with no exceptions | Done: `377909d` to `16b4075`. The core is `src/vhdr_color`; `ddc_tune` removed (`b2366db`). Portable build confirmed on 2 October 2026: built at `cdb4f4e` and launched |
 | 3 | A `.cube` reader, validator and CPU samplers you can trust before any shader exists | |
 | 4 | vhdr-profiles: the store, the audit log and recovery; profile file names unique per user | |
 | 5 | The desktop app rebuilt on the new services, applying MHC2 only | |
