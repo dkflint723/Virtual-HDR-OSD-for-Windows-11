@@ -10,9 +10,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sdr_hdr_profile_creator import curves, greyscale, icc, measure, model
-from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
-from sdr_hdr_profile_creator.greyscale import MAX_CODE_SHIFT, PanelResponse
+from vhdr_color import curves, greyscale, icc, measure, model
+from vhdr_color.gamma_correction import pq_eotf, pq_inverse_eotf
+from vhdr_color.greyscale import MAX_CODE_SHIFT, PanelResponse
 from sdr_hdr_profile_creator.meter import Reading
 
 PEAK = 1000.0

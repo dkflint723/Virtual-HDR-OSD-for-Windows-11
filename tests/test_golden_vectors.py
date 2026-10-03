@@ -20,7 +20,7 @@ import unittest
 from decimal import Decimal, getcontext
 from fractions import Fraction
 
-from sdr_hdr_profile_creator import curves, delta_itp, gamma_correction, icc, patterns
+from vhdr_color import curves, delta_itp, gamma_correction, icc, patterns
 
 getcontext().prec = 50
 
@@ -192,7 +192,7 @@ class GeneratedProfileTests(unittest.TestCase):
     with the creation time and profile ID zeroed by content_digest."""
 
     def digest(self, **changes) -> str:
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         for key, value in changes.items():

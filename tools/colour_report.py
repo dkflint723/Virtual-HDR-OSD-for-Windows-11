@@ -36,8 +36,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from sdr_hdr_profile_creator import delta_itp as itp  # noqa: E402
-from sdr_hdr_profile_creator import measure  # noqa: E402
+from vhdr_color import delta_itp as itp  # noqa: E402
+from vhdr_color import measure  # noqa: E402
 
 DEFAULT_LOG = (
     Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share"))

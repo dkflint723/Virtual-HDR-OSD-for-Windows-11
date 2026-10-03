@@ -33,7 +33,7 @@ try:
         context_for,
         render_overlay,
     )
-    from sdr_hdr_profile_creator.patterns import (
+    from vhdr_color.patterns import (
         GUIDED_SEQUENCE,
         MEASUREMENT_SEQUENCE,
         PATTERNS,
@@ -436,7 +436,7 @@ class MarkerTests(PatternViewTestCase):
     """A pattern with no visible target cannot be aimed at."""
 
     def test_the_gamma_pattern_marks_which_patch_is_the_answer(self):
-        from sdr_hdr_profile_creator.patterns import pattern_by_key
+        from vhdr_color.patterns import pattern_by_key
 
         markers = pattern_by_key("gamma-match").markers(context_for(capability(), 240.0))
         self.assertTrue(any(marker.target for marker in markers))
@@ -444,7 +444,7 @@ class MarkerTests(PatternViewTestCase):
 
     def test_markers_are_rendered_into_the_pattern(self):
         from sdr_hdr_profile_creator.pattern_view import render_markers
-        from sdr_hdr_profile_creator.patterns import pattern_by_key
+        from vhdr_color.patterns import pattern_by_key
 
         result = render_markers(400, 300, pattern_by_key("gamma-match"),
                                 context_for(capability(), 240.0))
@@ -455,13 +455,13 @@ class MarkerTests(PatternViewTestCase):
 
     def test_a_pattern_with_no_markers_renders_none(self):
         from sdr_hdr_profile_creator.pattern_view import render_markers
-        from sdr_hdr_profile_creator.patterns import pattern_by_key
+        from vhdr_color.patterns import pattern_by_key
 
         self.assertIsNone(render_markers(
             400, 300, pattern_by_key("neutral-ramp"), context_for(capability(), 240.0)))
 
     def test_the_probe_marker_reports_the_current_level(self):
-        from sdr_hdr_profile_creator.patterns import pattern_by_key
+        from vhdr_color.patterns import pattern_by_key
 
         from dataclasses import replace
 
@@ -471,7 +471,7 @@ class MarkerTests(PatternViewTestCase):
 
     def test_markers_stay_far_dimmer_than_the_patch(self):
         """A bright label beside a near-black shape moves the threshold being measured."""
-        from sdr_hdr_profile_creator.patterns import MARKER_NITS, OVERLAY_NITS
+        from vhdr_color.patterns import MARKER_NITS, OVERLAY_NITS
 
         self.assertLess(MARKER_NITS, OVERLAY_NITS)
 
@@ -673,14 +673,14 @@ class FullFrameCriterionTests(PatternViewTestCase):
         width, height = win.device_size()
         corner = struct.unpack_from("<4e", frame, 0)[0]
         centre = struct.unpack_from("<4e", frame, ((height // 2) * width + width // 2) * 8)[0]
-        from sdr_hdr_profile_creator.patterns import SHAPE_CONTRAST
+        from vhdr_color.patterns import SHAPE_CONTRAST
 
         self.assertAlmostEqual(centre / corner, SHAPE_CONTRAST, places=2,
                                msg="nothing to separate, so nothing to judge")
 
     def test_it_matches_the_criterion_of_the_step_before_it(self):
         """Two steps that ask the same question should ask it the same way."""
-        from sdr_hdr_profile_creator.patterns import pattern_by_key
+        from vhdr_color.patterns import pattern_by_key
 
         peak = pattern_by_key("peak-white").criterion
         full = pattern_by_key("full-frame-white").criterion
@@ -720,7 +720,7 @@ class SummaryPlacementTests(PatternViewTestCase):
 
     def test_the_finished_text_is_brighter_than_the_measuring_overlay(self):
         from sdr_hdr_profile_creator.pattern_view import SUMMARY_NITS
-        from sdr_hdr_profile_creator.patterns import OVERLAY_NITS
+        from vhdr_color.patterns import OVERLAY_NITS
 
         self.assertGreater(SUMMARY_NITS, OVERLAY_NITS)
 
@@ -764,7 +764,7 @@ class MeasuredPeakFeedbackTests(PatternViewTestCase):
         and its surround together, so they separate until the signal clips -- at the same
         level a small window clips. Measured on one panel: 1010 for both, against 265
         declared sustained."""
-        from sdr_hdr_profile_creator.patterns import MEASUREMENT_SEQUENCE
+        from vhdr_color.patterns import MEASUREMENT_SEQUENCE
 
         self.assertNotIn("full-frame-white", MEASUREMENT_SEQUENCE)
         self.assertNotIn("full-frame-white", GUIDED_SEQUENCE)
@@ -827,7 +827,7 @@ class LevelWalkingTests(PatternViewTestCase):
 
     def test_it_starts_in_the_middle_of_the_range(self):
         """Neither end is a good place to begin: one blinds, the other shows nothing."""
-        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+        from vhdr_color.patterns import tone_tracking_levels
 
         win = self.tracking()
         levels = tone_tracking_levels(win._context)
@@ -842,7 +842,7 @@ class LevelWalkingTests(PatternViewTestCase):
         self.assertAlmostEqual(win.probe_nits, start, places=3)
 
     def test_the_walk_stops_at_both_ends_rather_than_wrapping(self):
-        from sdr_hdr_profile_creator.patterns import tone_tracking_levels
+        from vhdr_color.patterns import tone_tracking_levels
 
         win = self.tracking()
         levels = tone_tracking_levels(win._context)

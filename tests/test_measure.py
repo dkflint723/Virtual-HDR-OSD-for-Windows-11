@@ -11,7 +11,7 @@ from __future__ import annotations
 import struct
 import unittest
 
-from sdr_hdr_profile_creator.measure import (
+from vhdr_color.measure import (
     estimated_seconds,
     greyscale_levels,
     sees_placement_target,
@@ -43,9 +43,9 @@ from sdr_hdr_profile_creator.measure import (
     validate,
     white_balance_gains,
 )
-from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf
+from vhdr_color.gamma_correction import pq_inverse_eotf
 from sdr_hdr_profile_creator.meter import MeterError, Reading
-from sdr_hdr_profile_creator.patterns import PatternContext, measurement_frame
+from vhdr_color.patterns import PatternContext, measurement_frame
 
 
 def reading(Y: float, x: float, y: float) -> Reading:
@@ -1151,7 +1151,7 @@ class DisplayDriftTests(unittest.TestCase):
         self.assertIn("profile went from A.icm to B.icm", str(caught.exception))
 
     def test_sustained_is_refused_before_the_first_reading_when_not_in_hdr(self):
-        from sdr_hdr_profile_creator.measure import sustained
+        from vhdr_color.measure import sustained
 
         stable = reading(400.0, 0.3130, 0.3290)
         with self.assertRaises(MeasurementError) as caught:
@@ -1185,7 +1185,7 @@ class DisplayDriftTests(unittest.TestCase):
         self.assertEqual(list(self.ORDER[:3]), self.delivered)
 
     def test_a_mode_drop_is_said_in_words(self):
-        from sdr_hdr_profile_creator.measure import describe_drift
+        from vhdr_color.measure import describe_drift
 
         self.assertEqual(
             "mode went from HDR to SDR",
@@ -1203,7 +1203,7 @@ class DisplayDriftTests(unittest.TestCase):
         """One failed Windows call in the middle of a four-minute run is far likelier
         than the display changing at exactly that moment, and refusing the run over
         it would cost the user the whole run for nothing."""
-        from sdr_hdr_profile_creator.measure import describe_drift
+        from vhdr_color.measure import describe_drift
 
         self.assertEqual("", describe_drift({"profile": "A.icm"}, {"profile": None}))
         self.assertEqual("", describe_drift({"profile": None}, {"profile": "A.icm"}))
@@ -1217,7 +1217,7 @@ class DisplayDriftTests(unittest.TestCase):
         self.assertEqual(list(self.ORDER), self.delivered)
 
     def test_sustained_is_refused_when_the_display_changes_while_held(self):
-        from sdr_hdr_profile_creator.measure import sustained
+        from vhdr_color.measure import sustained
 
         stable = reading(400.0, 0.3130, 0.3290)
         probe = self.flipping_probe(1, {"mode": "HDR"}, {"mode": "SDR"})
@@ -1233,7 +1233,7 @@ class DisplayDriftTests(unittest.TestCase):
         self.assertEqual([0], seen)
 
     def test_sustained_completes_when_the_display_holds_still(self):
-        from sdr_hdr_profile_creator.measure import sustained
+        from vhdr_color.measure import sustained
 
         stable = reading(400.0, 0.3130, 0.3290)
         result = sustained(self.display, lambda: stable, peak_nits=1000.0,

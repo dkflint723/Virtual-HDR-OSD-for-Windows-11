@@ -32,7 +32,7 @@ import struct
 from ctypes import POINTER, byref, c_long, c_ubyte, c_uint, c_void_p, wintypes
 from dataclasses import dataclass
 
-from .gamma_correction import SCRGB_WHITE_NITS
+from vhdr_color.gamma_correction import SCRGB_WHITE_NITS
 
 IS_WINDOWS = hasattr(ctypes, "WinDLL")
 

@@ -7,13 +7,13 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from sdr_hdr_profile_creator.curves import build_transform
-from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma
+from vhdr_color.curves import build_transform
+from vhdr_color.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma
 from unittest import mock
 
-from sdr_hdr_profile_creator import icc as icc_module
-from sdr_hdr_profile_creator.icc import _parse_mhc2, _read_tags, build_profile, content_digest, import_profile
-from sdr_hdr_profile_creator.model import ApplicationState, ModeState, normalize_primaries
+from vhdr_color import icc as icc_module
+from vhdr_color.icc import _parse_mhc2, _read_tags, build_profile, content_digest, import_profile
+from vhdr_color.model import ApplicationState, ModeState, normalize_primaries
 
 
 class CoreTests(unittest.TestCase):
@@ -387,9 +387,9 @@ class PanelGamutAgreementTests(unittest.TestCase):
         A generated profile is built from D65 primaries, so reading it back must return
         something near D65 sRGB rather than the D50-adapted numbers actually on disk.
         """
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile, profile_primaries_xy
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile, profile_primaries_xy
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("SDR")
         data = build_profile("SDR", state, build_transform(state, hdr=False))
@@ -401,31 +401,31 @@ class PanelGamutAgreementTests(unittest.TestCase):
         self.assertGreater(red[0], 0.55, "red x collapsed; the D50 adaptation was not undone")
 
     def test_a_profile_without_colorants_reports_nothing(self):
-        from sdr_hdr_profile_creator.icc import profile_primaries_xy
+        from vhdr_color.icc import profile_primaries_xy
 
         self.assertIsNone(profile_primaries_xy(b"not an icc profile at all"))
 
     def test_matching_profile_and_panel_agree(self):
-        from sdr_hdr_profile_creator.icc import primaries_disagree
+        from vhdr_color.icc import primaries_disagree
 
         self.assertEqual(primaries_disagree(self.P3, self.P3), 0.0)
 
     def test_measurement_noise_does_not_trip_the_check(self):
         """A real matching pair agrees to about 0.00005 xy; that must not alarm."""
-        from sdr_hdr_profile_creator.icc import primaries_disagree
+        from vhdr_color.icc import primaries_disagree
 
         nudged = tuple((x + 0.00005, y - 0.00005) for x, y in self.P3)
         self.assertEqual(primaries_disagree(self.P3, nudged), 0.0)
 
     def test_the_smallest_real_gamut_change_is_caught(self):
         """DCI-P3 to BT.709 is the mildest switch a monitor OSD offers."""
-        from sdr_hdr_profile_creator.icc import primaries_disagree
+        from vhdr_color.icc import primaries_disagree
 
         worst = primaries_disagree(self.P3, self.BT709)
         self.assertGreater(worst, 0.03)
 
     def test_the_threshold_sits_between_noise_and_real_change(self):
-        from sdr_hdr_profile_creator.icc import PRIMARY_MISMATCH_THRESHOLD_XY
+        from vhdr_color.icc import PRIMARY_MISMATCH_THRESHOLD_XY
 
         self.assertGreater(PRIMARY_MISMATCH_THRESHOLD_XY, 0.0005, "would fire on noise")
         self.assertLess(PRIMARY_MISMATCH_THRESHOLD_XY, 0.03, "would miss a P3 to BT.709 switch")
@@ -637,7 +637,7 @@ class ChadlessBaseTests(unittest.TestCase):
         import tempfile
         from pathlib import Path
 
-        from sdr_hdr_profile_creator import icc
+        from vhdr_color import icc
 
         self.icc = icc
         self.base = Path(tempfile.mkdtemp(prefix="vhdr-base-")) / "base.icm"
@@ -670,8 +670,8 @@ class ChadlessBaseTests(unittest.TestCase):
     def build_on(self, with_chad: bool) -> bytes:
         from unittest import mock
 
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.base_profile = str(self.base)
@@ -856,8 +856,8 @@ class CorrectionTargetGammaTests(unittest.TestCase):
 
     @staticmethod
     def output_nits(state, nits, white=200.0):
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.gamma_correction import pq_eotf, pq_inverse_eotf
+        from vhdr_color.curves import build_transform
+        from vhdr_color.gamma_correction import pq_eotf, pq_inverse_eotf
 
         transform = build_transform(state, hdr=True, sdr_white_nits=white)
         position = pq_inverse_eotf(nits) * (len(transform.red) - 1)
@@ -867,7 +867,7 @@ class CorrectionTargetGammaTests(unittest.TestCase):
         return pq_eotf(value)
 
     def corrected(self, gamma):
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.sdr_gamma_correction = "200 nits / Brightness 30"
@@ -901,7 +901,7 @@ class CorrectionTargetGammaTests(unittest.TestCase):
         Not an independent reference: both sides use gamma_correction, so this checks the
         wiring -- the slider reaching the correction as its target, and the LUT sampling
         it -- rather than the maths itself."""
-        from sdr_hdr_profile_creator.gamma_correction import (
+        from vhdr_color.gamma_correction import (
             pq_eotf,
             pq_inverse_eotf,
             transform_piecewise_srgb_to_gamma,
@@ -916,7 +916,7 @@ class CorrectionTargetGammaTests(unittest.TestCase):
 
     def test_gamma_still_works_as_a_plain_power_with_the_correction_off(self):
         """With nothing to fold a target into, it has to stay an independent control."""
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.sdr_gamma_correction = "Off"
@@ -933,7 +933,7 @@ class RetiredCorrectionOptionTests(unittest.TestCase):
     already built against one of them resolves to."""
 
     def test_they_are_no_longer_offered(self):
-        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+        from vhdr_color.gamma_correction import CORRECTION_OPTIONS
 
         for name in ("Unspecified", "SDR"):
             with self.subTest(option=name):
@@ -945,7 +945,7 @@ class RetiredCorrectionOptionTests(unittest.TestCase):
         self.assertEqual(resolve_white_level("Unspecified", None), 200.0)
 
     def test_the_offered_options_all_resolve(self):
-        from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+        from vhdr_color.gamma_correction import CORRECTION_OPTIONS
 
         for option in CORRECTION_OPTIONS:
             with self.subTest(option=option):
@@ -1180,13 +1180,13 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
         return state
 
     def shaped_nits(self, state, nits):
-        from sdr_hdr_profile_creator.curves import _shape_curve
-        from sdr_hdr_profile_creator.gamma_correction import pq_eotf
+        from vhdr_color.curves import _shape_curve
+        from vhdr_color.gamma_correction import pq_eotf
 
         return pq_eotf(_shape_curve(pq_inverse_eotf(nits), state, True, self.WHITE))
 
     def test_highlights_are_exact_identity_at_every_trim_while_correcting(self):
-        from sdr_hdr_profile_creator.curves import _shape_curve
+        from vhdr_color.curves import _shape_curve
 
         for contrast in self.TRIMS:
             for brightness in self.TRIMS:
@@ -1212,8 +1212,8 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
         """The documented contract, checked against the formula written out by hand.
         Shaping relative luminance after the power instead keeps every property above
         and moves the pivot, so only this can tell the two apart."""
-        from sdr_hdr_profile_creator.curves import _brightness_lift, _contrast_curve
-        from sdr_hdr_profile_creator.gamma_correction import srgb_inverse_eotf
+        from vhdr_color.curves import _brightness_lift, _contrast_curve
+        from vhdr_color.gamma_correction import srgb_inverse_eotf
 
         state = self.state(contrast=20.0, brightness=10.0)
         for nits in (5.0, 50.0, 150.0):
@@ -1223,7 +1223,7 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
                 self.assertAlmostEqual(self.shaped_nits(state, nits), expected, delta=expected * 1e-6)
 
     def test_diffuse_white_stays_continuous_at_every_trim(self):
-        from sdr_hdr_profile_creator.curves import _shape_curve
+        from vhdr_color.curves import _shape_curve
 
         below = pq_inverse_eotf(self.WHITE * (1.0 - 1e-6))
         above = pq_inverse_eotf(self.WHITE * (1.0 + 1e-6))
@@ -1238,7 +1238,7 @@ class CorrectionFoldsToneControlsTests(unittest.TestCase):
                     )
 
     def test_the_curve_stays_monotone_at_every_trim_while_correcting(self):
-        from sdr_hdr_profile_creator.curves import _shape_curve
+        from vhdr_color.curves import _shape_curve
 
         for contrast in (-30.0, 30.0):
             for brightness in (-30.0, 30.0):

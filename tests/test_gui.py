@@ -27,9 +27,9 @@ try:
     from sdr_hdr_profile_creator import app as app_module
     from sdr_hdr_profile_creator.controls import ControlSpec, SliderControl
     from sdr_hdr_profile_creator.dialogs import GUIDE_STEPS, HELP_SECTIONS
-    from sdr_hdr_profile_creator.gamma_correction import CORRECTION_OPTIONS
+    from vhdr_color.gamma_correction import CORRECTION_OPTIONS
     from sdr_hdr_profile_creator.edid import PanelMetadata
-    from sdr_hdr_profile_creator.model import ApplicationState, normalize_primaries
+    from vhdr_color.model import ApplicationState, normalize_primaries
     from sdr_hdr_profile_creator.windows_api import DisplayInfo
 
     GUI_AVAILABLE = True
@@ -620,9 +620,9 @@ class RestoreWindowsProfileTests(WindowTestCase):
         """Restored, the Windows default is not ours, and the SDR->HDR path imports the
         default into the editor. A game flipping the display out of HDR and back would
         otherwise replace every slider with Windows' profile."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         base = ModeState.neutral("HDR")
         (self.color_dir / "BaseCalibration.icm").write_bytes(
@@ -794,9 +794,9 @@ class EditStateTests(WindowTestCase):
 
     def test_revert_to_base_reloads_the_imported_file_and_drops_edits(self):
         base = self.temp / "base.icm"
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         pristine = ModeState.neutral("HDR")
         base.write_bytes(build_profile("HDR", pristine, build_transform(pristine, hdr=True)))
@@ -843,7 +843,7 @@ class ApplyPipelineTests(WindowTestCase):
         """
         import datetime as real_datetime
 
-        from sdr_hdr_profile_creator import icc
+        from vhdr_color import icc
 
         self.apply()
         self.installed.clear()
@@ -970,9 +970,9 @@ class ApplyPipelineTests(WindowTestCase):
         self.assertEqual(self.removed, first, "cleanup repeated for the same display")
 
     def make_profile(self, name: str) -> Path:
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.profile_name = name
@@ -1329,9 +1329,9 @@ class ProfileBindingTests(WindowTestCase):
         content, so the signature is renamed to a harmless one. Without this
         every fixture profile would look app-generated.
         """
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = state if state is not None else ModeState.neutral("HDR")
         data = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
@@ -1406,7 +1406,7 @@ class ProfileBindingTests(WindowTestCase):
         self.assertEqual(self.associations, [])
 
     def test_choosing_an_hdr_profile_loads_it_as_the_base_immediately(self):
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.peak_luminance_nits = 640.0
@@ -1423,9 +1423,9 @@ class ProfileBindingTests(WindowTestCase):
 
     def test_importing_a_saved_copy_of_our_own_profile_restores_exact_settings(self):
         """Export Copy then Import is how a tuned result is kept; it must round-trip."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.contrast = 4.0
@@ -1442,9 +1442,9 @@ class ProfileBindingTests(WindowTestCase):
 
     def test_our_own_profiles_are_not_offered_as_bases_under_any_name(self):
         """Older releases installed working profiles as <base>_HDR.icm."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         (self.color_dir / "HDR Calibrated Profile_HDR.icm").write_bytes(
@@ -1458,9 +1458,9 @@ class ProfileBindingTests(WindowTestCase):
 
     def test_a_pin_naming_one_of_our_own_profiles_is_dropped(self):
         """Such a pin outranks the Windows default forever, freezing the base."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         (self.color_dir / "Stale_HDR.icm").write_bytes(
@@ -1540,7 +1540,7 @@ class ProfileBindingTests(WindowTestCase):
         self.assertNotIn(self.display.key, stored)
 
     def test_bindings_round_trip_through_the_saved_state_file(self):
-        from sdr_hdr_profile_creator.model import ApplicationState
+        from vhdr_color.model import ApplicationState
 
         self.choose_profile(self.window.sdr_profile_combo, "Calman_SDR_Calibrated.icm")
         self.window._save_state_now()
@@ -1646,8 +1646,8 @@ class MeasurementRecordingTests(WindowTestCase):
         """The point of measuring: MHC2 carries min and peak, lumi carries full frame."""
         import struct
 
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import _read_tags, build_profile
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import _read_tags, build_profile
 
         self.window._record_measurement("black-level", 0.0012)
         self.window._record_measurement("peak-white", 1043.0)
@@ -1670,9 +1670,9 @@ class PanelGamutWarningTests(WindowTestCase):
 
     def setUp(self):
         super().setUp()
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         base = self.color_dir / "PanelBase.icc"
@@ -1695,7 +1695,7 @@ class PanelGamutWarningTests(WindowTestCase):
         return mock.patch.object(app_module, "capability_for_device_name", lambda _name: capability)
 
     def described_primaries(self):
-        from sdr_hdr_profile_creator.icc import profile_primaries_xy
+        from vhdr_color.icc import profile_primaries_xy
 
         return profile_primaries_xy(Path(self.window.state.hdr.base_profile).read_bytes())[:3]
 
@@ -2497,7 +2497,7 @@ class ApplyFromPatternViewTests(WindowTestCase):
     def test_the_measured_values_reach_the_installed_profile(self):
         import struct
 
-        from sdr_hdr_profile_creator.icc import _read_tags
+        from vhdr_color.icc import _read_tags
 
         self.window._record_measurement("black-level", 0.0012)
         self.window._record_measurement("peak-white", 1043.0)
@@ -2532,9 +2532,9 @@ class PanelLuminanceFallbackTests(WindowTestCase):
 
     def plain_profile(self, name="Calman_Style.icm"):
         """A profile with colorimetry but no MHC2, as a third-party ICC would be."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         data = bytearray(build_profile("HDR", state, build_transform(state, hdr=True)))
@@ -2571,9 +2571,9 @@ class PanelLuminanceFallbackTests(WindowTestCase):
 
     def test_a_profile_carrying_mhc2_is_left_alone(self):
         """Its own measured values outrank anything the panel claims about itself."""
-        from sdr_hdr_profile_creator.curves import build_transform
-        from sdr_hdr_profile_creator.icc import build_profile
-        from sdr_hdr_profile_creator.model import ModeState
+        from vhdr_color.curves import build_transform
+        from vhdr_color.icc import build_profile
+        from vhdr_color.model import ModeState
 
         state = ModeState.neutral("HDR")
         state.peak_luminance_nits = 640.0
@@ -2725,7 +2725,7 @@ class RefusedBalanceTests(WindowTestCase):
                                    "measured white. Something between the signal and the "
                                    "panel is not linear, so a white balance derived from "
                                    "these would be wrong.")):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         return Calibration(
             peak_nits=450.0,
@@ -2761,7 +2761,7 @@ class RefusedBalanceTests(WindowTestCase):
         self.assertNotIn("Ready", self.window.status_label.text())
 
     def test_a_solved_run_says_nothing_about_a_refusal(self):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         solved = Calibration(
             peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
@@ -2783,7 +2783,7 @@ class ShapingProvenanceTests(WindowTestCase):
     """
 
     def measure(self):
-        from sdr_hdr_profile_creator import measure as measure_mod
+        from vhdr_color import measure as measure_mod
         weights = (0.2126, 0.7152, 0.0722)
         points = []
         levels = measure_mod.greyscale_levels(1000.0)
@@ -2926,8 +2926,8 @@ class MeasurementIntentTests(WindowTestCase):
         self.window.state.hdr.sdr_gamma_correction = "Auto (Recommended)"
         before = self.window._measurement_intent(1000.0)
 
-        from sdr_hdr_profile_creator import greyscale
-        from sdr_hdr_profile_creator.gamma_correction import pq_eotf
+        from vhdr_color import greyscale
+        from vhdr_color.gamma_correction import pq_eotf
         points = 24
         weights = (0.2126, 0.7152, 0.0722)
         samples = {name: [] for name in ("r", "g", "b")}
@@ -2960,7 +2960,7 @@ class RampReversalNoteTests(WindowTestCase):
     """
 
     def calibration(self, reversal):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         return Calibration(
             peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
@@ -2997,7 +2997,7 @@ class SustainedMeasurementTests(WindowTestCase):
     """
 
     def result(self, nits=243.0, readings=(300.0, 250.0, 243.0), settled=True):
-        from sdr_hdr_profile_creator.measure import Sustained
+        from vhdr_color.measure import Sustained
         return Sustained(nits=nits, readings=tuple(readings), settled=settled)
 
     def test_the_button_is_offered_beside_the_number_it_sets(self):
@@ -3051,7 +3051,7 @@ class AdditivityNoteTests(WindowTestCase):
     """Channels that do not add up are solved through, and said out loud."""
 
     def calibration(self, error):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         return Calibration(
             peak_nits=450.0, black_nits=0.0, white_xy=(0.3127, 0.3290),
@@ -3094,7 +3094,7 @@ class MeasuredResponseTests(WindowTestCase):
         return tuple(columns)
 
     def calibration(self, ramp=True):
-        from sdr_hdr_profile_creator import measure
+        from vhdr_color import measure
 
         points = []
         if ramp:
@@ -3467,7 +3467,7 @@ class MeterIntegrationTests(WindowTestCase):
 
     def calibration(self, peak=454.25, black=0.0, gains=(1.0, 1.0, 1.0),
                     white_xy=(0.3270, 0.3295)):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         return Calibration(
             peak_nits=peak,
@@ -4545,7 +4545,7 @@ class MeasurementCompositionTests(WindowTestCase):
     """A second measurement must verify the first, not undo it."""
 
     def calibration(self, gains=(1.0, 1.0, 1.0), white_xy=(0.3127, 0.3290)):
-        from sdr_hdr_profile_creator.measure import Calibration
+        from vhdr_color.measure import Calibration
 
         return Calibration(
             peak_nits=450.49, black_nits=0.0,
@@ -5735,7 +5735,7 @@ class DisplayProbeTests(WindowTestCase):
         display. get_default_profile raises for it -- the same base type as a failed
         call -- and treating both as "unread" would swallow exactly the event the probe
         exists to catch."""
-        from sdr_hdr_profile_creator.measure import describe_drift
+        from vhdr_color.measure import describe_drift
 
         probe = self.window._display_state_probe(self.display)
 

@@ -46,20 +46,21 @@ from qfluentwidgets import (
 )
 
 from .controls import Card, ControlSpec, SliderControl
-from .curves import build_transform
+from vhdr_color.curves import build_transform
 from .dialogs import GuideDialog, HelpDialog
-from .gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
+from vhdr_color.gamma_correction import CORRECTION_OPTIONS, pq_eotf, pq_inverse_eotf, resolve_white_level
 from . import __version__
 from . import ddc
-from . import delta_itp
-from . import greyscale
+from vhdr_color import delta_itp
+from vhdr_color import greyscale
 from .hotkeys import GammaHotkeyListener
-from . import elevation, measure, measure_view
+from . import elevation, measure_view
+from vhdr_color import measure
 from .edid import read_panel_metadata
 from .meter import MeterError, find_spotread, list_instruments, read_emissive
 from .hdr_display import capability_for_device_name
 from .pattern_view import ControlBinding, PatternWindow
-from .icc import (
+from vhdr_color.icc import (
     build_profile,
     content_digest,
     import_profile,
@@ -67,7 +68,7 @@ from .icc import (
     primaries_disagree,
     profile_primaries_xy,
 )
-from .model import ApplicationState, DisplayBinding, DisplayMode, ModeState, normalize_primaries
+from vhdr_color.model import ApplicationState, DisplayBinding, DisplayMode, ModeState, normalize_primaries
 from .windows_api import (
     DisplayInfo,
     enumerate_displays,

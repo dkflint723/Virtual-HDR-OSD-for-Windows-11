@@ -28,7 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The types belong to the colour core, which has to stay importable without Argyll.
-from .measure import MeterError, Reading
+from vhdr_color.measure import MeterError, Reading
 
 # Argyll ships these as plain executables; the name never varies by version.
 SPOTREAD_NAMES = ("spotread.exe", "spotread")

@@ -22,13 +22,13 @@ from typing import Callable
 from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import QWidget
 
-from . import measure
+from vhdr_color import measure
 from .edid import PanelMetadata
 from .hdr_display import DisplayCapability, HdrDisplayError, HdrSurface
-from .measure import Calibration, MeasurementStep
+from vhdr_color.measure import Calibration, MeasurementStep
 from .meter import Reading
 from .pattern_view import context_for, dim_cursor
-from .patterns import measurement_frame, placement_frame
+from vhdr_color.patterns import measurement_frame, placement_frame
 
 
 class MeasureWindow(QWidget):

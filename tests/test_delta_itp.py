@@ -16,8 +16,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from sdr_hdr_profile_creator import delta_itp as itp  # noqa: E402
-from sdr_hdr_profile_creator.measure import D65_XY as MEASURE_D65  # noqa: E402
+from vhdr_color import delta_itp as itp  # noqa: E402
+from vhdr_color.measure import D65_XY as MEASURE_D65  # noqa: E402
 
 
 class WhitePointTests(unittest.TestCase):
