@@ -628,14 +628,25 @@ class LauncherBehaviourTests(unittest.TestCase):
         self.assertIsNotNone(found, "the Launcher.vbs here-string is gone")
         return found.group(1)
 
-    def outcome_for(self, exit_code: int, budget: float | None = None) -> str:
+    def installer_encoding(self) -> str:
+        """The Python codec for the encoding the installer writes Launcher.vbs in."""
+        raw = (ROOT / "2- OPTIONAL - Install-Watchdog.bat").read_text(encoding="utf-8", errors="replace")
+        found = re.search(r"Set-Content -LiteralPath \$LauncherPath -Value \$vbs -Encoding (\w+)", raw)
+        self.assertIsNotNone(found, "the Launcher.vbs write is gone")
+        # What Windows PowerShell 5.1 writes for each name.
+        return {"Unicode": "utf-16", "ASCII": "ascii", "UTF8": "utf-8-sig"}[found.group(1)]
+
+    def outcome_for(self, exit_code: int, budget: float | None = None,
+                    folder: str = "", encoding: str = "ascii") -> str:
         """"stood-down" or "still-looping" for a watchdog that exits with exit_code."""
         import subprocess
         import tempfile
 
         workspace = Path(tempfile.mkdtemp(prefix="vhdr-launcher-"))
         self.addCleanup(shutil.rmtree, workspace, True)
-        stub = workspace / "stub.cmd"
+        stub_dir = workspace / folder
+        stub_dir.mkdir(exist_ok=True)
+        stub = stub_dir / "stub.cmd"
         stub.write_text(f"@echo off\r\nexit /b {exit_code}\r\n", encoding="ascii")
 
         replacement = f'shell.Run("""{stub}""", 0, True)'
@@ -647,7 +658,8 @@ class LauncherBehaviourTests(unittest.TestCase):
         self.assertIn("stub.cmd", body, "failed to point the launcher at the stub")
 
         launcher = workspace / "Launcher.vbs"
-        launcher.write_text(body, encoding="ascii")
+        # errors="replace" is what PowerShell's ASCII does to a character it cannot hold.
+        launcher.write_text(body, encoding=encoding, errors="replace")
         try:
             subprocess.run(
                 ["cscript.exe", "//B", "//Nologo", str(launcher)],
@@ -670,6 +682,17 @@ class LauncherBehaviourTests(unittest.TestCase):
         instance can take over. Standing down on it would leave nothing running --
         the opposite failure, and a worse one."""
         self.assertEqual("still-looping", self.outcome_for(9))
+
+    def test_a_profile_folder_with_non_ascii_characters_still_runs_the_watchdog(self):
+        """The launcher names Watchdog.ps1 by full path, under the user's profile. It was
+        written as ASCII, which turns every non-ASCII character into '?', so on such an
+        account it could not find the script and the watchdog never ran. Exit 9 keeps a
+        working launcher looping; one that cannot find its target errors out at once."""
+        folder = "José 中"
+        self.assertEqual("stood-down", self.outcome_for(9, folder=folder, encoding="ascii"),
+                         "control: an ASCII launcher must fail here, or this test proves nothing")
+        self.assertEqual("still-looping",
+                         self.outcome_for(9, folder=folder, encoding=self.installer_encoding()))
 
 
 class StandaloneArchiveTests(unittest.TestCase):
