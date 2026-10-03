@@ -35,6 +35,22 @@ def normalize_primaries(values: Any) -> tuple[float, ...]:
     return numbers
 
 
+def _text(value: Any, default: str = "") -> str:
+    """A text field from the hand-editable state file.
+
+    ``str()`` turned a null into the text "None", which then named a profile, a
+    path or a display that does not exist. Anything that is not a string is the
+    default.
+    """
+    return value if isinstance(value, str) else default
+
+
+def _flag(value: Any, default: bool) -> bool:
+    """An on/off field from the state file. ``bool("false")`` is True, so only a JSON
+    true or false is taken as one; anything else is the default."""
+    return value if isinstance(value, bool) else default
+
+
 @dataclass(slots=True)
 class ModeState:
     profile_name: str
@@ -233,7 +249,7 @@ class ModeState:
         merged["high_lights"] = 0.0
         merged["gamma_conversion"] = "None"
         allowed_corrections = {"Off", "Auto (Recommended)", "100 nits / Brightness 5", "200 nits / Brightness 30", "300 nits / Brightness 55", "400 nits / Brightness 80", "Unspecified", "SDR"}
-        merged["sdr_gamma_correction"] = str(merged.get("sdr_gamma_correction", "Off"))
+        merged["sdr_gamma_correction"] = _text(merged.get("sdr_gamma_correction"), "Off")
         if merged["sdr_gamma_correction"] not in allowed_corrections:
             merged["sdr_gamma_correction"] = "Off"
 
@@ -243,10 +259,10 @@ class ModeState:
         merged["full_frame_luminance_nits"] = min(
             merged["full_frame_luminance_nits"], merged["peak_luminance_nits"]
         )
-        merged["profile_name"] = str(merged.get("profile_name") or base.profile_name)[:160]
-        merged["imported_profile"] = str(merged.get("imported_profile", ""))
-        merged["base_profile"] = str(merged.get("base_profile", ""))
-        merged["base_profile_name"] = str(merged.get("base_profile_name", ""))[:240]
+        merged["profile_name"] = (_text(merged.get("profile_name")) or base.profile_name)[:160]
+        merged["imported_profile"] = _text(merged.get("imported_profile"))
+        merged["base_profile"] = _text(merged.get("base_profile"))
+        merged["base_profile_name"] = _text(merged.get("base_profile_name"))[:240]
         # base_profile is the authoritative full path, so the name is always its
         # basename. Deriving it repairs state written by earlier versions, which
         # stored the ICC description here instead: Windows HDR Calibration describes
@@ -287,9 +303,9 @@ class DisplayBinding:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DisplayBinding":
         return cls(
-            sdr_profile=str(data.get("sdr_profile", ""))[:260],
-            hdr_profile=str(data.get("hdr_profile", ""))[:260],
-            display_label=str(data.get("display_label", ""))[:120],
+            sdr_profile=_text(data.get("sdr_profile"))[:260],
+            hdr_profile=_text(data.get("hdr_profile"))[:260],
+            display_label=_text(data.get("display_label"))[:120],
         )
 
 
@@ -355,19 +371,19 @@ class ApplicationState:
         # Files from earlier builds also carry "current_mode" and an "sdr" section.
         # Neither was ever read back, and both are ignored here.
         return cls(
-            follow_windows_mode=bool(data.get("follow_windows_mode", True)),
-            auto_refresh_after_mode_change=bool(data.get("auto_refresh_after_mode_change", True)),
+            follow_windows_mode=_flag(data.get("follow_windows_mode"), True),
+            auto_refresh_after_mode_change=_flag(data.get("auto_refresh_after_mode_change"), True),
             # live_mode was hardcoded False here, and forced False again in the window's
             # constructor, so the preference was discarded twice over and to_dict wrote
             # a field nothing ever read back. Turning Live Apply on had to be repeated
             # every session, which is the guide's own step 4.
-            live_mode=bool(data.get("live_mode", False)),
-            selected_display_key=str(data.get("selected_display_key", "")),
+            live_mode=_flag(data.get("live_mode"), False),
+            selected_display_key=_text(data.get("selected_display_key")),
             # One malformed section costs that section, not the whole file: dict() of a
             # string raised, and the loader then threw away every binding and setting.
             hdr=ModeState.from_dict(data.get("hdr"), "HDR"),
             display_bindings=cls._bindings_from_dict(data.get("display_bindings")),
-            argyll_path=str(data.get("argyll_path", "") or ""),
+            argyll_path=_text(data.get("argyll_path")),
         )
 
     @staticmethod

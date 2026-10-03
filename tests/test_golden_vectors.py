@@ -138,10 +138,12 @@ class BradfordTests(unittest.TestCase):
         self.assertEqual(tuple(float(v) for v in self.LAM), tuple(curves._BRADFORD))
 
     def test_d65_to_d50_is_the_bradford_adaptation(self):
-        """Computed from the white points the matrix was built for, (0.95047, 1, 1.08883)
-        and (0.96422, 1, 0.82521), with exact fractions."""
+        """Computed with exact fractions from D65 (0.95047, 1, 1.08883) to the PCS white
+        the header declares, (0.9642, 1, 0.8249). Re-recorded on 3 October 2026: the
+        matrix used to be built for (0.96422, 1, 0.82521), so it took D65 to a white
+        0.0003 off in Z from the one the same profile declared."""
         src = (Fraction("0.95047"), Fraction(1), Fraction("1.08883"))
-        dst = (Fraction("0.96422"), Fraction(1), Fraction("0.82521"))
+        dst = (Fraction("0.9642"), Fraction(1), Fraction("0.8249"))
         lms = lambda xyz: tuple(sum(self.LAM[3 * r + k] * xyz[k] for k in range(3)) for r in range(3))
         s, t = lms(src), lms(dst)
         scale = (t[0] / s[0], 0, 0, 0, t[1] / s[1], 0, 0, 0, t[2] / s[2])
