@@ -38,7 +38,6 @@ PLATFORM_STDLIB = frozenset({"ctypes", "winreg", "msvcrt", "_winapi", "winsound"
 
 # Cut in Phase 2 of the ADR. Written as crossings() reports them.
 KNOWN_CROSSINGS = {
-    "measure": [".meter"],
     "patterns": [".hdr_display"],
 }
 
@@ -111,10 +110,7 @@ class ColourCoreBoundaryTests(unittest.TestCase):
     def test_model(self):
         self.assertStaysInTheCore("model")
 
-    @unittest.expectedFailure
     def test_measure(self):
-        """Imports MeterError and Reading from meter, which runs Argyll's spotread as a
-        subprocess. Phase 2 moves both types into the core."""
         self.assertStaysInTheCore("measure")
 
     @unittest.expectedFailure

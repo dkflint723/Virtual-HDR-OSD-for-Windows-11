@@ -46,7 +46,31 @@ from typing import Callable, Protocol
 
 from .gamma_correction import pq_eotf, pq_inverse_eotf
 from .greyscale import PanelResponse
-from .meter import MeterError, Reading
+
+
+class MeterError(RuntimeError):
+    """A meter reading could not be taken. The message is shown to the user."""
+
+
+@dataclass(frozen=True, slots=True)
+class Reading:
+    """One emissive measurement, in absolute units.
+
+    ``Y`` is luminance in cd/m² -- nits -- because spotread was asked for an
+    emissive absolute reading. The same number in a relative mode would be a
+    percentage of white, which is why the mode is never left to a default.
+    """
+
+    X: float
+    Y: float
+    Z: float
+    x: float
+    y: float
+
+    @property
+    def nits(self) -> float:
+        return self.Y
+
 
 WHITE = (1.0, 1.0, 1.0)
 BLACK = (0.0, 0.0, 0.0)
