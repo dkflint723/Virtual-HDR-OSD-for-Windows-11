@@ -19,12 +19,5 @@ if "%NEEDS_INSTALL%"=="1" (
     )
 )
 
-set "UV_PYTHON_INSTALL_DIR=%~dp0.python"
-set "UV_PYTHON_BIN_DIR=%~dp0.python\bin"
-set "UV_NO_CACHE=1"
-set "UV_LINK_MODE=copy"
-set "UV_MANAGED_PYTHON=1"
-set "UV_PYTHON_INSTALL_REGISTRY=0"
-set "UV_PROJECT_ENVIRONMENT=%~dp0.venv"
 start "Virtual HDR OSD for Windows" "%~dp0.venv\Scripts\pythonw.exe" -m sdr_hdr_profile_creator
 endlocal
