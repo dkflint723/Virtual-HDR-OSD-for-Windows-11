@@ -24,6 +24,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -203,11 +204,14 @@ def read_emissive(
     display_type: str | None = None,
     skip_calibration: bool = False,
     timeout: float = 60.0,
+    stop: threading.Event | None = None,
 ) -> Reading:
     """Take one emissive reading in absolute units.
 
     Stops at the first line that settles the outcome, rather than waiting for a
-    process that may never exit on its own.
+    process that may never exit on its own. Setting ``stop`` ends the wait within
+    a tenth of a second and stops spotread, which is how Esc and closing the app
+    get the instrument back without waiting out a reading that may take a minute.
     """
     command = build_command(
         spotread,
@@ -248,7 +252,7 @@ def read_emissive(
 
     reader = threading.Thread(target=pump, daemon=True)
     reader.start()
-    finished = settled.wait(timeout)
+    finished = _wait(settled, timeout, stop)
 
     _terminate(process)
     reader.join(timeout=2.0)
@@ -259,6 +263,8 @@ def read_emissive(
             return outcome
         raise MeterError(outcome)
 
+    if not finished and stop is not None and stop.is_set():
+        raise MeterError("Stopped before the meter answered.")
     if not finished:
         raise MeterError(
             f"The meter did not return a reading within {timeout:g}s. Check that it "
@@ -266,6 +272,20 @@ def read_emissive(
             "holding it open."
         )
     return parse_reading("".join(lines))
+
+
+def _wait(settled: threading.Event, timeout: float, stop: threading.Event | None) -> bool:
+    """``settled.wait(timeout)``, returning early once ``stop`` is set."""
+    if stop is None:
+        return settled.wait(timeout)
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0.0:
+            break
+        if settled.wait(min(0.1, remaining)):
+            return True
+    return settled.is_set()
 
 
 def _terminate(process: subprocess.Popen) -> None:

@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -242,6 +243,25 @@ class ReadEmissiveTests(unittest.TestCase):
         self.assertIsInstance(result, MeterError)
         self.assertIn("holding it open", str(result))
         self.assertTrue(fake.terminated or fake.killed)
+
+    def test_stop_ends_a_read_in_flight_and_frees_the_instrument(self):
+        """Esc used to wait out the read: up to the full timeout, holding the meter."""
+        fake = FakePopen(REAL_PREAMBLE.splitlines(True), block_forever=True)
+        stop = threading.Event()
+        threading.Timer(0.2, stop.set).start()
+        started = time.monotonic()
+        with mock.patch("subprocess.Popen", return_value=fake):
+            with self.assertRaises(MeterError) as raised:
+                read_emissive(Path("spotread"), timeout=30.0, stop=stop)
+        self.assertLess(time.monotonic() - started, 3.0)
+        self.assertIn("Stopped", str(raised.exception))
+        self.assertTrue(fake.terminated or fake.killed)
+
+    def test_a_reading_that_arrives_is_kept_when_stop_is_never_set(self):
+        fake = FakePopen(REAL_PREAMBLE.splitlines(True) + [PEAK])
+        with mock.patch("subprocess.Popen", return_value=fake):
+            result = read_emissive(Path("spotread"), stop=threading.Event())
+        self.assertAlmostEqual(result.nits, 1015.2408, places=3)
 
     def test_a_missing_executable_is_reported_rather_than_raised_raw(self):
         with mock.patch("subprocess.Popen", side_effect=OSError("not found")):

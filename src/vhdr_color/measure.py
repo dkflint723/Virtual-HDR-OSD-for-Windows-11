@@ -1021,6 +1021,9 @@ def sustained(
         try:
             reading = read()
         except MeterError as exc:
+            # A read stopped by the cancel itself is a cancel, not a meter fault.
+            if should_abort is not None and should_abort():
+                raise Aborted() from exc
             raise MeasurementError(f"{step.label}: {exc}") from exc
         values.append(max(0.0, reading.Y))
         if on_reading is not None:
@@ -1280,6 +1283,9 @@ def run(
         try:
             reading = read()
         except MeterError as exc:
+            # A read stopped by the cancel itself is a cancel, not a meter fault.
+            if should_abort is not None and should_abort():
+                raise Aborted() from exc
             raise MeasurementError(f"{step.label}: {exc}") from exc
         readings[step.key] = reading
         if on_reading is not None:
