@@ -480,15 +480,26 @@ It asks first, naming exactly what it will restore. Then it:
 - makes Windows' own HDR profile the default again, or leaves the display with no HDR
   profile if that is what Windows had;
 - sets the SDR default back, unless SDR is set to *Leave unmanaged*;
-- uninstalls this app's two working profiles, so nothing can put them back;
-- tells the watchdog to hold Windows' profile rather than the calibration. This works
-  with any installed watchdog, including one installed before this button existed.
+- uninstalls this app's two working profiles. This is what keeps the watchdog from
+  putting the calibration back: it never reasserts a profile that is not installed;
+- tells the watchdog to hold Windows' profile rather than the calibration. A watchdog
+  installed by an earlier version ignores this and relies on the uninstall alone.
+
+Restore does not check that Windows actually removed the two profiles. If it did not,
+the watchdog can still bring the calibration back.
 
 Your sliders and measurements are kept. Until you press **Apply Edits**, **Reapply** or
 **Calibrate Display**, nothing changes the display: Live Apply, Automatic Mode
-Switching, the Alt+1 / Alt+2 hotkeys and the correction dropdown are refused with a
-message saying why, measuring and the test patterns are refused, and an SDR ↔ HDR switch
-leaves Windows' profile where it is. The restore survives a restart.
+Switching and the correction dropdown are refused with a message saying why (the
+dropdown keeps your new choice for the next apply), measuring and the test patterns are
+refused, and an SDR ↔ HDR switch leaves Windows' profile where it is. The restore
+survives a restart.
+
+Alt+1 / Alt+2 depend on who owns them. When the app owns them, they are refused like the
+dropdown. When the watchdog owns them, it does not know about the restore: it tries to
+switch to the calibration's working profiles anyway, and what happens is written to
+`Watchdog.log`. If the uninstall above failed, that switch brings the calibration back.
+To rule this out, uninstall the watchdog while you are on Windows' profile.
 
 What Windows had is recorded in `original_profiles.json`, beside the settings file, the
 first time the app sees a display and before it changes anything. That record is never

@@ -131,7 +131,7 @@ Branch `recovery-cleanup`, cut from `main` (`8504bd2`). Nothing has been pushed.
 
 | Finding | Evidence | Why it is not fixed here |
 | --- | --- | --- |
-| README 484-490 says Restore holds against any installed watchdog and that Alt+1/Alt+2 are refused while restored. Neither holds when the watchdog owns the hotkeys | `Install-Watchdog.bat` never reads `restored`; `Invoke-GammaHotkey` calls `SetCurrentUserDefault` unguarded | The fix could go in the watchdog (which changes its build id and the standalone zip) or in the README |
+| The watchdog's Alt+1/Alt+2 ignore a restore. The README now says so (it used to say Restore holds against any watchdog and that both hotkeys are refused); the behaviour itself is unchanged | `Install-Watchdog.bat` never reads `restored`; `Invoke-GammaHotkey` calls `SetCurrentUserDefault` without checking the profile is installed; Restore ignores `remove_profile`'s result | A watchdog fix changes its build id and the standalone zip; verify on hardware first (procedure 7.3) |
 | `Launcher.vbs` is written as ASCII, so a non-ASCII profile path should stop the watchdog ever running | The `Launcher.vbs` write uses `-Encoding ASCII` | A watchdog change; verify on hardware first |
 | Mutex probes treat access-denied as "not running"; the uninstaller cannot see or stop an elevated watchdog; the elevated `Start-Process` fallback | `Test-WatchdogSingletonHeld`, `windows_api.watchdog_is_running`, `Uninstall-Watchdog.bat:30-34`, the fallback `Start-Process` | Watchdog changes; needs an elevation test |
 | A torn or locked read of `gamma_hotkeys.json` drops the other displays' records | `app.py` `_runtime_entry` | Multi-monitor only; an existing test fixes "start over" as the intended behaviour |
@@ -177,7 +177,7 @@ These need hardware this session could not use. Run them before relying on the c
 7. **The watchdog (no changes this session).**
    1. Install it from the app, then check with `schtasks /query /tn "Virtual HDR OSD - Color Profile Mode Watchdog"`.
    2. Test Alt+1 and Alt+2.
-   3. After Restore Windows Profile, press Alt+1 and Alt+2. Check whether the association changes (README 487-490), and read `%LOCALAPPDATA%\ColorProfileModeWatchdog\Watchdog.log`.
+   3. After Restore Windows Profile, press Alt+1 and Alt+2. Check whether the association changes (README, Restore Windows Profile), and read `%LOCALAPPDATA%\ColorProfileModeWatchdog\Watchdog.log`.
    4. On an account whose name has a non-ASCII character, install it and check that `Watchdog.log` shows it running (T1).
    5. With an elevated watchdog running, check whether the app's lock switch sees it and whether the uninstaller stops it.
 8. **Sleep, wake and hot-plug.**
