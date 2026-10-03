@@ -6,10 +6,8 @@ the core imports nothing but the standard library and itself. So this reads ever
 statement in each core module, at any depth, from source -- a module never has to be
 importable to be checked -- and refuses anything else.
 
-Two imports still cross, and each is marked as an expected failure. When one moves, its
-test passes, unittest reports an unexpected success, and the run fails until the marker
-is deleted. test_nothing_else_crosses pins each crossing exactly, because an expected
-failure passes however many imports cross and would otherwise hide a second one.
+Nothing crosses. The last two imports that did -- measure's meter types and patterns'
+scRGB constant -- moved into the core in Phase 2.
 """
 
 from __future__ import annotations
@@ -35,12 +33,6 @@ CORE = (
 
 # In the standard library, and the platform in all but name.
 PLATFORM_STDLIB = frozenset({"ctypes", "winreg", "msvcrt", "_winapi", "winsound", "subprocess"})
-
-# Cut in Phase 2 of the ADR. Written as crossings() reports them.
-KNOWN_CROSSINGS = {
-    "patterns": [".hdr_display"],
-}
-
 
 def _own(name: str) -> str:
     """This package's modules as ".name", however they were imported."""
@@ -113,16 +105,13 @@ class ColourCoreBoundaryTests(unittest.TestCase):
     def test_measure(self):
         self.assertStaysInTheCore("measure")
 
-    @unittest.expectedFailure
     def test_patterns(self):
-        """Imports SCRGB_WHITE_NITS from hdr_display, the Direct3D swapchain. Phase 2
-        moves the constant into the core."""
         self.assertStaysInTheCore("patterns")
 
-    def test_nothing_else_crosses(self):
+    def test_nothing_crosses(self):
         for module in CORE:
             with self.subTest(module=module):
-                self.assertEqual(KNOWN_CROSSINGS.get(module, []), crossings(module))
+                self.assertEqual([], crossings(module))
 
     def test_every_core_module_has_its_own_test(self):
         """A module added to CORE without one is checked only by the pin above, which a

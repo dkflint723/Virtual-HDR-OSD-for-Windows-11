@@ -37,6 +37,9 @@ C2 = 18.8515625
 C3 = 18.6875
 SRGB_LINEAR_CUTOFF = 0.00313066844250063
 
+# scRGB 1.0 is D65 at this luminance; Direct2D calls it SCENE_REFERRED_SDR_WHITE_LEVEL.
+SCRGB_WHITE_NITS = 80.0
+
 
 def pq_eotf(value: float) -> float:
     """ST 2084 code value -> absolute luminance in nits."""

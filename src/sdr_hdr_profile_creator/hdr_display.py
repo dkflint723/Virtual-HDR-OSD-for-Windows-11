@@ -32,10 +32,9 @@ import struct
 from ctypes import POINTER, byref, c_long, c_ubyte, c_uint, c_void_p, wintypes
 from dataclasses import dataclass
 
-IS_WINDOWS = hasattr(ctypes, "WinDLL")
+from .gamma_correction import SCRGB_WHITE_NITS
 
-# scRGB 1.0 is D65 at this luminance; Direct2D calls it SCENE_REFERRED_SDR_WHITE_LEVEL.
-SCRGB_WHITE_NITS = 80.0
+IS_WINDOWS = hasattr(ctypes, "WinDLL")
 
 # ST.2084 is defined to 10,000 nits, and that is the ceiling the ICC luminance fields and
 # every pattern here work against. Nothing is clamped to one panel's range.

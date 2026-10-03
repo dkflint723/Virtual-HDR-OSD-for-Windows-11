@@ -26,8 +26,7 @@ import struct
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
-from .gamma_correction import pq_eotf, pq_inverse_eotf
-from .hdr_display import SCRGB_WHITE_NITS
+from .gamma_correction import SCRGB_WHITE_NITS, pq_eotf, pq_inverse_eotf
 
 # Diffuse white for HDR reference content. BT.2408 uses 203 nits for graphics white, and
 # it is the level most HDR mastering treats as paper white.
