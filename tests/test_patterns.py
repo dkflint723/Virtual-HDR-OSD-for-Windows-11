@@ -307,31 +307,6 @@ class OverlayPlacementTests(unittest.TestCase):
         self.assertEqual(len(frame), self.WIDTH * self.HEIGHT * 8)
 
 
-class DeclaredMetadataTests(unittest.TestCase):
-    """A panel quoting the same number for peak and full frame is quoting a spec."""
-
-    def test_equal_peak_and_full_frame_is_flagged(self):
-        from sdr_hdr_profile_creator.hdr_display import DisplayCapability
-
-        from tests.test_hdr_display import capability
-
-        panel = capability(max_nits=1080.0, max_full_frame_nits=1080.0)
-        self.assertIsInstance(panel, DisplayCapability)
-        self.assertTrue(panel.luminance_looks_declared)
-
-    def test_a_panel_reporting_a_real_full_frame_figure_is_not_flagged(self):
-        from tests.test_hdr_display import capability
-
-        self.assertFalse(capability(max_nits=1080.0, max_full_frame_nits=250.0)
-                         .luminance_looks_declared)
-
-    def test_a_dim_panel_is_not_flagged(self):
-        """Equal figures are plausible when there is no headroom to throttle."""
-        from tests.test_hdr_display import capability
-
-        self.assertFalse(capability(max_nits=350.0, max_full_frame_nits=350.0)
-                         .luminance_looks_declared)
-
 
 class GuidanceTests(unittest.TestCase):
     """A pattern nobody can act on is decoration."""

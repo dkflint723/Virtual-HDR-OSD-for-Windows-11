@@ -16,7 +16,6 @@ from sdr_hdr_profile_creator.hdr_display import (
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
     DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020,
     DisplayCapability,
-    capability_for_rect,
     nits_to_scrgb,
     scrgb_pixel,
 )
@@ -107,48 +106,6 @@ class MetadataCredibilityTests(unittest.TestCase):
 
     def test_the_same_panel_is_credible_once_hdr_is_on(self):
         self.assertTrue(capability(max_nits=1080.0, max_full_frame_nits=1080.0).luminance_is_credible)
-
-
-class OutputSelectionTests(unittest.TestCase):
-    """Microsoft's guidance is to pick the output by greatest overlap with the window,
-    never via GetContainingOutput, which goes stale and blacks the screen if refreshed."""
-
-    def setUp(self):
-        self.left_monitor = capability(device_name="LEFT", left=0, right=1920, top=0, bottom=1080)
-        self.right_monitor = capability(device_name="RIGHT", left=1920, right=3840, top=0, bottom=1080)
-        patcher = mock.patch.object(
-            hdr_display, "enumerate_display_capabilities",
-            lambda: [self.left_monitor, self.right_monitor],
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
-    def test_window_wholly_on_one_monitor(self):
-        self.assertEqual(capability_for_rect(2000, 100, 2600, 700).device_name, "RIGHT")
-
-    def test_straddling_window_picks_the_greater_overlap(self):
-        # 400px on the left monitor, 600px on the right.
-        self.assertEqual(capability_for_rect(1520, 0, 2520, 1080).device_name, "RIGHT")
-        # Mirrored: 600px left, 400px right.
-        self.assertEqual(capability_for_rect(1320, 0, 2320, 1080).device_name, "LEFT")
-
-    def test_window_off_every_monitor_still_returns_something(self):
-        """A minimised or off-screen window must not crash the pattern view."""
-        self.assertIsNotNone(capability_for_rect(-5000, -5000, -4900, -4900))
-
-    def test_no_outputs_returns_none(self):
-        with mock.patch.object(hdr_display, "enumerate_display_capabilities", lambda: []):
-            self.assertIsNone(capability_for_rect(0, 0, 100, 100))
-
-
-class IntersectionTests(unittest.TestCase):
-    def test_disjoint_rectangles_have_no_area(self):
-        self.assertEqual(capability(left=0, right=100, top=0, bottom=100)
-                         .area_of_intersection(200, 200, 300, 300), 0)
-
-    def test_contained_rectangle_area_is_its_own(self):
-        self.assertEqual(capability(left=0, right=1000, top=0, bottom=1000)
-                         .area_of_intersection(10, 10, 110, 60), 100 * 50)
 
 
 def _signed(code: int) -> int:

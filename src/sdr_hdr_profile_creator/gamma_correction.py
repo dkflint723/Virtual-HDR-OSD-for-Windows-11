@@ -105,7 +105,3 @@ def transform_piecewise_srgb_to_gamma(
     gamma_luminance = white * srgb_signal ** max(0.1, float(target_gamma))
     return max(0.0, min(1.0, pq_inverse_eotf(gamma_luminance)))
 
-
-def transform_piecewise_srgb_to_gamma22(pq_input: float, white_level_nits: float) -> float:
-    """The correction at its default 2.2 target."""
-    return transform_piecewise_srgb_to_gamma(pq_input, white_level_nits, 2.2)

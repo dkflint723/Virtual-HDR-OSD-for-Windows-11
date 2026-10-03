@@ -101,28 +101,6 @@ class DisplayCapability:
             return False
         return 40.0 <= self.max_nits <= PQ_MAX_NITS and self.max_full_frame_nits > 0.0
 
-    @property
-    def luminance_looks_declared(self) -> bool:
-        """True when the reported peak and full-frame luminance cannot both be real.
-
-        Any emissive panel bright enough to be interesting dims as more of it lights up:
-        an OLED's automatic brightness limiter takes full-field white to a fraction of
-        what a small window reaches, and even mini-LED backlights throttle. A display
-        claiming the same figure for both is quoting a specification, not a measurement.
-        One here reports 1080 for peak and 1080 for full frame, which no consumer panel
-        does.
-
-        This does not make the numbers useless -- peak is usually about right -- but a
-        step that trusts full-frame should say where the figure came from, and a peak
-        measurement has to use a windowed patch rather than a filled screen.
-        """
-        return self.is_hdr and self.max_nits >= 400.0 and self.max_full_frame_nits >= self.max_nits
-
-    def area_of_intersection(self, left: int, top: int, right: int, bottom: int) -> int:
-        width = max(0, min(self.right, right) - max(self.left, left))
-        height = max(0, min(self.bottom, bottom) - max(self.top, top))
-        return width * height
-
 
 def nits_to_scrgb(nits: float) -> float:
     """Absolute luminance to an scRGB channel value, for HDR outputs."""
@@ -302,23 +280,6 @@ def enumerate_display_capabilities() -> list[DisplayCapability]:
     finally:
         _release(factory)
     return results
-
-
-def capability_for_rect(left: int, top: int, right: int, bottom: int) -> DisplayCapability | None:
-    """The output a window is mostly on.
-
-    Microsoft's guidance is explicit that ``IDXGISwapChain::GetContainingOutput`` must not
-    be used for this: it returns a stale output once the factory is no longer current, and
-    recreating the swapchain to refresh it blacks the screen. Enumerating outputs and
-    taking the largest intersection is the documented alternative.
-    """
-    best: DisplayCapability | None = None
-    best_area = -1
-    for capability in enumerate_display_capabilities():
-        area = capability.area_of_intersection(left, top, right, bottom)
-        if area > best_area:
-            best, best_area = capability, area
-    return best
 
 
 def capability_for_device_name(device_name: str) -> DisplayCapability | None:

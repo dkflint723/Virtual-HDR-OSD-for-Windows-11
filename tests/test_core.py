@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from sdr_hdr_profile_creator.curves import build_transform
-from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma22
+from sdr_hdr_profile_creator.gamma_correction import pq_inverse_eotf, resolve_white_level, transform_piecewise_srgb_to_gamma
 from unittest import mock
 
 from sdr_hdr_profile_creator import icc as icc_module
@@ -162,10 +162,10 @@ class CoreTests(unittest.TestCase):
     def test_dylan_direction_darkens_sdr_midtones_and_leaves_hdr_above_white_untouched(self):
         white = 200.0
         mid_input = pq_inverse_eotf(10.0)
-        corrected = transform_piecewise_srgb_to_gamma22(mid_input, white)
+        corrected = transform_piecewise_srgb_to_gamma(mid_input, white, 2.2)
         self.assertLess(corrected, mid_input)
         hdr_input = pq_inverse_eotf(500.0)
-        self.assertAlmostEqual(transform_piecewise_srgb_to_gamma22(hdr_input, white), hdr_input, places=12)
+        self.assertAlmostEqual(transform_piecewise_srgb_to_gamma(hdr_input, white, 2.2), hdr_input, places=12)
 
     def test_auto_white_resolution_uses_windows_readback(self):
         self.assertEqual(resolve_white_level("Auto (Recommended)", 312.5), 312.5)
