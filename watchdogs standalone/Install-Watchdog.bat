@@ -1804,7 +1804,6 @@ try {
     Write-Log 'Watchdog started.'
 
     $lastModes = @{}
-    $lastForced = [DateTime]::MinValue
     $hotkeysRegistered = [ColorProfileWatchdog.Native]::TryRegisterGammaHotkeys()
     $lastHotkeyRetry = Get-Date
     Write-Log $(if ($hotkeysRegistered) { 'Global hotkey thread active: Alt+1 OFF, Alt+2 ON.' } else { 'Global hotkey thread unavailable; registration will be retried.' })
@@ -1872,36 +1871,13 @@ try {
                         Restore-SavedProfiles -CurrentDisplay $refreshed[0] -SavedDisplay $saved -Force
                     }
                 } else {
+                    # Writes only when an association has drifted, so this can run on
+                    # every pass. A separate five-second pass used to repeat it with
+                    # -Force, rewriting both associations about seventeen thousand times
+                    # a day; once it stopped forcing it repeated this exact call within
+                    # the same pass, and was removed (3 October 2026).
                     Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
                 }
-            }
-
-            # Fallback reassertion. This also covers systems where SDR/WCG and HDR
-            # can both report Advanced Color enabled through the legacy query.
-            # Re-check every five seconds, but write only when the association has
-            # actually drifted. This used to pass -Force, which rewrites both
-            # associations whether or not anything changed -- measured at two writes
-            # every 5.3 seconds, forever, about seventeen thousand a day, each one
-            # asking Windows to re-apply a profile that was already in place.
-            #
-            # No visible symptom is claimed for this. It was chased as the cause of a
-            # flickering screen and is not: with the watchdog running and stopped, the
-            # association value and the GPU gamma ramp were both unchanged across 221
-            # samples at 10 Hz, and the flicker tracked a GPU-composited terminal under
-            # HDR instead. What is left is a real waste on a hot path.
-            #
-            # The read is the same API family as the write, so trusting it costs
-            # nothing: genuine drift is still restored within 800 ms by the pass above.
-            # -Force stays on the mode-change path, where the association can be right
-            # while the applied state is not.
-            if (((Get-Date) - $lastForced).TotalSeconds -ge 5.0) {
-                foreach ($current in $currentDisplays) {
-                    $saved = Find-SavedDisplay -State $state -CurrentDisplay $current
-                    if ($saved) {
-                        Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved
-                    }
-                }
-                $lastForced = Get-Date
             }
         } catch {
             Write-Log ('Loop error: ' + $_.Exception.Message)
