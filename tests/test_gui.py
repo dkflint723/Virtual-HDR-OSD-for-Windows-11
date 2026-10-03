@@ -2102,6 +2102,27 @@ class RebootStabilityTests(WindowTestCase):
         entries = self.read_runtime()["displays"]
         self.assertIn(other.key, entries, "another monitor's record was pruned")
 
+    def test_a_locked_runtime_file_keeps_the_other_monitors_record(self):
+        """A failed read used to start over, and the publish after it wrote the file back
+        holding this display alone."""
+        self.apply()
+        payload = self.read_runtime()
+        payload["displays"]["ADAPTER9:0:9"] = {"gdi_name": r"\.\DISPLAY2", "profiles": {}}
+        app_module.MainWindow._write_json_atomic(app_module.GAMMA_HOTKEY_STATE_PATH, payload)
+        locked = PermissionError(32, "in use")
+        real_read = Path.read_text
+
+        def read_text(path, *args, **kwargs):
+            if path == app_module.GAMMA_HOTKEY_STATE_PATH:
+                raise locked
+            return real_read(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", read_text), \
+             mock.patch.object(app_module.persistence.time, "sleep"):
+            self.window._publish_gamma_runtime_intent(self.display)
+        self.assertIn("ADAPTER9:0:9", self.read_runtime()["displays"])
+        self.assertIn("Could not read gamma_hotkeys.json", self.window.status_label.text())
+
 
 class MonitorStateTests(WindowTestCase):
     """The run log records what the monitor itself was set to.

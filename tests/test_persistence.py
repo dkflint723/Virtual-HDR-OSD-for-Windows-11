@@ -97,6 +97,56 @@ class OriginalProfilesLoadTests(TempDirTestCase):
         self.assertEqual({"k": {"hdr": "A.icm"}}, persistence.load_original_profiles(path))
 
 
+class RuntimePayloadLoadTests(TempDirTestCase):
+    """gamma_hotkeys.json is written back whole, so a failed read must not become {}."""
+
+    def setUp(self):
+        super().setUp()
+        self.path = self.dir / "gamma_hotkeys.json"
+        sleep = mock.patch.object(persistence.time, "sleep")
+        sleep.start()
+        self.addCleanup(sleep.stop)
+
+    def test_no_file_is_a_clean_start(self):
+        self.assertEqual({}, persistence.load_runtime_payload(self.path))
+
+    def test_a_readable_file_loads(self):
+        self.path.write_text(json.dumps({"displays": {"a": {}, "b": {}}}), encoding="utf-8")
+        self.assertEqual({"displays": {"a": {}, "b": {}}}, persistence.load_runtime_payload(self.path))
+
+    def test_a_file_that_stays_locked_is_none_and_left_alone(self):
+        self.path.write_text(json.dumps({"displays": {"a": {}}}), encoding="utf-8")
+        with mock.patch.object(Path, "read_text", side_effect=PermissionError(32, "in use")) as read:
+            self.assertIsNone(persistence.load_runtime_payload(self.path))
+        self.assertEqual(4, read.call_count)
+        self.assertEqual(["gamma_hotkeys.json"], [p.name for p in self.dir.iterdir()])
+
+    def test_a_read_that_lands_mid_rename_is_retried(self):
+        good = json.dumps({"displays": {"a": {}, "b": {}}})
+        reads = iter([PermissionError(32, "in use"), '{"displays": {"a"', good])
+
+        def read_text(_self, encoding=None):
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        self.path.write_text(good, encoding="utf-8")
+        with mock.patch.object(Path, "read_text", read_text):
+            self.assertEqual({"displays": {"a": {}, "b": {}}}, persistence.load_runtime_payload(self.path))
+
+    def test_a_file_that_is_not_json_is_set_aside(self):
+        self.path.write_text("{ not json", encoding="utf-8")
+        self.assertEqual({}, persistence.load_runtime_payload(self.path))
+        self.assertFalse(self.path.exists())
+        self.assertTrue((self.dir / "gamma_hotkeys.unreadable.json").exists())
+
+    def test_a_json_value_that_is_not_an_object_is_set_aside(self):
+        self.path.write_text("[]", encoding="utf-8")
+        self.assertEqual({}, persistence.load_runtime_payload(self.path))
+        self.assertTrue((self.dir / "gamma_hotkeys.unreadable.json").exists())
+
+
 class WatchdogIdentityTests(unittest.TestCase):
     def test_the_payload_is_found_from_the_end(self):
         text = f"echo {WATCHDOG_PAYLOAD_MARKER} here\r\n{WATCHDOG_PAYLOAD_MARKER}\r\nparam()\r\n"
