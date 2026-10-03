@@ -26,7 +26,9 @@ from .gamma_correction import pq_inverse_eotf
 # module stays a leaf, and tests/test_delta_itp.py asserts they have not drifted apart.
 D65_XY: Final[tuple[float, float]] = (0.3127, 0.3290)
 
-# BT.2100 Table 5. Normalised XYZ (D65) to the LMS cone responses ICtCp is built on.
+# Normalised XYZ (D65) to the LMS cone responses ICtCp is built on. BT.2100 defines LMS from
+# BT.2020 RGB; this is that matrix composed with BT.2020's RGB-to-XYZ, to four places.
+# tests/test_golden_vectors.py derives it from the standard and holds this to 1.5e-4.
 XYZ_TO_LMS: Final[tuple[tuple[float, float, float], ...]] = (
     (0.3592, 0.6976, -0.0358),
     (-0.1922, 1.1004, 0.0755),
