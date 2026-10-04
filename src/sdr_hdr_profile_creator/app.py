@@ -14,7 +14,7 @@ from typing import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt, QThread, QTimer
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QSize, Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -159,6 +159,20 @@ class _ComboKeyboard(QObject):
             menu.view.setCurrentRow(max(0, combo.currentIndex()))
             menu.view.setFocus()
         return True
+
+
+# The size the window opens at when the screen has room for it.
+PREFERRED_SIZE = QSize(1380, 880)
+
+
+def _opening_size(available: QSize) -> QSize:
+    """PREFERRED_SIZE, cut down to what the screen can show.
+
+    It used to open at 1380 x 880 regardless, which is taller than a 1080p screen at
+    125% scaling and both wider and taller at 150%, so the bottom of the window -- the
+    status line and the tabs' lower half -- opened off screen.
+    """
+    return PREFERRED_SIZE.boundedTo(available)
 
 LOCAL_ROOT = Path(os.environ.get("LOCALAPPDATA", Path.home() / ".local" / "share")) / "Virtual_HDR_OSD_for_Windows"
 STATE_PATH = LOCAL_ROOT / "last_gui_state.json"
@@ -330,8 +344,11 @@ class MainWindow(FluentWidget):
         self._active_profile_name: str = ""
 
         self.setWindowTitle(f"Virtual HDR OSD for Windows {__version__}")
-        self.setMinimumSize(1080, 720)
-        self.resize(1380, 880)
+        # No fixed minimum: the layout sets the real one, about 1238 x 510 at 100%
+        # scaling. The fixed 1080 x 720 it replaced was narrower than the layout can draw
+        # and taller than a 1080p screen at 150% (about 1280 x 688 usable), so there the
+        # window could not fit at all.
+        self.resize(_opening_size(self.screen().availableGeometry().size()))
         try:
             self.setMicaEffectEnabled(True)
             self.setCustomBackgroundColor(QColor(246, 248, 252), QColor(18, 22, 30))
@@ -371,6 +388,9 @@ class MainWindow(FluentWidget):
 
         self._build_ui()
         self._name_window_chrome()
+        # The window's minimum is its layout's, which Qt only applies once the layout
+        # activates -- normally at the first show. Until then minimumWidth() read 0.
+        self.layout().activate()
         self._load_mode_into_controls()
         # The switch and the state used to agree by accident, because the state was
         # forced off a few lines above. Now that it is restored, the switch has to be

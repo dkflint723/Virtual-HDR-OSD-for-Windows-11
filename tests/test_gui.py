@@ -21,7 +21,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QObject, QSignalBlocker, Qt, QTimer, Signal
+    from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, Signal
     from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
     from sdr_hdr_profile_creator import app as app_module
@@ -336,6 +336,30 @@ class ComboKeyboardTests(WindowTestCase):
                 menu = combo.dropMenu
                 self.assertTrue(menu is not None and self.open(menu))
                 self.press(menu.view, Qt.Key.Key_Escape)
+
+
+class WindowSizeTests(WindowTestCase):
+    """The window fits a 1080p screen at up to 150% scaling: about 1280 x 688 usable.
+
+    Width is not checked here. The offscreen platform these tests run on draws with
+    fallback fonts about 1.6 times as wide as Segoe UI, so its widths say nothing about
+    a real screen; measured on the Windows platform the layout needs about 1238."""
+
+    SMALLEST = (1280, 688)
+
+    def test_the_window_can_be_made_short_enough(self):
+        self.window.layout().activate()
+        self.assertLessEqual(self.window.minimumHeight(), self.SMALLEST[1])
+
+    def test_it_opens_inside_the_screen(self):
+        for available in ((1920, 1032), (1536, 824), self.SMALLEST):
+            with self.subTest(available=available):
+                size = app_module._opening_size(QSize(*available))
+                self.assertLessEqual(size.width(), available[0])
+                self.assertLessEqual(size.height(), available[1])
+
+    def test_a_large_screen_still_gets_the_full_size(self):
+        self.assertEqual(app_module.PREFERRED_SIZE, app_module._opening_size(QSize(3840, 2100)))
 
 
 class FixtureSafetyTests(WindowTestCase):
@@ -4617,6 +4641,11 @@ class ControlRowFitTests(WindowTestCase):
 
     If this ever blocks a control you want to add, re-measure with
     QT_QPA_PLATFORM=windows before splitting a row.
+
+    Since October 2026 the window declares no fixed minimum: minimumWidth() is the
+    layout's own, which includes these rows, so for the two rows of buttons this holds
+    by construction (a button's minimum is its size hint). It still catches a control
+    whose minimum is set below its size hint, which is what lets Qt elide it.
     """
 
     SPACING = 12
