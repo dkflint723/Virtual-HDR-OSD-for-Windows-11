@@ -21,8 +21,8 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QObject, QSize, QTimer, Signal
-    from PySide6.QtWidgets import QApplication, QMessageBox
+    from PySide6.QtCore import QObject, QSignalBlocker, QSize, Qt, QTimer, Signal
+    from PySide6.QtWidgets import QApplication, QMessageBox, QWidget
 
     from sdr_hdr_profile_creator import app as app_module
     from sdr_hdr_profile_creator.controls import ControlSpec, SliderControl
@@ -208,6 +208,134 @@ class WindowTestCase(unittest.TestCase):
 
     def read_runtime(self) -> dict:
         return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+
+
+class AccessibleNameTests(WindowTestCase):
+    """What a screen reader can call each control. A tooltip is not a name."""
+
+    @staticmethod
+    def spoken_name(widget) -> str:
+        from PySide6.QtWidgets import QAbstractButton
+
+        name = widget.accessibleName()
+        if not name and isinstance(widget, QAbstractButton):
+            name = widget.text()
+        return name.strip()
+
+    def unnamed(self) -> list[str]:
+        from PySide6.QtWidgets import QAbstractButton, QAbstractSlider, QLineEdit
+
+        found = []
+        for widget in self.window.findChildren(QWidget):
+            if not isinstance(widget, (QAbstractButton, QAbstractSlider, QLineEdit)):
+                continue
+            if widget.focusPolicy() == Qt.FocusPolicy.NoFocus:
+                continue   # not reachable from the keyboard, so not announced in turn
+            if not widget.isVisibleTo(self.window):
+                continue   # hidden even once the window is shown: a disabled clear button,
+                           # the unused title bar the Fluent one replaces
+            if not self.spoken_name(widget):
+                found.append(f"{type(widget).__name__} {widget.objectName()!r} "
+                             f"under {type(widget.parent()).__name__}")
+        return found
+
+    def test_every_keyboard_control_has_a_name(self):
+        self.assertEqual([], self.unnamed())
+
+    def test_each_reset_button_says_what_it_resets(self):
+        names = [c.reset_button.accessibleName() for c in self.window.control_widgets.values()]
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertTrue(all(name.startswith("Reset ") and len(name) > 6 for name in names))
+
+    def test_a_combo_box_names_what_it_chooses_and_its_value(self):
+        combo = self.window.gamma_correction_combo
+        combo.setCurrentText("Off")
+        self.assertEqual("SDR-in-HDR gamma correction: Off", combo.accessibleName())
+        combo.setCurrentText("Auto (Recommended)")
+        self.assertEqual("SDR-in-HDR gamma correction: Auto (Recommended)", combo.accessibleName())
+
+    def test_a_switch_is_named_where_it_takes_focus(self):
+        indicator = self.window.live_checkbox.indicator
+        self.assertNotEqual(Qt.FocusPolicy.NoFocus, indicator.focusPolicy())
+        self.assertEqual("Live Apply", indicator.accessibleName())
+
+
+class ComboKeyboardTests(WindowTestCase):
+    """The four combo boxes open and choose from the keyboard.
+
+    qfluentwidgets opens its menu only on a mouse release. The fix calls the library's
+    private _showComboMenu, so these also catch an upgrade that changes it."""
+
+    def setUp(self):
+        super().setUp()
+        import shiboken6
+
+        from PySide6.QtTest import QTest
+
+        # A fresh fixture is a first run, and 400 ms after opening, a first run shows the
+        # Getting Started guide as a modal dialog. Inside a full run these tests process
+        # events long enough to reach it, and nothing would ever close it.
+        patcher = mock.patch.object(app_module.GuideDialog, "exec", return_value=0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.window.show()
+        self.addCleanup(self.window.hide)
+        # Let the show finish. An activation still queued from it closes the first
+        # popup opened, which is a property of the test, not of anyone using the app.
+        QTest.qWaitForWindowExposed(self.window)
+        QApplication.processEvents()
+        self.combo = self.window.gamma_correction_combo
+        with QSignalBlocker(self.combo):
+            self.combo.setCurrentText("Off")
+        self.combo.setFocus()
+        self.open = lambda menu: shiboken6.isValid(menu) and menu.isVisible()
+
+    def press(self, widget, key):
+        from PySide6.QtTest import QTest
+
+        QTest.keyClick(widget, key)
+        QApplication.processEvents()
+
+    def test_each_opening_key_opens_the_menu_on_the_current_item(self):
+        for key in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_F4, Qt.Key.Key_Down):
+            with self.subTest(key=key):
+                self.press(self.combo, key)
+                menu = self.combo.dropMenu
+                self.assertTrue(menu is not None and self.open(menu))
+                self.assertEqual(self.combo.currentIndex(), menu.view.currentRow())
+                self.press(menu.view, Qt.Key.Key_Escape)
+                self.assertFalse(self.open(menu))
+
+    def test_enter_in_the_menu_chooses_like_a_click(self):
+        chosen = []
+        self.combo.textActivated.connect(chosen.append)
+        self.press(self.combo, Qt.Key.Key_Space)
+        menu = self.combo.dropMenu
+        self.press(menu.view, Qt.Key.Key_Down)
+        self.press(menu.view, Qt.Key.Key_Return)
+        self.assertEqual(CORRECTION_OPTIONS[1], self.combo.currentText())
+        self.assertEqual([CORRECTION_OPTIONS[1]], chosen)
+        self.assertFalse(self.open(menu))
+
+    def test_escape_changes_nothing(self):
+        self.press(self.combo, Qt.Key.Key_Space)
+        menu = self.combo.dropMenu
+        self.press(menu.view, Qt.Key.Key_Down)
+        self.press(menu.view, Qt.Key.Key_Escape)
+        self.assertEqual("Off", self.combo.currentText())
+
+    def test_every_combo_box_in_the_window_opens_from_the_keyboard(self):
+        from qfluentwidgets import ComboBox
+
+        combos = [c for c in self.window.findChildren(ComboBox) if c.count()]
+        self.assertTrue(combos)
+        for combo in combos:
+            with self.subTest(combo=combo.accessibleName()):
+                combo.setFocus()
+                self.press(combo, Qt.Key.Key_Space)
+                menu = combo.dropMenu
+                self.assertTrue(menu is not None and self.open(menu))
+                self.press(menu.view, Qt.Key.Key_Escape)
 
 
 class WindowSizeTests(WindowTestCase):
@@ -521,6 +649,51 @@ class UnreadableStateFileTests(WindowTestCase):
         self.window._save_state_now()
         self.assertEqual(original, app_module.STATE_PATH.read_bytes())
         self.assertIn("will not save over it", self.window._state_load_problem)
+
+    def start_locked(self) -> bytes:
+        """The window as it is after starting while the settings file was locked."""
+        app_module.STATE_PATH.write_text(json.dumps({
+            "hdr": {"gamma": 2.4},
+            "display_bindings": {"K": {"sdr_profile": "Mine.icm"}},
+        }), encoding="utf-8")
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.STATE_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked), \
+             mock.patch.object(app_module.persistence.time, "sleep"):
+            self.window.state = self.window._load_last_state()
+        self.assertTrue(self.window._state_unopened)
+        self.window._state_at_start = self.window.state.to_dict()
+        return app_module.STATE_PATH.read_bytes()
+
+    def test_a_locked_settings_file_is_loaded_once_it_opens(self):
+        """The refusal to save used to last the whole session, so the user's settings
+        stayed out of reach until a restart, and nothing they did was kept."""
+        self.start_locked()
+        self.window._retry_locked_state()
+        self.assertFalse(self.window._state_unopened)
+        self.assertAlmostEqual(2.4, self.window.state.hdr.gamma)
+        self.assertEqual("Mine.icm", self.window.state.display_bindings["K"].sdr_profile)
+        self.assertIn("Loaded your settings", self.window.status_label.text())
+        self.window.state.hdr.gamma = 2.5
+        self.window._save_state_now()
+        saved = json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(2.5, saved["hdr"]["gamma"])
+        self.assertIn("K", saved["display_bindings"])
+
+    def test_a_locked_settings_file_is_not_adopted_after_an_edit(self):
+        """Adopting it would throw away the edit; saving would throw away the file."""
+        original = self.start_locked()
+        self.window.state.hdr.gamma = 2.6
+        self.window._retry_locked_state()
+        self.assertTrue(self.window._state_unopened)
+        self.assertIn("Restart the app", self.window.status_label.text())
+        self.window._save_state_now()
+        self.assertEqual(original, app_module.STATE_PATH.read_bytes())
 
 
 class RestoreWindowsProfileTests(WindowTestCase):

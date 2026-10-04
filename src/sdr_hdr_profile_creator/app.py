@@ -14,7 +14,7 @@ from typing import Callable
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import QSignalBlocker, QSize, Qt, QThread, QTimer
+from PySide6.QtCore import QEvent, QObject, QSignalBlocker, QSize, Qt, QThread, QTimer
 from PySide6.QtGui import QCloseEvent, QColor
 from PySide6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from qfluentwidgets import (
     setTheme,
     setThemeColor,
 )
+from qfluentwidgets.components.widgets.scroll_bar import ScrollBarGroove
 
 from .controls import Card, ControlSpec, SliderControl
 from vhdr_color.curves import build_transform
@@ -97,6 +98,68 @@ from .windows_api import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+def _name_switch(switch: SwitchButton, name: str) -> None:
+    """Give a Fluent switch a name a screen reader can find.
+
+    Its visible text is a separate label, and the part that takes keyboard focus is an
+    unlabelled child button, so on its own the switch is announced as a nameless toggle.
+    """
+    switch.setAccessibleName(name)
+    indicator = getattr(switch, "indicator", None)
+    if indicator is not None:
+        indicator.setAccessibleName(name)
+
+
+def _name_combo(combo: ComboBox, name: str) -> None:
+    """Name a Fluent combo box for what it chooses, and keep its current value in the name.
+
+    It is a push button underneath, so its accessible name was just its current text:
+    "Off" or a monitor's name, with nothing to say what it was the choice of. Setting a
+    name replaces that text, so the value is kept in it and updated as it changes. It is
+    also made to open from the keyboard; see _ComboKeyboard.
+    """
+    def update(text: str) -> None:
+        combo.setAccessibleName(f"{name}: {text}" if text else name)
+
+    update(combo.currentText())
+    combo.currentTextChanged.connect(update)
+    combo.installEventFilter(_ComboKeyboard(combo))
+
+
+class _ComboKeyboard(QObject):
+    """Opens a Fluent combo box from the keyboard.
+
+    qfluentwidgets 1.11.3 opens its menu only on a mouse release, so none of Space,
+    Enter, F4 or the arrow keys did anything: a keyboard user could reach the control and
+    never change it. These keys open the menu with the current item highlighted. The
+    arrows open it rather than stepping the value in place, as a native combo box does,
+    because two of these act on every change -- an HDR profile loads as the base, and a
+    correction is applied -- so stepping through them would apply each item on the way.
+
+    Inside the menu the arrows move, Esc closes, and Enter picks: its list emits
+    itemActivated for Enter, which is forwarded to itemClicked so the pick goes through
+    exactly the path a mouse click does. _showComboMenu is private to the library;
+    tests.test_gui.ComboKeyboardTests fails if an upgrade changes it.
+    """
+
+    OPEN_KEYS = frozenset({
+        Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_F4,
+        Qt.Key.Key_Up, Qt.Key.Key_Down,
+    })
+
+    def eventFilter(self, combo, event) -> bool:
+        if event.type() != QEvent.Type.KeyPress or event.key() not in self.OPEN_KEYS:
+            return False
+        combo._showComboMenu()
+        menu = combo.dropMenu
+        if menu is not None:
+            menu.view.itemActivated.connect(menu.view.itemClicked)
+            menu.view.setCurrentRow(max(0, combo.currentIndex()))
+            menu.view.setFocus()
+        return True
+
 
 # The size the window opens at when the screen has room for it.
 PREFERRED_SIZE = QSize(1380, 880)
@@ -306,6 +369,11 @@ class MainWindow(FluentWidget):
         self.state_save_timer.setInterval(900)
         self.state_save_timer.timeout.connect(self._save_state_now)
 
+        # Only runs while the settings file was locked at startup; see _retry_locked_state.
+        self.state_retry_timer = QTimer(self)
+        self.state_retry_timer.setInterval(3000)
+        self.state_retry_timer.timeout.connect(self._retry_locked_state)
+
         self.mode_timer = QTimer(self)
         self.mode_timer.setInterval(900)
         self.mode_timer.timeout.connect(self._poll_windows_mode)
@@ -319,6 +387,7 @@ class MainWindow(FluentWidget):
         self.watchdog_timer.timeout.connect(self._sync_lock_switch)
 
         self._build_ui()
+        self._name_window_chrome()
         # The window's minimum is its layout's, which Qt only applies once the layout
         # activates -- normally at the first show. Until then minimumWidth() read 0.
         self.layout().activate()
@@ -350,6 +419,11 @@ class MainWindow(FluentWidget):
         self._sync_lock_switch()
         self.watchdog_timer.start()
         self._update_activity_bar()
+        # What the defaults looked like once the window settled, so a later retry can
+        # tell whether anything has changed them since.
+        self._state_at_start = self.state.to_dict()
+        if self._state_unopened:
+            self.state_retry_timer.start()
         # Last, so nothing said while the window was being built can overwrite it.
         if self._state_load_problem:
             self._set_status(self._state_load_problem, "warning")
@@ -363,6 +437,42 @@ class MainWindow(FluentWidget):
     def _load_last_state(self) -> ApplicationState:
         state, self._state_load_problem, self._state_unopened = persistence.load_state(STATE_PATH)
         return state
+
+    def _retry_locked_state(self) -> None:
+        """Load the settings file once it can be opened, if nothing has changed since.
+
+        The app started from defaults because the file was locked, and refuses to save
+        so those defaults never replace it. That refusal used to last the whole session.
+        Adopting the file now is safe only while the defaults are untouched; after an
+        edit either choice loses something, so the refusal stands and the user is told.
+        """
+        if not self._state_unopened:
+            self.state_retry_timer.stop()
+            return
+        state, problem, unopened = persistence.load_state(STATE_PATH, attempts=1)
+        if unopened:
+            return
+        self.state_retry_timer.stop()
+        if self.state.to_dict() != self._state_at_start:
+            self._set_status(
+                f"{STATE_PATH.name} can be opened now, but settings were changed after the "
+                "app started from defaults, so they are not saved over it. Restart the app "
+                "to load it.",
+                "warning",
+            )
+            return
+        self._state_unopened = False
+        self.state = state
+        if state.hdr.sdr_gamma_correction != "Off":
+            self._last_enabled_gamma_correction = state.hdr.sdr_gamma_correction
+        self._load_mode_into_controls()
+        with QSignalBlocker(self.live_checkbox):
+            self.live_checkbox.setChecked(self.state.live_mode)
+        self._refresh_displays()
+        self._set_status(
+            problem or f"Loaded your settings from {STATE_PATH.name} now that it can be opened.",
+            "warning" if problem else "ok",
+        )
 
     def _load_live_registry(self) -> dict[str, dict[str, str]]:
         return persistence.load_live_registry(LIVE_REGISTRY_PATH)
@@ -402,6 +512,20 @@ class MainWindow(FluentWidget):
 
     # ----------------------------------------------------------------------------------
     # Fluent UI
+
+    def _name_window_chrome(self) -> None:
+        """Names for the buttons qfluentwidgets draws itself: the title bar's three and the
+        scroll bars' paging arrows. All take keyboard focus and none had a name."""
+        for button, name in (
+            (self.titleBar.minBtn, "Minimize"),
+            (self.titleBar.maxBtn, "Maximize"),
+            (self.titleBar.closeBtn, "Close"),
+        ):
+            button.setAccessibleName(name)
+        for groove in self.findChildren(ScrollBarGroove):
+            vertical = groove.parent().orientation() == Qt.Orientation.Vertical
+            groove.upButton.setAccessibleName("Page up" if vertical else "Page left")
+            groove.downButton.setAccessibleName("Page down" if vertical else "Page right")
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
@@ -591,6 +715,7 @@ class MainWindow(FluentWidget):
         self.display_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.display_combo.setToolTip("Select the active Windows display to target. HDR state and profile association are tracked per display.")
         self.display_combo.currentIndexChanged.connect(self._display_selected)
+        _name_combo(self.display_combo, "Target display")
         display_row.addWidget(self.display_combo, 1)
         self.hdr_switch = SwitchButton(bar)
         self.hdr_switch.setOffText("HDR Off")
@@ -600,6 +725,7 @@ class MainWindow(FluentWidget):
             "Unlike Win + Alt + B this targets the display you picked above."
         )
         self.hdr_switch.checkedChanged.connect(self._hdr_switch_toggled)
+        _name_switch(self.hdr_switch, "Windows HDR for this display")
         display_row.addWidget(self.hdr_switch)
         refresh_displays = PushButton("Refresh", bar)
         refresh_displays.setToolTip("Rescan active Windows displays and refresh the selected display information.")
@@ -636,6 +762,7 @@ class MainWindow(FluentWidget):
             "This app never edits your SDR profile."
         )
         self.sdr_profile_combo.textActivated.connect(self._sdr_profile_chosen)
+        _name_combo(self.sdr_profile_combo, "SDR profile for this display")
         profile_row.addWidget(self.sdr_profile_combo, 1)
 
         hdr_label = BodyLabel("HDR", bar)
@@ -650,6 +777,7 @@ class MainWindow(FluentWidget):
             "never compound on already-edited data."
         )
         self.hdr_profile_combo.textActivated.connect(self._hdr_profile_chosen)
+        _name_combo(self.hdr_profile_combo, "HDR profile to edit")
         profile_row.addWidget(self.hdr_profile_combo, 1)
 
         import_button = PushButton("Import…", bar)
@@ -676,6 +804,7 @@ class MainWindow(FluentWidget):
         self.live_checkbox.setOnText("Live Apply")
         self.live_checkbox.setToolTip("Automatically regenerate and apply the HDR profile shortly after each slider change. Disable it when you want to make several edits before applying them manually.")
         self.live_checkbox.checkedChanged.connect(self._live_mode_toggled)
+        _name_switch(self.live_checkbox, "Live Apply")
         runtime_row.addWidget(self.live_checkbox)
         self.automatic_mode_checkbox = SwitchButton(bar)
         self.automatic_mode_checkbox.setOffText("Auto Mode Switching")
@@ -684,6 +813,7 @@ class MainWindow(FluentWidget):
         automatic_enabled = self.state.follow_windows_mode and self.state.auto_refresh_after_mode_change
         self.automatic_mode_checkbox.setChecked(automatic_enabled)
         self.automatic_mode_checkbox.checkedChanged.connect(self._automatic_mode_switching_toggled)
+        _name_switch(self.automatic_mode_checkbox, "Auto Mode Switching")
         runtime_row.addWidget(self.automatic_mode_checkbox)
         self.lock_switch = SwitchButton(bar)
         self.lock_switch.setOffText("Lock Profile")
@@ -700,6 +830,7 @@ class MainWindow(FluentWidget):
             "The switch follows what is actually running, not what was last clicked."
         )
         self.lock_switch.checkedChanged.connect(self._lock_toggled)
+        _name_switch(self.lock_switch, "Lock Profile")
         runtime_row.addWidget(self.lock_switch)
         runtime_row.addStretch(1)
         layout.addLayout(runtime_row)
@@ -786,6 +917,7 @@ class MainWindow(FluentWidget):
         self.gamma_correction_combo.setMinimumWidth(270)
         self.gamma_correction_combo.setToolTip("Off; Auto reads Windows' current SDR reference white internally; the remaining choices mirror dylanraga's published profile options. The correction is display-wide, so disable it for native HDR content.")
         self.gamma_correction_combo.currentTextChanged.connect(self._gamma_correction_changed)
+        _name_combo(self.gamma_correction_combo, "SDR-in-HDR gamma correction")
         correction_row.addWidget(self.gamma_correction_combo)
         correction_hint = CaptionLabel("Alt+1 Off  ·  Alt+2 On", self)
         correction_hint.setToolTip("Global hotkeys while the app runs. Installing the watchdog keeps the hotkeys available after the GUI closes.")
@@ -1536,7 +1668,11 @@ class MainWindow(FluentWidget):
             candidate = PACKAGE_ROOT.parents[1] / name
             path = candidate if candidate.is_file() else path
         if not path.is_file():
-            QMessageBox.critical(self, "Watchdog Settings", f"Watchdog script not found:\n{path}")
+            QMessageBox.critical(
+                self, "Watchdog Settings",
+                f"Watchdog script not found:\n{path}\n\nThis copy of the app is incomplete. "
+                "Download or unpack it again, then retry.",
+            )
             return
         # `start` detaches immediately and discards the installer's exit code and its
         # console output, so a failed install was indistinguishable from a successful
@@ -1553,7 +1689,10 @@ class MainWindow(FluentWidget):
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Watchdog Settings", f"Could not launch watchdog setup:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Watchdog Settings",
+                f"Could not launch watchdog setup:\n\n{exc}\n\nYou can run it yourself instead:\n{path}",
+            )
             return
         self._set_status(
             f"Running {name} in a separate window. Follow its prompts; the result is "
@@ -1750,7 +1889,11 @@ class MainWindow(FluentWidget):
         except Exception as exc:
             self.display_combo.clear()
             self._current_display_snapshot = None
-            self._set_status(f"Display detection failed: {exc}", "error")
+            self._set_status(
+                f"Display detection failed: {exc}. Press Refresh to try again; if it keeps "
+                "failing, restart the app.",
+                "error",
+            )
             return
 
         with QSignalBlocker(self.display_combo):
@@ -1766,7 +1909,11 @@ class MainWindow(FluentWidget):
 
         if not displays:
             self._current_display_snapshot = None
-            self._set_status("No active Windows displays were detected.", "error")
+            self._set_status(
+                "No active Windows displays were detected. Check that the display is connected "
+                "and switched on, then press Refresh.",
+                "error",
+            )
             return
 
         selected = self.display_combo.currentData()
@@ -2091,10 +2238,18 @@ class MainWindow(FluentWidget):
             try:
                 candidate = get_color_directory() / text
             except Exception:
-                self._set_status(f"Could not locate {text} in the Windows colour folder.", "error")
+                self._set_status(
+                    f"Could not locate {text} in the Windows colour folder. Pick another HDR "
+                    "profile, or use Import… to load it from a file.",
+                    "error",
+                )
                 return
         if not candidate.is_file():
-            self._set_status(f"{text} is no longer installed.", "error")
+            self._set_status(
+                f"{text} is no longer installed. Pick another HDR profile, or use Import… to "
+                "load it from a file.",
+                "error",
+            )
             return
         self._load_profile_from_path(candidate)
 
@@ -2108,7 +2263,11 @@ class MainWindow(FluentWidget):
         try:
             set_hdr_enabled(display, checked)
         except Exception as exc:
-            self._set_status(f"Could not turn HDR {'on' if checked else 'off'}: {exc}", "error")
+            self._set_status(
+                f"Could not turn HDR {'on' if checked else 'off'}: {exc}. Use Win + Alt + B, "
+                "or Settings > Display > Use HDR, instead.",
+                "error",
+            )
             with QSignalBlocker(self.hdr_switch):
                 self.hdr_switch.setChecked(display.current_mode == "HDR")
             return
@@ -2171,7 +2330,11 @@ class MainWindow(FluentWidget):
             active = reapply_existing_default_profile(display, "SDR", profile_name)
             self._set_status(f"{reason}: restored SDR profile {active}.", "ok")
         except Exception as exc:
-            self._set_status(f"{reason}: could not restore SDR profile {profile_name}: {exc}", "error")
+            self._set_status(
+                f"{reason}: could not restore SDR profile {profile_name}: {exc}. Set it in "
+                "Settings > Display > Color profile, or press Refresh to try again.",
+                "error",
+            )
 
     def _update_mode_badge(self, display: DisplayInfo) -> None:
         kind = display.advanced_color_kind
@@ -2410,7 +2573,11 @@ class MainWindow(FluentWidget):
         """
         display = self._selected_display()
         if display is None:
-            self._set_status("No display detected to calibrate.", "error")
+            self._set_status(
+                "No display detected to calibrate. Check that the display is connected, then "
+                "press Refresh.",
+                "error",
+            )
             return
 
         if display.current_mode != "HDR":
@@ -2420,7 +2587,9 @@ class MainWindow(FluentWidget):
                 set_hdr_enabled(display, True)
             except Exception as exc:
                 self._set_status(
-                    f"Could not turn HDR on for {display.friendly_name}: {exc}", "error"
+                    f"Could not turn HDR on for {display.friendly_name}: {exc}. Turn it on with "
+                    "Win + Alt + B or in Settings > Display, then try again.",
+                    "error",
                 )
                 return
             self._set_status(
@@ -2543,7 +2712,8 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 f"Calibration patterns need an HDR surface, which this display did not "
-                f"provide: {window.failure}",
+                f"provide: {window.failure}. Check that HDR is on for this display, then try "
+                "again.",
                 "error",
             )
             return
@@ -2637,7 +2807,11 @@ class MainWindow(FluentWidget):
         try:
             instruments = list_instruments(spotread)
         except MeterError as exc:
-            self._set_status(f"Could not ask Argyll what it can see: {exc}", "error")
+            self._set_status(
+                f"Could not ask Argyll what it can see: {exc}. Check that the meter is plugged "
+                "in and that no other calibration software is using it, then try again.",
+                "error",
+            )
             return None
         if not instruments:
             self._set_status(
@@ -2710,7 +2884,7 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 "Measuring needs an HDR surface, which this display did not provide: "
-                f"{window.failure}",
+                f"{window.failure}. Check that HDR is on for this display, then try again.",
                 "error",
             )
             return
@@ -2774,7 +2948,11 @@ class MainWindow(FluentWidget):
                 "message": message,
             })
             if message:
-                self._set_status(f"Sustained measurement stopped: {message}", "error")
+                self._set_status(
+                    f"Sustained measurement stopped: {message.rstrip('.')}. Nothing was changed; deal with "
+                    "that, then measure again.",
+                    "error",
+                )
             else:
                 self._set_status("Sustained measurement cancelled. Nothing was changed.", "ok")
             return
@@ -2879,7 +3057,7 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 f"Measuring needs an HDR surface, which this display did not provide: "
-                f"{window.failure}",
+                f"{window.failure}. Check that HDR is on for this display, then try again.",
                 "error",
             )
             return
@@ -2915,7 +3093,9 @@ class MainWindow(FluentWidget):
             window.close()
             self._measure_window = None
             self._set_status(
-                f"Could not show the placement target: {window.failure}", "error"
+                f"Could not show the placement target: {window.failure}. Check that HDR is on "
+                "for this display, then try again.",
+                "error",
             )
             return
 
@@ -3483,7 +3663,11 @@ class MainWindow(FluentWidget):
                 "message": message,
             })
             if message:
-                self._set_status(f"Measurement stopped: {message}", "error")
+                self._set_status(
+                    f"Measurement stopped: {message.rstrip('.')}. Nothing was changed; deal with that, then "
+                    "measure again.",
+                    "error",
+                )
             else:
                 self._set_status("Measurement cancelled. Nothing was changed.", "ok")
             return
@@ -3616,7 +3800,7 @@ class MainWindow(FluentWidget):
                 f"White measured {cct:,.0f}K, {error:.4f} from D65 in u'v'. The white "
                 f"balance was NOT updated: {' '.join(result.balance_refused)} Peak, "
                 "black and the greyscale were kept -- they do not depend on the "
-                "channels adding up"
+                "channels adding up. Measure again, with the meter flat and still on the screen"
             )
             level = "warning"
         elif result.verified:
@@ -4241,11 +4425,16 @@ class MainWindow(FluentWidget):
                 with QSignalBlocker(self.live_checkbox):
                     self.live_checkbox.setChecked(False)
                 self._set_status(
-                    f"Live update failed and Live Apply was switched off to avoid repeating it: {exc}",
+                    f"Live update failed and Live Apply was switched off to avoid repeating it: {exc}. "
+                    "Press Apply Edits to try again, and turn Live Apply back on once it works.",
                     "error",
                 )
             else:
-                self._set_status(f"{reason} failed for HDR: {exc}", "error")
+                self._set_status(
+                    f"{reason} failed for HDR: {exc}. Press Apply Edits to try again; if it keeps "
+                    "failing, restart the app.",
+                    "error",
+                )
             return False
 
         self._applied_signature = signature
@@ -4626,7 +4815,8 @@ class MainWindow(FluentWidget):
             except Exception as exc:
                 self._set_status(
                     f"Restore failed: Windows would not take {hdr} back as the HDR default "
-                    f"({exc}). Nothing else was changed.",
+                    f"({exc}). Nothing else was changed. Try Restore again, or pick it yourself "
+                    "in Settings > Display > Color profile.",
                     "error",
                 )
                 return
@@ -5004,7 +5194,11 @@ class MainWindow(FluentWidget):
         try:
             imported = import_profile(source, "HDR")
         except Exception as exc:
-            QMessageBox.critical(self, "Load Profile", f"Could not load the profile:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Load Profile",
+                f"Could not load the profile:\n\n{exc}\n\nCheck that it is an HDR .icc or .icm "
+                "profile, or pick another.",
+            )
             return
         imported.state.imported_profile = str(source)
         if not imported.state.base_profile:
@@ -5082,7 +5276,11 @@ class MainWindow(FluentWidget):
             path.write_bytes(build_profile("HDR", state, transform))
             self._set_status(f"Exported HDR profile to {path}", "ok")
         except Exception as exc:
-            QMessageBox.critical(self, "Export Profile", f"Could not export the profile:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Export Profile",
+                f"Could not export the profile:\n\n{exc}\n\nChoose another folder, for example "
+                "Documents, and try again.",
+            )
 
     # ----------------------------------------------------------------------------------
 
@@ -5109,6 +5307,7 @@ class MainWindow(FluentWidget):
         self.watchdog_timer.stop()
         self.gamma_runtime_timer.stop()
         self.state_save_timer.stop()
+        self.state_retry_timer.stop()
         if self._hotkey_listener is not None:
             self._hotkey_listener.close()
         self._save_state_now()
