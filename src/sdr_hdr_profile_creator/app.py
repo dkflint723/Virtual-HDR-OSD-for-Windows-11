@@ -352,6 +352,11 @@ class MainWindow(FluentWidget):
         self.state_save_timer.setInterval(900)
         self.state_save_timer.timeout.connect(self._save_state_now)
 
+        # Only runs while the settings file was locked at startup; see _retry_locked_state.
+        self.state_retry_timer = QTimer(self)
+        self.state_retry_timer.setInterval(3000)
+        self.state_retry_timer.timeout.connect(self._retry_locked_state)
+
         self.mode_timer = QTimer(self)
         self.mode_timer.setInterval(900)
         self.mode_timer.timeout.connect(self._poll_windows_mode)
@@ -394,6 +399,11 @@ class MainWindow(FluentWidget):
         self._sync_lock_switch()
         self.watchdog_timer.start()
         self._update_activity_bar()
+        # What the defaults looked like once the window settled, so a later retry can
+        # tell whether anything has changed them since.
+        self._state_at_start = self.state.to_dict()
+        if self._state_unopened:
+            self.state_retry_timer.start()
         # Last, so nothing said while the window was being built can overwrite it.
         if self._state_load_problem:
             self._set_status(self._state_load_problem, "warning")
@@ -407,6 +417,42 @@ class MainWindow(FluentWidget):
     def _load_last_state(self) -> ApplicationState:
         state, self._state_load_problem, self._state_unopened = persistence.load_state(STATE_PATH)
         return state
+
+    def _retry_locked_state(self) -> None:
+        """Load the settings file once it can be opened, if nothing has changed since.
+
+        The app started from defaults because the file was locked, and refuses to save
+        so those defaults never replace it. That refusal used to last the whole session.
+        Adopting the file now is safe only while the defaults are untouched; after an
+        edit either choice loses something, so the refusal stands and the user is told.
+        """
+        if not self._state_unopened:
+            self.state_retry_timer.stop()
+            return
+        state, problem, unopened = persistence.load_state(STATE_PATH, attempts=1)
+        if unopened:
+            return
+        self.state_retry_timer.stop()
+        if self.state.to_dict() != self._state_at_start:
+            self._set_status(
+                f"{STATE_PATH.name} can be opened now, but settings were changed after the "
+                "app started from defaults, so they are not saved over it. Restart the app "
+                "to load it.",
+                "warning",
+            )
+            return
+        self._state_unopened = False
+        self.state = state
+        if state.hdr.sdr_gamma_correction != "Off":
+            self._last_enabled_gamma_correction = state.hdr.sdr_gamma_correction
+        self._load_mode_into_controls()
+        with QSignalBlocker(self.live_checkbox):
+            self.live_checkbox.setChecked(self.state.live_mode)
+        self._refresh_displays()
+        self._set_status(
+            problem or f"Loaded your settings from {STATE_PATH.name} now that it can be opened.",
+            "warning" if problem else "ok",
+        )
 
     def _load_live_registry(self) -> dict[str, dict[str, str]]:
         return persistence.load_live_registry(LIVE_REGISTRY_PATH)
@@ -5241,6 +5287,7 @@ class MainWindow(FluentWidget):
         self.watchdog_timer.stop()
         self.gamma_runtime_timer.stop()
         self.state_save_timer.stop()
+        self.state_retry_timer.stop()
         if self._hotkey_listener is not None:
             self._hotkey_listener.close()
         self._save_state_now()
