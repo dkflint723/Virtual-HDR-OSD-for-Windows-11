@@ -21,7 +21,7 @@ from unittest import mock
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from PySide6.QtCore import QObject, QTimer, Signal
+    from PySide6.QtCore import QObject, QSize, QTimer, Signal
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     from sdr_hdr_profile_creator import app as app_module
@@ -208,6 +208,30 @@ class WindowTestCase(unittest.TestCase):
 
     def read_runtime(self) -> dict:
         return json.loads(app_module.GAMMA_HOTKEY_STATE_PATH.read_text(encoding="utf-8"))
+
+
+class WindowSizeTests(WindowTestCase):
+    """The window fits a 1080p screen at up to 150% scaling: about 1280 x 688 usable.
+
+    Width is not checked here. The offscreen platform these tests run on draws with
+    fallback fonts about 1.6 times as wide as Segoe UI, so its widths say nothing about
+    a real screen; measured on the Windows platform the layout needs about 1238."""
+
+    SMALLEST = (1280, 688)
+
+    def test_the_window_can_be_made_short_enough(self):
+        self.window.layout().activate()
+        self.assertLessEqual(self.window.minimumHeight(), self.SMALLEST[1])
+
+    def test_it_opens_inside_the_screen(self):
+        for available in ((1920, 1032), (1536, 824), self.SMALLEST):
+            with self.subTest(available=available):
+                size = app_module._opening_size(QSize(*available))
+                self.assertLessEqual(size.width(), available[0])
+                self.assertLessEqual(size.height(), available[1])
+
+    def test_a_large_screen_still_gets_the_full_size(self):
+        self.assertEqual(app_module.PREFERRED_SIZE, app_module._opening_size(QSize(3840, 2100)))
 
 
 class FixtureSafetyTests(WindowTestCase):
