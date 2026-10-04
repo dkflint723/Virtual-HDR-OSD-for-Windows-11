@@ -1648,7 +1648,11 @@ class MainWindow(FluentWidget):
             candidate = PACKAGE_ROOT.parents[1] / name
             path = candidate if candidate.is_file() else path
         if not path.is_file():
-            QMessageBox.critical(self, "Watchdog Settings", f"Watchdog script not found:\n{path}")
+            QMessageBox.critical(
+                self, "Watchdog Settings",
+                f"Watchdog script not found:\n{path}\n\nThis copy of the app is incomplete. "
+                "Download or unpack it again, then retry.",
+            )
             return
         # `start` detaches immediately and discards the installer's exit code and its
         # console output, so a failed install was indistinguishable from a successful
@@ -1665,7 +1669,10 @@ class MainWindow(FluentWidget):
                 creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
             )
         except Exception as exc:
-            QMessageBox.critical(self, "Watchdog Settings", f"Could not launch watchdog setup:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Watchdog Settings",
+                f"Could not launch watchdog setup:\n\n{exc}\n\nYou can run it yourself instead:\n{path}",
+            )
             return
         self._set_status(
             f"Running {name} in a separate window. Follow its prompts; the result is "
@@ -1862,7 +1869,11 @@ class MainWindow(FluentWidget):
         except Exception as exc:
             self.display_combo.clear()
             self._current_display_snapshot = None
-            self._set_status(f"Display detection failed: {exc}", "error")
+            self._set_status(
+                f"Display detection failed: {exc}. Press Refresh to try again; if it keeps "
+                "failing, restart the app.",
+                "error",
+            )
             return
 
         with QSignalBlocker(self.display_combo):
@@ -1878,7 +1889,11 @@ class MainWindow(FluentWidget):
 
         if not displays:
             self._current_display_snapshot = None
-            self._set_status("No active Windows displays were detected.", "error")
+            self._set_status(
+                "No active Windows displays were detected. Check that the display is connected "
+                "and switched on, then press Refresh.",
+                "error",
+            )
             return
 
         selected = self.display_combo.currentData()
@@ -2203,10 +2218,18 @@ class MainWindow(FluentWidget):
             try:
                 candidate = get_color_directory() / text
             except Exception:
-                self._set_status(f"Could not locate {text} in the Windows colour folder.", "error")
+                self._set_status(
+                    f"Could not locate {text} in the Windows colour folder. Pick another HDR "
+                    "profile, or use Import… to load it from a file.",
+                    "error",
+                )
                 return
         if not candidate.is_file():
-            self._set_status(f"{text} is no longer installed.", "error")
+            self._set_status(
+                f"{text} is no longer installed. Pick another HDR profile, or use Import… to "
+                "load it from a file.",
+                "error",
+            )
             return
         self._load_profile_from_path(candidate)
 
@@ -2220,7 +2243,11 @@ class MainWindow(FluentWidget):
         try:
             set_hdr_enabled(display, checked)
         except Exception as exc:
-            self._set_status(f"Could not turn HDR {'on' if checked else 'off'}: {exc}", "error")
+            self._set_status(
+                f"Could not turn HDR {'on' if checked else 'off'}: {exc}. Use Win + Alt + B, "
+                "or Settings > Display > Use HDR, instead.",
+                "error",
+            )
             with QSignalBlocker(self.hdr_switch):
                 self.hdr_switch.setChecked(display.current_mode == "HDR")
             return
@@ -2283,7 +2310,11 @@ class MainWindow(FluentWidget):
             active = reapply_existing_default_profile(display, "SDR", profile_name)
             self._set_status(f"{reason}: restored SDR profile {active}.", "ok")
         except Exception as exc:
-            self._set_status(f"{reason}: could not restore SDR profile {profile_name}: {exc}", "error")
+            self._set_status(
+                f"{reason}: could not restore SDR profile {profile_name}: {exc}. Set it in "
+                "Settings > Display > Color profile, or press Refresh to try again.",
+                "error",
+            )
 
     def _update_mode_badge(self, display: DisplayInfo) -> None:
         kind = display.advanced_color_kind
@@ -2522,7 +2553,11 @@ class MainWindow(FluentWidget):
         """
         display = self._selected_display()
         if display is None:
-            self._set_status("No display detected to calibrate.", "error")
+            self._set_status(
+                "No display detected to calibrate. Check that the display is connected, then "
+                "press Refresh.",
+                "error",
+            )
             return
 
         if display.current_mode != "HDR":
@@ -2532,7 +2567,9 @@ class MainWindow(FluentWidget):
                 set_hdr_enabled(display, True)
             except Exception as exc:
                 self._set_status(
-                    f"Could not turn HDR on for {display.friendly_name}: {exc}", "error"
+                    f"Could not turn HDR on for {display.friendly_name}: {exc}. Turn it on with "
+                    "Win + Alt + B or in Settings > Display, then try again.",
+                    "error",
                 )
                 return
             self._set_status(
@@ -2655,7 +2692,8 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 f"Calibration patterns need an HDR surface, which this display did not "
-                f"provide: {window.failure}",
+                f"provide: {window.failure}. Check that HDR is on for this display, then try "
+                "again.",
                 "error",
             )
             return
@@ -2749,7 +2787,11 @@ class MainWindow(FluentWidget):
         try:
             instruments = list_instruments(spotread)
         except MeterError as exc:
-            self._set_status(f"Could not ask Argyll what it can see: {exc}", "error")
+            self._set_status(
+                f"Could not ask Argyll what it can see: {exc}. Check that the meter is plugged "
+                "in and that no other calibration software is using it, then try again.",
+                "error",
+            )
             return None
         if not instruments:
             self._set_status(
@@ -2822,7 +2864,7 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 "Measuring needs an HDR surface, which this display did not provide: "
-                f"{window.failure}",
+                f"{window.failure}. Check that HDR is on for this display, then try again.",
                 "error",
             )
             return
@@ -2886,7 +2928,11 @@ class MainWindow(FluentWidget):
                 "message": message,
             })
             if message:
-                self._set_status(f"Sustained measurement stopped: {message}", "error")
+                self._set_status(
+                    f"Sustained measurement stopped: {message.rstrip('.')}. Nothing was changed; deal with "
+                    "that, then measure again.",
+                    "error",
+                )
             else:
                 self._set_status("Sustained measurement cancelled. Nothing was changed.", "ok")
             return
@@ -2991,7 +3037,7 @@ class MainWindow(FluentWidget):
             window.close()
             self._set_status(
                 f"Measuring needs an HDR surface, which this display did not provide: "
-                f"{window.failure}",
+                f"{window.failure}. Check that HDR is on for this display, then try again.",
                 "error",
             )
             return
@@ -3027,7 +3073,9 @@ class MainWindow(FluentWidget):
             window.close()
             self._measure_window = None
             self._set_status(
-                f"Could not show the placement target: {window.failure}", "error"
+                f"Could not show the placement target: {window.failure}. Check that HDR is on "
+                "for this display, then try again.",
+                "error",
             )
             return
 
@@ -3595,7 +3643,11 @@ class MainWindow(FluentWidget):
                 "message": message,
             })
             if message:
-                self._set_status(f"Measurement stopped: {message}", "error")
+                self._set_status(
+                    f"Measurement stopped: {message.rstrip('.')}. Nothing was changed; deal with that, then "
+                    "measure again.",
+                    "error",
+                )
             else:
                 self._set_status("Measurement cancelled. Nothing was changed.", "ok")
             return
@@ -3728,7 +3780,7 @@ class MainWindow(FluentWidget):
                 f"White measured {cct:,.0f}K, {error:.4f} from D65 in u'v'. The white "
                 f"balance was NOT updated: {' '.join(result.balance_refused)} Peak, "
                 "black and the greyscale were kept -- they do not depend on the "
-                "channels adding up"
+                "channels adding up. Measure again, with the meter flat and still on the screen"
             )
             level = "warning"
         elif result.verified:
@@ -4353,11 +4405,16 @@ class MainWindow(FluentWidget):
                 with QSignalBlocker(self.live_checkbox):
                     self.live_checkbox.setChecked(False)
                 self._set_status(
-                    f"Live update failed and Live Apply was switched off to avoid repeating it: {exc}",
+                    f"Live update failed and Live Apply was switched off to avoid repeating it: {exc}. "
+                    "Press Apply Edits to try again, and turn Live Apply back on once it works.",
                     "error",
                 )
             else:
-                self._set_status(f"{reason} failed for HDR: {exc}", "error")
+                self._set_status(
+                    f"{reason} failed for HDR: {exc}. Press Apply Edits to try again; if it keeps "
+                    "failing, restart the app.",
+                    "error",
+                )
             return False
 
         self._applied_signature = signature
@@ -4738,7 +4795,8 @@ class MainWindow(FluentWidget):
             except Exception as exc:
                 self._set_status(
                     f"Restore failed: Windows would not take {hdr} back as the HDR default "
-                    f"({exc}). Nothing else was changed.",
+                    f"({exc}). Nothing else was changed. Try Restore again, or pick it yourself "
+                    "in Settings > Display > Color profile.",
                     "error",
                 )
                 return
@@ -5116,7 +5174,11 @@ class MainWindow(FluentWidget):
         try:
             imported = import_profile(source, "HDR")
         except Exception as exc:
-            QMessageBox.critical(self, "Load Profile", f"Could not load the profile:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Load Profile",
+                f"Could not load the profile:\n\n{exc}\n\nCheck that it is an HDR .icc or .icm "
+                "profile, or pick another.",
+            )
             return
         imported.state.imported_profile = str(source)
         if not imported.state.base_profile:
@@ -5194,7 +5256,11 @@ class MainWindow(FluentWidget):
             path.write_bytes(build_profile("HDR", state, transform))
             self._set_status(f"Exported HDR profile to {path}", "ok")
         except Exception as exc:
-            QMessageBox.critical(self, "Export Profile", f"Could not export the profile:\n\n{exc}")
+            QMessageBox.critical(
+                self, "Export Profile",
+                f"Could not export the profile:\n\n{exc}\n\nChoose another folder, for example "
+                "Documents, and try again.",
+            )
 
     # ----------------------------------------------------------------------------------
 
