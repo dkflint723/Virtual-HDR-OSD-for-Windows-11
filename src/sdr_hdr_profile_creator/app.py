@@ -319,6 +319,9 @@ class MainWindow(FluentWidget):
         self.watchdog_timer.timeout.connect(self._sync_lock_switch)
 
         self._build_ui()
+        # The window's minimum is its layout's, which Qt only applies once the layout
+        # activates -- normally at the first show. Until then minimumWidth() read 0.
+        self.layout().activate()
         self._load_mode_into_controls()
         # The switch and the state used to agree by accident, because the state was
         # forced off a few lines above. Now that it is restored, the switch has to be

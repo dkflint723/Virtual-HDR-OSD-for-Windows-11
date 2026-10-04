@@ -4468,6 +4468,11 @@ class ControlRowFitTests(WindowTestCase):
 
     If this ever blocks a control you want to add, re-measure with
     QT_QPA_PLATFORM=windows before splitting a row.
+
+    Since October 2026 the window declares no fixed minimum: minimumWidth() is the
+    layout's own, which includes these rows, so for the two rows of buttons this holds
+    by construction (a button's minimum is its size hint). It still catches a control
+    whose minimum is set below its size hint, which is what lets Qt elide it.
     """
 
     SPACING = 12
