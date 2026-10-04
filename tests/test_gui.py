@@ -272,6 +272,12 @@ class ComboKeyboardTests(WindowTestCase):
 
         from PySide6.QtTest import QTest
 
+        # A fresh fixture is a first run, and 400 ms after opening, a first run shows the
+        # Getting Started guide as a modal dialog. Inside a full run these tests process
+        # events long enough to reach it, and nothing would ever close it.
+        patcher = mock.patch.object(app_module.GuideDialog, "exec", return_value=0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.window.show()
         self.addCleanup(self.window.hide)
         # Let the show finish. An activation still queued from it closes the first
