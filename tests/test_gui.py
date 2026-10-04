@@ -548,6 +548,51 @@ class UnreadableStateFileTests(WindowTestCase):
         self.assertEqual(original, app_module.STATE_PATH.read_bytes())
         self.assertIn("will not save over it", self.window._state_load_problem)
 
+    def start_locked(self) -> bytes:
+        """The window as it is after starting while the settings file was locked."""
+        app_module.STATE_PATH.write_text(json.dumps({
+            "hdr": {"gamma": 2.4},
+            "display_bindings": {"K": {"sdr_profile": "Mine.icm"}},
+        }), encoding="utf-8")
+        real = Path.read_text
+
+        def locked(path, *args, **kwargs):
+            if path == app_module.STATE_PATH:
+                raise PermissionError(32, "in use")
+            return real(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "read_text", locked), \
+             mock.patch.object(app_module.persistence.time, "sleep"):
+            self.window.state = self.window._load_last_state()
+        self.assertTrue(self.window._state_unopened)
+        self.window._state_at_start = self.window.state.to_dict()
+        return app_module.STATE_PATH.read_bytes()
+
+    def test_a_locked_settings_file_is_loaded_once_it_opens(self):
+        """The refusal to save used to last the whole session, so the user's settings
+        stayed out of reach until a restart, and nothing they did was kept."""
+        self.start_locked()
+        self.window._retry_locked_state()
+        self.assertFalse(self.window._state_unopened)
+        self.assertAlmostEqual(2.4, self.window.state.hdr.gamma)
+        self.assertEqual("Mine.icm", self.window.state.display_bindings["K"].sdr_profile)
+        self.assertIn("Loaded your settings", self.window.status_label.text())
+        self.window.state.hdr.gamma = 2.5
+        self.window._save_state_now()
+        saved = json.loads(app_module.STATE_PATH.read_text(encoding="utf-8"))
+        self.assertAlmostEqual(2.5, saved["hdr"]["gamma"])
+        self.assertIn("K", saved["display_bindings"])
+
+    def test_a_locked_settings_file_is_not_adopted_after_an_edit(self):
+        """Adopting it would throw away the edit; saving would throw away the file."""
+        original = self.start_locked()
+        self.window.state.hdr.gamma = 2.6
+        self.window._retry_locked_state()
+        self.assertTrue(self.window._state_unopened)
+        self.assertIn("Restart the app", self.window.status_label.text())
+        self.window._save_state_now()
+        self.assertEqual(original, app_module.STATE_PATH.read_bytes())
+
 
 class RestoreWindowsProfileTests(WindowTestCase):
     """One control that puts back what Windows had, and keeps it there until Apply.

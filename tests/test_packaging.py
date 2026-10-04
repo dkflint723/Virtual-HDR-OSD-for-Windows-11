@@ -344,6 +344,15 @@ class WatchdogPackagingTests(unittest.TestCase):
         )
         self.assertIn("$refreshed[0]", forced[0])
 
+    def test_each_pass_checks_each_display_once(self):
+        """The five-second "fallback reassertion" repeated the per-pass call verbatim
+        within the same pass once it stopped forcing, so it was removed."""
+        payload = self.payload()
+        self.assertEqual(
+            1, payload.count("Restore-SavedProfiles -CurrentDisplay $current -SavedDisplay $saved"),
+        )
+        self.assertNotIn("$lastForced", payload)
+
     def test_the_gamma_state_is_read_only_when_it_changes(self):
         """Also not the leak fix, and also worth keeping: the file changes when the
         user switches the correction, not 75 times a minute, so parsing it on every
