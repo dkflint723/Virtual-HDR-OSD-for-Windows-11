@@ -49,23 +49,42 @@ def write_json_atomic(path: Path, payload: object) -> bool:
     return False
 
 
-def load_state(path: Path) -> tuple[ApplicationState, str, bool]:
+def load_state(path: Path, attempts: int = 4) -> tuple[ApplicationState, str, bool]:
     """The saved editor state, a problem to show the user ("" if none), and whether the
-    file was there but could not be opened -- in which case nothing may be saved over it."""
+    file was there but could not be opened -- in which case nothing may be saved over it.
+
+    A lock is retried a few times first: at sign-in it is usually a security scan that
+    lets go within a moment. The window retries later with ``attempts=1``, so it does
+    not stall the UI while the file stays locked.
+    """
     if not path.is_file():
         return ApplicationState.neutral(), "", False
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except OSError:
+    text: str | None = None
+    undecodable = False
+    for attempt in range(1, attempts + 1):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+            break
+        except OSError:
+            if attempt < attempts:
+                time.sleep(0.04 * attempt)
+        except ValueError:
+            # Opened, but not UTF-8: corrupt, not locked.
+            undecodable = True
+            break
+    if text is None and not undecodable:
         # Unreadable right now is not the same as corrupt -- another process can
         # simply have it open -- so the file is left exactly where it is. That
         # includes not saving the defaults over it later in this session.
         return ApplicationState.neutral(), (
             f"{path.name} could not be opened, so the app started from defaults "
-            "and will not save over it. Close whatever has it open, then restart the app."
+            "and will not save over it. Close whatever has it open: the app loads it "
+            "as soon as it can, as long as nothing has been changed in the meantime."
         ), True
+    try:
+        payload = json.loads(text) if text is not None else None
     except ValueError:
-        # Not UTF-8, or not JSON. JSONDecodeError is a ValueError.
+        # Not JSON. JSONDecodeError is a ValueError.
         payload = None
     if isinstance(payload, dict):
         try:
