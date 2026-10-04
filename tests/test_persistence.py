@@ -68,6 +68,24 @@ class StateLoadTests(TempDirTestCase):
         self.assertIn("will not save over it", problem)
         self.assertTrue(path.exists())
 
+    def test_a_lock_that_lets_go_at_startup_is_waited_out(self):
+        """At sign-in the lock is usually a scan that releases within a moment."""
+        path = self.dir / "last_gui_state.json"
+        path.write_text(json.dumps({"hdr": {"gamma": 2.4}}), encoding="utf-8")
+        reads = iter([PermissionError(32, "in use"), json.dumps({"hdr": {"gamma": 2.4}})])
+
+        def read_text(_self, encoding=None):
+            value = next(reads)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        with mock.patch.object(Path, "read_text", read_text), \
+             mock.patch.object(persistence.time, "sleep"):
+            state, problem, unopened = persistence.load_state(path)
+        self.assertAlmostEqual(2.4, state.hdr.gamma)
+        self.assertEqual(("", False), (problem, unopened))
+
     def test_a_readable_file_loads(self):
         path = self.dir / "last_gui_state.json"
         path.write_text(json.dumps({"hdr": {"gamma": 2.4}}), encoding="utf-8")
