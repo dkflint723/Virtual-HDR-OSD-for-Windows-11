@@ -105,6 +105,15 @@ class SliderControl(QWidget):
         self.reset_button.setToolTip(f"Reset {spec.title} to {spec.default:g}{spec.suffix}")
         self.reset_button.clicked.connect(lambda: self.set_value(spec.default, emit=True))
 
+        # A screen reader names a control from its accessible name, not its tooltip, and
+        # none of these had one: the slider and the field were announced as nothing, and
+        # every row's button as just "Reset".
+        self.slider.setAccessibleName(spec.title)
+        self.slider.setAccessibleDescription(spec.tooltip)
+        self.value_edit.setAccessibleName(f"{spec.title} exact value")
+        self.value_edit.setAccessibleDescription(spec.tooltip)
+        self.reset_button.setAccessibleName(f"Reset {spec.title}")
+
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(10)
